@@ -163,6 +163,14 @@ impl App {
 
         match surface.buffer_mut() {
             Ok(mut buffer) => {
+                if buffer.len() != renderer.pixels().len() {
+                    tracing::warn!(
+                        surface = buffer.len(),
+                        renderer = renderer.pixels().len(),
+                        "surface buffer size mismatch; skipping frame"
+                    );
+                    return;
+                }
                 buffer.copy_from_slice(renderer.pixels());
                 if let Err(err) = buffer.present() {
                     tracing::warn!(%err, "present failed");
@@ -224,6 +232,9 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                if size.width == 0 || size.height == 0 {
+                    return;
+                }
                 self.resize_surface(size.width, size.height);
                 self.resize_grid(size.width, size.height);
                 if let Some(window) = &self.window {
