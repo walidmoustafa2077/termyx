@@ -69,7 +69,24 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        let fonts = match crate::fonts::FontSet::load(
+            &self.config.font.family,
+            self.config.font.size,
+            self.config.font.line_height,
+        ) {
+            Ok(fonts) => fonts,
+            Err(error) => {
+                rfd::MessageDialog::new()
+                    .set_title("Termyx")
+                    .set_description(format!("Could not load a font: {error}"))
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                event_loop.exit();
+                return;
+            }
+        };
         let mut renderer = Renderer::new(
+            fonts,
             Theme::from_config(&self.config.theme),
             self.config.window.padding,
         );
@@ -106,6 +123,11 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 };
                 renderer.draw();
+                let padding = renderer.padding() as f32;
+                let baseline = padding + renderer.fonts.ascent;
+                let foreground = renderer.theme.foreground;
+                renderer.draw_text(padding, baseline, "Hello, Termyx", foreground);
+                renderer.sync();
                 let Ok(mut buffer) = surface.buffer_mut() else {
                     return;
                 };
