@@ -433,11 +433,24 @@ mod tests {
     }
 
     #[test]
-    fn nul_cell_is_sanitized_to_space() {
+    fn nul_byte_leaves_blank_cell() {
         let mut term = Terminal::new(20, 5, 1_000);
         term.feed(b"\0");
         let snapshot = term.snapshot();
         assert_eq!(snapshot.lines[0].cells[0].text, " ");
         assert_eq!(snapshot.lines[0].cells[0].width, 1);
+    }
+
+    #[test]
+    fn convert_cell_sanitizes_nul_to_space() {
+        // vte never stores a NUL in a cell, so drive convert_cell directly to keep
+        // the `cell.c == '\0'` sanitisation covered.
+        let cell = TermCell {
+            c: '\0',
+            ..TermCell::default()
+        };
+        let converted = convert_cell(&cell);
+        assert_eq!(converted.text, " ");
+        assert_eq!(converted.width, 1);
     }
 }
