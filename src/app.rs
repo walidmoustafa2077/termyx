@@ -35,6 +35,9 @@ pub struct App {
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
+    // Sub-row pixel wheel deltas carried between events so touchpads that emit
+    // fractions of a cell per event still scroll.
+    wheel_remainder: f32,
     cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
@@ -54,6 +57,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
+            wheel_remainder: 0.0,
             cursor_pos: (0.0, 0.0),
             cols: 80,
             rows: 24,
@@ -135,11 +139,13 @@ impl App {
         renderer.resize(width, height);
     }
 
-    fn resize_grid(&mut self, width: u32, height: u32) {
+    /// Rebuilds the grid for the new surface size. Returns whether the grid
+    /// actually changed and therefore reflowed.
+    fn resize_grid(&mut self, width: u32, height: u32) -> bool {
         let (Some(renderer), Some(terminal), Some(pty)) =
             (&self.renderer, &mut self.terminal, &mut self.pty)
         else {
-            return;
+            return false;
         };
         let (cols, rows) = grid_size(
             width,
@@ -149,7 +155,7 @@ impl App {
             renderer.padding(),
         );
         if cols == self.cols && rows == self.rows {
-            return;
+            return false;
         }
         terminal.resize(cols, rows);
         if let Err(err) = pty.resize(cols as u16, rows as u16) {
@@ -157,6 +163,7 @@ impl App {
         }
         self.cols = cols;
         self.rows = rows;
+        true
     }
 
     fn render(&mut self) {
@@ -243,15 +250,20 @@ impl App {
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
         let cell_h = match &self.renderer {
-            Some(renderer) => renderer.fonts().cell_h as f64,
+            Some(renderer) => renderer.fonts().cell_h as f32,
             None => return,
         };
-        let lines = wheel_lines(delta, cell_h);
+        let lines = wheel_lines(delta, cell_h, &mut self.wheel_remainder);
         if lines == 0 {
             return;
         }
-        if let Some(terminal) = &mut self.terminal {
-            terminal.scroll_display(lines);
+        let Some(terminal) = &mut self.terminal else {
+            return;
+        };
+        let before = terminal.display_offset();
+        terminal.scroll_display(lines);
+        if terminal.display_offset() == before {
+            return;
         }
         // Selection positions are logical viewport offsets; scrolling makes them stale.
         self.selection = None;
@@ -384,9 +396,10 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.resize_surface(size.width, size.height);
-                self.resize_grid(size.width, size.height);
-                // Reflow invalidates logical selection positions.
-                self.selection = None;
+                if self.resize_grid(size.width, size.height) {
+                    // Reflow invalidates logical selection positions.
+                    self.selection = None;
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -463,12 +476,15 @@ fn cell_at(
     (row, visual)
 }
 
-fn wheel_lines(delta: MouseScrollDelta, cell_h: f64) -> i32 {
-    // Guard the pixel path against a zero-height cell.
-    let cell_h = cell_h.max(1.0);
+fn wheel_lines(delta: MouseScrollDelta, cell_h: f32, remainder: &mut f32) -> i32 {
     match delta {
         MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
-        MouseScrollDelta::PixelDelta(position) => (position.y / cell_h).round() as i32,
+        MouseScrollDelta::PixelDelta(position) => {
+            *remainder += position.y as f32 / cell_h.max(1.0);
+            let lines = remainder.trunc();
+            *remainder -= lines;
+            lines as i32
+        }
     }
 }
 
@@ -513,15 +529,20 @@ mod tests {
     fn wheel_lines_converts_scroll_to_rows() {
         use winit::dpi::PhysicalPosition;
 
-        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 20.0), 3);
+        let mut remainder = 0.0;
         assert_eq!(
-            wheel_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0),
+            wheel_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 20.0, &mut remainder),
+            3
+        );
+        assert_eq!(
+            wheel_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0, &mut remainder),
             -3
         );
         assert_eq!(
             wheel_lines(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0)),
-                20.0
+                20.0,
+                &mut remainder
             ),
             2
         );
@@ -529,9 +550,25 @@ mod tests {
         assert_eq!(
             wheel_lines(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0)),
-                0.0
+                0.0,
+                &mut remainder
             ),
             40
         );
+    }
+
+    #[test]
+    fn wheel_lines_accumulates_fractional_pixel_deltas() {
+        use winit::dpi::PhysicalPosition;
+
+        // A quarter cell per event: three events stay below one row, the fourth
+        // completes it and leaves no remainder.
+        let delta = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 5.0));
+        let mut remainder = 0.0;
+        for _ in 0..3 {
+            assert_eq!(wheel_lines(delta, 20.0, &mut remainder), 0);
+        }
+        assert_eq!(wheel_lines(delta, 20.0, &mut remainder), 1);
+        assert_eq!(remainder, 0.0);
     }
 }

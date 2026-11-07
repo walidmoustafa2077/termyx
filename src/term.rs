@@ -169,6 +169,10 @@ impl Terminal {
         *self.term.mode()
     }
 
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -401,6 +405,7 @@ mod tests {
             term.feed(format!("line{index}\r\n").as_bytes());
         }
         term.scroll_display(2);
+        assert_eq!(term.display_offset(), 2);
         assert_eq!(term.snapshot().display_offset, 2);
     }
 
