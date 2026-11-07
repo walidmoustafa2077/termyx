@@ -7,7 +7,7 @@ use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -18,7 +18,8 @@ use crate::fonts::FontSet;
 use crate::input::{self, KeyInput, Mods};
 use crate::pty::PtySession;
 use crate::render::Renderer;
-use crate::term::Terminal;
+use crate::selection::Selection;
+use crate::term::{LogicalPos, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
 
@@ -31,6 +32,9 @@ pub struct App {
     terminal: Option<Terminal>,
     pty: Option<PtySession>,
     modifiers: ModifiersState,
+    selection: Option<Selection>,
+    mouse_down: bool,
+    cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
 }
@@ -46,6 +50,9 @@ impl App {
             terminal: None,
             pty: None,
             modifiers: ModifiersState::empty(),
+            selection: None,
+            mouse_down: false,
+            cursor_pos: (0.0, 0.0),
             cols: 80,
             rows: 24,
         }
@@ -158,7 +165,7 @@ impl App {
         };
         let snapshot = terminal.snapshot();
         let maps = vec![VisualMap::identity(snapshot.cols); snapshot.rows];
-        renderer.draw(&snapshot, &maps);
+        renderer.draw(&snapshot, &maps, self.selection.as_ref());
         renderer.sync();
 
         match surface.buffer_mut() {
@@ -181,6 +188,21 @@ impl App {
     }
 
     fn on_key(&mut self, event: KeyEvent) {
+        if self.modifiers.control_key() && self.modifiers.shift_key() {
+            if let Key::Character(text) = &event.logical_key {
+                match text.as_str() {
+                    "c" | "C" => {
+                        self.copy_selection();
+                        return;
+                    }
+                    "v" | "V" => {
+                        self.paste_clipboard();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let Some(key) = map_key(&event.logical_key) else {
             return;
         };
@@ -192,6 +214,91 @@ impl App {
         let Some(bytes) = input::encode(key, mods_from(self.modifiers), mode) else {
             return;
         };
+        if let Some(pty) = &mut self.pty {
+            if let Err(err) = pty.write(&bytes) {
+                tracing::warn!(%err, "pty write failed");
+            }
+        }
+    }
+
+    fn on_cursor_moved(&mut self, x: f64, y: f64) {
+        self.cursor_pos = (x, y);
+        if !self.mouse_down {
+            return;
+        }
+        let Some(position) = self.pos_at(x, y) else {
+            return;
+        };
+        if let Some(selection) = &mut self.selection {
+            selection.update(position);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn on_mouse(&mut self, state: ElementState) {
+        match state {
+            ElementState::Pressed => {
+                let Some(position) = self.pos_at(self.cursor_pos.0, self.cursor_pos.1) else {
+                    return;
+                };
+                self.selection = Some(Selection::new(position));
+                self.mouse_down = true;
+            }
+            ElementState::Released => self.mouse_down = false,
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn pos_at(&self, x: f64, y: f64) -> Option<LogicalPos> {
+        let renderer = self.renderer.as_ref()?;
+        let (row, visual) = cell_at(
+            x,
+            y,
+            renderer.padding() as f64,
+            renderer.fonts().cell_w as f64,
+            renderer.fonts().cell_h as f64,
+            self.cols,
+            self.rows,
+        );
+        let map = VisualMap::identity(self.cols);
+        Some(LogicalPos {
+            row,
+            col: map.logical_at(visual),
+        })
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        let text = selection.to_text(&terminal.snapshot(), self.config.selection.trim_trailing);
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(%err, "copy failed"),
+        }
+    }
+
+    fn paste_clipboard(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!(%err, "paste failed");
+                return;
+            }
+        };
+        let bracketed = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.mode().contains(TermMode::BRACKETED_PASTE))
+            .unwrap_or(false);
+        let bytes = input::paste(&text, bracketed);
         if let Some(pty) = &mut self.pty {
             if let Err(err) = pty.write(&bytes) {
                 tracing::warn!(%err, "pty write failed");
@@ -243,6 +350,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.on_cursor_moved(position.x, position.y)
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => self.on_mouse(state),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.on_key(event)
             }
@@ -288,6 +403,20 @@ fn mods_from(modifiers: ModifiersState) -> Mods {
     }
 }
 
+fn cell_at(
+    x: f64,
+    y: f64,
+    padding: f64,
+    cell_w: f64,
+    cell_h: f64,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize) {
+    let visual = (((x - padding) / cell_w).floor() as isize).clamp(0, cols as isize - 1) as usize;
+    let row = (((y - padding) / cell_h).floor() as isize).clamp(0, rows as isize - 1) as usize;
+    (row, visual)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +442,15 @@ mod tests {
         let mods = mods_from(ModifiersState::CONTROL | ModifiersState::ALT);
         assert!(mods.ctrl);
         assert!(mods.alt);
+    }
+
+    #[test]
+    fn cell_at_maps_pixels_to_grid_cells() {
+        assert_eq!(cell_at(4.0, 4.0, 4.0, 10.0, 20.0, 80, 24), (0, 0));
+        assert_eq!(cell_at(13.0, 24.0, 4.0, 10.0, 20.0, 80, 24), (1, 0));
+        assert_eq!(
+            cell_at(10_000.0, 10_000.0, 4.0, 10.0, 20.0, 80, 24),
+            (23, 79)
+        );
     }
 }

@@ -31,7 +31,6 @@ impl VisualMap {
     }
 
     /// Logical cell at a visual column. Clamps to the last cell.
-    #[allow(dead_code)] // Used by mouse hit-testing in Task 10.
     pub fn logical_of(&self, visual: usize) -> usize {
         self.visual_to_logical
             .get(visual)
@@ -60,7 +59,6 @@ impl VisualMap {
     }
 
     /// Logical cell under a visual column (mouse hit-testing).
-    #[allow(dead_code)] // Used by mouse hit-testing in Task 10.
     pub fn logical_at(&self, visual: usize) -> usize {
         self.logical_of(visual)
     }

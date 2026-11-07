@@ -50,7 +50,6 @@ pub struct CursorState {
     pub affinity: Affinity,
 }
 
-#[allow(dead_code)] // Consumed by mouse selection in Task 10.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalPos {
     pub row: usize,

@@ -31,9 +31,6 @@ impl Rgb {
     }
 }
 
-// The full palette is parsed now; selection arrives in Task 10. Remove this
-// allowance once every field has a consumer.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub background: Rgb,

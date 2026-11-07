@@ -78,7 +78,6 @@ fn cursor_key(final_byte: u8, mode: TermMode) -> Vec<u8> {
 }
 
 /// Encode pasted text, optionally using xterm bracketed paste.
-#[allow(dead_code)] // Wired into the clipboard path in Task 10.
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
         return text.as_bytes().to_vec();

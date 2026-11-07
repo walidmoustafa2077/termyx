@@ -6,6 +6,7 @@ mod glyph_cache;
 use tiny_skia::Pixmap;
 
 use crate::fonts::FontSet;
+use crate::selection::Selection;
 use crate::term::{Color, GridSnapshot};
 use crate::theme::{Rgb, Theme};
 use crate::visual::VisualMap;
@@ -43,7 +44,12 @@ impl Renderer {
         self.sync();
     }
 
-    pub fn draw(&mut self, snapshot: &GridSnapshot, maps: &[VisualMap]) {
+    pub fn draw(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        selection: Option<&Selection>,
+    ) {
         self.draw_background();
 
         let cell_w = self.fonts.cell_w as f32;
@@ -61,6 +67,10 @@ impl Renderer {
                 let x = padding + map.visual_of(logical) as f32 * cell_w;
                 if let Some(bg) = cell.style.bg {
                     let color = self.resolve(bg);
+                    self.fill_rect(x, y, cell_w, cell_h, color);
+                }
+                if selection.is_some_and(|selection| selection.contains(row, logical)) {
+                    let color = self.theme.selection;
                     self.fill_rect(x, y, cell_w, cell_h, color);
                 }
                 if cell.width > 0 && !cell.text.is_empty() {
