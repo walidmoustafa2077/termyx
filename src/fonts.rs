@@ -15,8 +15,6 @@ pub struct FontSet {
     pub font: FontVec,
     pub size_px: f32,
     pub cell_w: u32,
-    // Grid row layout arrives in Task 6; until then only `cell_w` is needed.
-    #[allow(dead_code)]
     pub cell_h: u32,
     pub ascent: f32,
     // No Phase 1 consumer; kept only because the published `FontSet`

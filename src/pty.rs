@@ -23,7 +23,6 @@ pub struct PtySession {
 
 impl PtySession {
     /// Spawns the configured shell and forwards its output through `proxy`.
-    #[allow(dead_code)] // Wired into the event loop in Task 9.
     pub fn spawn(
         config: &ShellConfig,
         cols: u16,
@@ -38,7 +37,6 @@ impl PtySession {
     /// Spawns the configured shell and forwards output chunks to `on_output`.
     ///
     /// The reader thread owns the callback and exits when the PTY closes.
-    #[allow(dead_code)] // Used by the PTY test and by Task 9.
     pub fn spawn_with<F>(config: &ShellConfig, cols: u16, rows: u16, on_output: F) -> Result<Self>
     where
         F: Fn(Vec<u8>) + Send + 'static,
@@ -87,7 +85,6 @@ impl PtySession {
     }
 
     /// Writes keyboard input bytes to the shell in logical order.
-    #[allow(dead_code)] // Wired into keyboard input in Task 9.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write_all(bytes)?;
         self.writer.flush()?;
@@ -95,7 +92,6 @@ impl PtySession {
     }
 
     /// Tells the shell that the visible terminal area changed size.
-    #[allow(dead_code)] // Wired into window resize handling in Task 9.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         self.master.resize(PtySize {
             rows,

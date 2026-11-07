@@ -1,6 +1,4 @@
 //! Terminal grid model and VT state.
-// Remove when Task 9 wires Terminal into App.
-#![allow(dead_code)]
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -39,6 +37,9 @@ pub struct RowSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Affinity {
     Before,
+    // Phase 1 snapshots always produce `Before`; bidi run boundaries in
+    // Phase 2 produce `After`.
+    #[allow(dead_code)]
     After,
 }
 
@@ -49,6 +50,7 @@ pub struct CursorState {
     pub affinity: Affinity,
 }
 
+#[allow(dead_code)] // Consumed by mouse selection in Task 10.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalPos {
     pub row: usize,
@@ -168,6 +170,7 @@ impl Terminal {
         *self.term.mode()
     }
 
+    #[allow(dead_code)] // Driven by wheel scrolling in Task 11.
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }

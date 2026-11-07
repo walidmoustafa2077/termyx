@@ -6,7 +6,9 @@ mod glyph_cache;
 use tiny_skia::Pixmap;
 
 use crate::fonts::FontSet;
+use crate::term::{Color, GridSnapshot};
 use crate::theme::{Rgb, Theme};
+use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
 
@@ -41,8 +43,79 @@ impl Renderer {
         self.sync();
     }
 
-    pub fn draw(&mut self) {
-        self.pixmap.fill(self.theme.background.to_tiny());
+    pub fn draw(&mut self, snapshot: &GridSnapshot, maps: &[VisualMap]) {
+        self.draw_background();
+
+        let cell_w = self.fonts.cell_w as f32;
+        let cell_h = self.fonts.cell_h as f32;
+        let ascent = self.fonts.ascent;
+        let padding = self.padding as f32;
+        let cursor_color = self.theme.cursor;
+
+        for (row, line) in snapshot.lines.iter().enumerate() {
+            let Some(map) = maps.get(row) else {
+                continue;
+            };
+            let y = padding + row as f32 * cell_h;
+            for (logical, cell) in line.cells.iter().enumerate() {
+                let x = padding + map.visual_of(logical) as f32 * cell_w;
+                if let Some(bg) = cell.style.bg {
+                    let color = self.resolve(bg);
+                    self.fill_rect(x, y, cell_w, cell_h, color);
+                }
+                if cell.width > 0 && !cell.text.is_empty() {
+                    let color = self.resolve(cell.style.fg);
+                    self.draw_text(x, y + ascent, &cell.text, color);
+                }
+            }
+        }
+
+        if snapshot.display_offset == 0 {
+            if let Some(map) = maps.get(snapshot.cursor.row) {
+                let visual = map.cursor_visual(&snapshot.cursor);
+                let x = padding + visual as f32 * cell_w;
+                let y = padding + snapshot.cursor.row as f32 * cell_h;
+                self.fill_rect(x, y, 2.0, cell_h, cursor_color);
+            }
+        }
+    }
+
+    fn draw_background(&mut self) {
+        let width = self.pixmap.width() as f32;
+        let height = self.pixmap.height() as f32;
+        let color = self.theme.background;
+        self.fill_rect(0.0, 0.0, width, height, color);
+    }
+
+    fn resolve(&self, color: Color) -> Rgb {
+        match color {
+            Color::Default => self.theme.foreground,
+            Color::Indexed(index) => self.theme.indexed(index),
+            Color::Rgb(r, g, b) => Rgb::new(r, g, b),
+        }
+    }
+
+    fn fill_rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Rgb) {
+        let pixmap_w = self.pixmap.width() as i32;
+        let pixmap_h = self.pixmap.height() as i32;
+        let x0 = (x.round() as i32).clamp(0, pixmap_w);
+        let y0 = (y.round() as i32).clamp(0, pixmap_h);
+        let x1 = ((x + width).round() as i32).clamp(0, pixmap_w);
+        let y1 = ((y + height).round() as i32).clamp(0, pixmap_h);
+        let data = self.pixmap.data_mut();
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let index = ((py * pixmap_w + px) * 4) as usize;
+                data[index] = color.r;
+                data[index + 1] = color.g;
+                data[index + 2] = color.b;
+                data[index + 3] = 255;
+            }
+        }
+    }
+
+    pub fn fonts(&self) -> &FontSet {
+        &self.fonts
     }
 
     pub fn draw_text(&mut self, x: f32, baseline: f32, text: &str, color: Rgb) {
@@ -185,7 +258,6 @@ mod tests {
         let width = renderer.fonts.cell_w * 4;
         let height = renderer.fonts.cell_h * 2;
         renderer.resize(width, height);
-        renderer.draw();
         let foreground = renderer.theme.foreground;
         renderer.draw_text(0.0, renderer.fonts.ascent, "M", foreground);
         renderer.sync();
@@ -198,7 +270,6 @@ mod tests {
         let cell_w = renderer.fonts.cell_w;
         let height = renderer.fonts.cell_h * 2;
         renderer.resize(cell_w * 3, height);
-        renderer.draw();
         let foreground = renderer.theme.foreground;
         renderer.draw_text(0.0, renderer.fonts.ascent, "MM", foreground);
         renderer.sync();
@@ -220,7 +291,6 @@ mod tests {
         let cell_w = renderer.fonts.cell_w;
         let height = renderer.fonts.cell_h * 2;
         renderer.resize(cell_w * 3, height);
-        renderer.draw();
         let foreground = renderer.theme.foreground;
         renderer.draw_text(0.0, renderer.fonts.ascent, "e\u{0301}", foreground);
         renderer.sync();
