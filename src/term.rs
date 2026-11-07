@@ -169,7 +169,6 @@ impl Terminal {
         *self.term.mode()
     }
 
-    #[allow(dead_code)] // Driven by wheel scrolling in Task 11.
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }

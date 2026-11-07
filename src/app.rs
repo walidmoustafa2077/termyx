@@ -7,7 +7,7 @@ use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -241,6 +241,25 @@ impl App {
         }
     }
 
+    fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        let cell_h = match &self.renderer {
+            Some(renderer) => renderer.fonts().cell_h as f64,
+            None => return,
+        };
+        let lines = wheel_lines(delta, cell_h);
+        if lines == 0 {
+            return;
+        }
+        if let Some(terminal) = &mut self.terminal {
+            terminal.scroll_display(lines);
+        }
+        // Selection positions are logical viewport offsets; scrolling makes them stale.
+        self.selection = None;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn on_mouse(&mut self, state: ElementState) {
         match state {
             ElementState::Pressed => {
@@ -366,11 +385,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.resize_surface(size.width, size.height);
                 self.resize_grid(size.width, size.height);
+                // Reflow invalidates logical selection positions.
+                self.selection = None;
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => self.render(),
+            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(position.x, position.y)
@@ -441,6 +463,15 @@ fn cell_at(
     (row, visual)
 }
 
+fn wheel_lines(delta: MouseScrollDelta, cell_h: f64) -> i32 {
+    // Guard the pixel path against a zero-height cell.
+    let cell_h = cell_h.max(1.0);
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
+        MouseScrollDelta::PixelDelta(position) => (position.y / cell_h).round() as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +506,32 @@ mod tests {
         assert_eq!(
             cell_at(10_000.0, 10_000.0, 4.0, 10.0, 20.0, 80, 24),
             (23, 79)
+        );
+    }
+
+    #[test]
+    fn wheel_lines_converts_scroll_to_rows() {
+        use winit::dpi::PhysicalPosition;
+
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 20.0), 3);
+        assert_eq!(
+            wheel_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0),
+            -3
+        );
+        assert_eq!(
+            wheel_lines(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0)),
+                20.0
+            ),
+            2
+        );
+        // A zero cell height must not divide by zero.
+        assert_eq!(
+            wheel_lines(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0)),
+                0.0
+            ),
+            40
         );
     }
 }
