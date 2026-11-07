@@ -31,8 +31,8 @@ impl Rgb {
     }
 }
 
-// The full palette is parsed now; cursor, selection, and indexed-color
-// consumers arrive in Task 9, which removes these allowances.
+// The full palette is parsed now; cursor and indexed-color consumers arrive
+// in Task 9, and selection in Task 10. Remove these allowances after Task 10.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -81,7 +81,7 @@ impl Theme {
         }
     }
 
-    // Consumed by the indexed-color renderer in Task 9.
+    // First consumed by the indexed-color renderer in Task 9.
     #[allow(dead_code)]
     pub fn indexed(&self, index: u8) -> Rgb {
         match index {
