@@ -338,6 +338,22 @@ mod tests {
         assert_eq!(c.theme.foreground, "#cccccc");
         assert_eq!(c.theme.cursor, "#ffffff");
         assert_eq!(c.theme.selection, "#264f78");
+        assert_eq!(c.theme.black, "#0c0c0c");
+        assert_eq!(c.theme.red, "#c50f1f");
+        assert_eq!(c.theme.green, "#13a10e");
+        assert_eq!(c.theme.yellow, "#c19c00");
+        assert_eq!(c.theme.blue, "#0037da");
+        assert_eq!(c.theme.magenta, "#881798");
+        assert_eq!(c.theme.cyan, "#3a96dd");
+        assert_eq!(c.theme.white, "#cccccc");
+        assert_eq!(c.theme.bright_black, "#767676");
+        assert_eq!(c.theme.bright_red, "#e74856");
+        assert_eq!(c.theme.bright_green, "#16c60c");
+        assert_eq!(c.theme.bright_yellow, "#f9f1a5");
+        assert_eq!(c.theme.bright_blue, "#3b78ff");
+        assert_eq!(c.theme.bright_magenta, "#b4009e");
+        assert_eq!(c.theme.bright_cyan, "#61d6d6");
+        assert_eq!(c.theme.bright_white, "#f2f2f2");
         assert_eq!(c.shell.program, "");
         assert!(c.shell.args.is_empty());
     }
