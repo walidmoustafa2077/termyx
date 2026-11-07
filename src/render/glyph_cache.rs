@@ -103,5 +103,11 @@ mod tests {
         let mut cache = GlyphCache::new();
         assert!(cache.get(&fonts.font, glyph, fonts.size_px).is_none());
         assert!(cache.get(&fonts.font, glyph, fonts.size_px).is_none());
+        let key = GlyphKey {
+            glyph: glyph.0,
+            size_px: fonts.size_px.round() as u32,
+        };
+        // The second call is served from the cache: the key must hold `None`.
+        assert!(matches!(cache.slots.get(&key), Some(&None)));
     }
 }
