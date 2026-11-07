@@ -40,7 +40,7 @@ impl GlyphCache {
         if let Some(slot) = self.slots.get(&key) {
             return *slot;
         }
-        let slot = self.rasterize(font, glyph, size_px);
+        let slot = self.rasterize(font, glyph, key.size_px as f32);
         self.slots.insert(key, slot);
         slot
     }

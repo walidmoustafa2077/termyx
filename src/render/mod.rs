@@ -49,7 +49,9 @@ impl Renderer {
         let mut pen = x;
         let mut base_pen = x;
         for ch in text.chars() {
-            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            // Control characters report no width; treat them as one cell so
+            // the pen still advances. Combining marks report a width of zero.
+            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
             let draw_pen = if width == 0 { base_pen } else { pen };
             if let Some(glyph) = self.fonts.glyph(ch) {
                 if let Some(slot) = self.cache.get(&self.fonts.font, glyph, self.fonts.size_px) {
@@ -65,11 +67,13 @@ impl Renderer {
             }
             if width > 0 {
                 base_pen = pen;
-                pen += self.fonts.cell_w as f32;
+                pen += width as f32 * self.fonts.cell_w as f32;
             }
         }
     }
 
+    /// Copies the pixmap into the CPU pixel buffer. Must run after drawing and
+    /// before [`Renderer::pixels`] is read.
     pub fn sync(&mut self) {
         for (index, pixel) in self.pixmap.data().chunks_exact(4).enumerate() {
             self.pixels[index] =
@@ -123,6 +127,8 @@ fn blit(
     }
 }
 
+// Pixels are premultiplied RGBA over an opaque background (alpha stays 255),
+// so blending only the colour channels is correct.
 fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)).round() as u8
 }
@@ -137,6 +143,24 @@ mod tests {
             .or_else(|_| FontSet::load("DejaVu Sans Mono", 14.0, 1.2))
             .expect("a monospace font must exist");
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
+    }
+
+    /// Sorted, deduplicated pixel columns that differ from the background.
+    fn painted_columns(renderer: &Renderer) -> Vec<u32> {
+        let background = renderer.theme.background;
+        let background =
+            ((background.r as u32) << 16) | ((background.g as u32) << 8) | background.b as u32;
+        let width = renderer.pixmap.width();
+        let mut columns: Vec<u32> = renderer
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| **pixel != background)
+            .map(|(index, _)| index as u32 % width)
+            .collect();
+        columns.sort_unstable();
+        columns.dedup();
+        columns
     }
 
     #[test]
@@ -166,5 +190,42 @@ mod tests {
         renderer.draw_text(0.0, renderer.fonts.ascent, "M", foreground);
         renderer.sync();
         assert!(renderer.pixels().iter().any(|pixel| *pixel != 0x000c_0c0c));
+    }
+
+    #[test]
+    fn glyphs_advance_exactly_one_cell() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let height = renderer.fonts.cell_h * 2;
+        renderer.resize(cell_w * 3, height);
+        renderer.draw();
+        let foreground = renderer.theme.foreground;
+        renderer.draw_text(0.0, renderer.fonts.ascent, "MM", foreground);
+        renderer.sync();
+        let columns = painted_columns(&renderer);
+        // The second glyph starts in its own cell, so its leftmost painted
+        // column lies on or after the boundary between cell 0 and cell 1.
+        let second_glyph_left = columns
+            .iter()
+            .copied()
+            .find(|column| *column >= cell_w)
+            .expect("the second glyph must be painted");
+        assert!(second_glyph_left >= cell_w - 1);
+        assert!(*columns.last().unwrap() < cell_w * 2);
+    }
+
+    #[test]
+    fn combining_marks_do_not_advance_the_pen() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let height = renderer.fonts.cell_h * 2;
+        renderer.resize(cell_w * 3, height);
+        renderer.draw();
+        let foreground = renderer.theme.foreground;
+        renderer.draw_text(0.0, renderer.fonts.ascent, "e\u{0301}", foreground);
+        renderer.sync();
+        let columns = painted_columns(&renderer);
+        assert!(!columns.is_empty(), "the base glyph must be painted");
+        assert!(*columns.last().unwrap() < cell_w);
     }
 }

@@ -19,7 +19,8 @@ pub struct FontSet {
     #[allow(dead_code)]
     pub cell_h: u32,
     pub ascent: f32,
-    // Baselines derive from `ascent`; `descent` completes the metric pair.
+    // No Phase 1 consumer; kept because `FontSet` publishes the metric pair
+    // and the Task 6 grid layout will use it.
     #[allow(dead_code)]
     pub descent: f32,
 }
@@ -28,23 +29,22 @@ impl FontSet {
     pub fn load(family: &str, size_px: f32, line_height: f32) -> Result<Self, FontError> {
         let mut database = Database::new();
         database.load_system_fonts();
-        let query = Query {
-            families: &[Family::Name(family), Family::Monospace],
+        let requested = [Family::Name(family)];
+        let monospace = [Family::Monospace];
+        let mut query = Query {
+            families: &requested,
             weight: Weight::NORMAL,
             stretch: Stretch::Normal,
             style: Style::Normal,
         };
-        let id = database
-            .query(&query)
-            .or_else(|| {
-                database.query(&Query {
-                    families: &[Family::Monospace],
-                    weight: Weight::NORMAL,
-                    stretch: Stretch::Normal,
-                    style: Style::Normal,
-                })
-            })
-            .ok_or(FontError::NoFont)?;
+        let id = match database.query(&query) {
+            Some(id) => id,
+            None => {
+                tracing::warn!("font family {family:?} not found; using the system monospace font");
+                query.families = &monospace;
+                database.query(&query).ok_or(FontError::NoFont)?
+            }
+        };
         let (data, index) = database
             .with_face_data(id, |data, index| (data.to_vec(), index))
             .ok_or(FontError::NoFont)?;
