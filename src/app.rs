@@ -31,6 +31,7 @@ pub struct App {
     renderer: Option<Renderer>,
     terminal: Option<Terminal>,
     pty: Option<PtySession>,
+    clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
@@ -49,6 +50,7 @@ impl App {
             renderer: None,
             terminal: None,
             pty: None,
+            clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
@@ -196,7 +198,9 @@ impl App {
                         return;
                     }
                     "v" | "V" => {
-                        self.paste_clipboard();
+                        if !event.repeat {
+                            self.paste_clipboard();
+                        }
                         return;
                     }
                     _ => {}
@@ -271,6 +275,19 @@ impl App {
         })
     }
 
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(err) => {
+                    tracing::warn!(%err, "clipboard unavailable");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
     fn copy_selection(&mut self) {
         let Some(selection) = &self.selection else {
             return;
@@ -279,14 +296,19 @@ impl App {
             return;
         };
         let text = selection.to_text(&terminal.snapshot(), self.config.selection.trim_trailing);
-        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
-            Ok(()) => {}
-            Err(err) => tracing::warn!(%err, "copy failed"),
+        let Some(clipboard) = self.clipboard() else {
+            return;
+        };
+        if let Err(err) = clipboard.set_text(text) {
+            tracing::warn!(%err, "copy failed");
         }
     }
 
     fn paste_clipboard(&mut self) {
-        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        let Some(clipboard) = self.clipboard() else {
+            return;
+        };
+        let text = match clipboard.get_text() {
             Ok(text) => text,
             Err(err) => {
                 tracing::warn!(%err, "paste failed");
@@ -412,6 +434,8 @@ fn cell_at(
     cols: usize,
     rows: usize,
 ) -> (usize, usize) {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
     let visual = (((x - padding) / cell_w).floor() as isize).clamp(0, cols as isize - 1) as usize;
     let row = (((y - padding) / cell_h).floor() as isize).clamp(0, rows as isize - 1) as usize;
     (row, visual)

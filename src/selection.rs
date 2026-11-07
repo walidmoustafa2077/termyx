@@ -1,3 +1,5 @@
+//! Logical-order selection and clipboard copy.
+
 use crate::term::{GridSnapshot, LogicalPos};
 
 /// A logical-order text selection. Visual order never enters this type.
@@ -67,9 +69,9 @@ impl Selection {
                 }
             }
             if trim_trailing {
-                text = text.trim_end().to_string();
+                text = text.trim_end_matches(' ').to_string();
             }
-            if row > start.row && !snapshot.lines[row - 1].wrapped {
+            if row > start.row && !snapshot.lines.get(row - 1).is_some_and(|line| line.wrapped) {
                 out.push('\n');
             }
             out.push_str(&text);
