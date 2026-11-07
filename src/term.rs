@@ -134,6 +134,11 @@ impl Terminal {
         // trimmed to the written rows (plus the cursor row), then restore the
         // requested height: growing pulls the reflowed lines back out of history
         // intact. The alternate screen never reflows, so it is resized in one step.
+        //
+        // Limitation: the trimmed path only runs before the first scroll. Once the
+        // grid has scrollback, growing back would pull unrelated history into the
+        // viewport, so narrowing falls back to alacritty's stock bottom-anchored
+        // reflow and the top line of the screen may land in scrollback instead.
         let (used_rows, cursor_row) = self.content_extent();
         let has_history = self.term.grid().total_lines() > self.term.grid().screen_lines();
         let height = used_rows.max(cursor_row + 1);
@@ -396,5 +401,43 @@ mod tests {
         }
         term.scroll_display(2);
         assert_eq!(term.snapshot().display_offset, 2);
+    }
+
+    #[test]
+    fn staged_resize_tracks_cursor_after_reflow() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        // 26 characters wrap at 20 columns, so the cursor already sits on row 1.
+        term.feed(b"abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(term.snapshot().cursor.row, 1);
+
+        // Narrowing reflows the 26 cells into 10 + 10 + 6 and the cursor follows
+        // the text to the end of the third row.
+        term.resize(10, 5);
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.display_offset, 0);
+        assert_eq!(snapshot.cursor.row, 2);
+        assert_eq!(snapshot.cursor.logical, 6);
+        assert_eq!(snapshot.lines[2].cells[0].text, "u");
+    }
+
+    #[test]
+    fn alt_screen_survives_narrow_resize() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"\x1b[?1049h");
+        term.resize(10, 5);
+        assert!(term.mode().contains(TermMode::ALT_SCREEN));
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.cols, 10);
+        assert_eq!(snapshot.rows, 5);
+        assert_eq!(snapshot.lines.len(), 5);
+    }
+
+    #[test]
+    fn nul_cell_is_sanitized_to_space() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"\0");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.lines[0].cells[0].text, " ");
+        assert_eq!(snapshot.lines[0].cells[0].width, 1);
     }
 }
