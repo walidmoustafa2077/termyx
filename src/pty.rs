@@ -18,7 +18,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
-    _reader: Option<thread::JoinHandle<()>>,
+    _reader: thread::JoinHandle<()>,
 }
 
 impl PtySession {
@@ -68,8 +68,12 @@ impl PtySession {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(n) => on_output(buffer[..n].to_vec()),
+                    Err(err) => {
+                        tracing::debug!(%err, "pty reader ended");
+                        break;
+                    }
                 }
             }
         });
@@ -78,7 +82,7 @@ impl PtySession {
             master: pair.master,
             writer,
             child,
-            _reader: Some(reader_thread),
+            _reader: reader_thread,
         })
     }
 
@@ -106,19 +110,35 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
 /// Resolves the program and arguments for the child shell.
 fn build_command(config: &ShellConfig) -> (String, Vec<String>) {
     if !config.program.is_empty() {
-        let mut args = config.args.clone();
         #[cfg(windows)]
-        if config.program.to_ascii_lowercase().ends_with("cmd.exe") && args.is_empty() {
-            // ConPTY enables VT processing and DISABLE_NEWLINE_AUTO_RETURN on
-            // the child console; the remaining requirement is UTF-8 code page.
-            args = vec!["/K".into(), "chcp 65001>nul".into()];
+        let is_cmd = config.program.to_ascii_lowercase().ends_with("cmd.exe");
+        #[cfg(windows)]
+        if is_cmd && !config.args.is_empty() {
+            tracing::warn!(
+                "cmd.exe started with explicit args; the UTF-8 code page is not injected, \
+                 set it yourself (e.g. chcp 65001)"
+            );
         }
+        #[cfg(windows)]
+        let args = if is_cmd && config.args.is_empty() {
+            // Measured child output mode is 0x7: VT processing is enabled by
+            // ConPTY, but DISABLE_NEWLINE_AUTO_RETURN (0x8) is not, and cannot
+            // be set without a new Win32 dependency. Revisit in Task 9 if
+            // edge-wrap artifacts appear. The remaining requirement is the
+            // UTF-8 code page.
+            vec!["/K".into(), "chcp 65001>nul".into()]
+        } else {
+            config.args.clone()
+        };
+        #[cfg(not(windows))]
+        let args = config.args.clone();
         return (config.program.clone(), args);
     }
 
@@ -140,7 +160,10 @@ fn build_command(config: &ShellConfig) -> (String, Vec<String>) {
 
     #[cfg(not(windows))]
     {
-        let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let program = std::env::var("SHELL")
+            .ok()
+            .filter(|shell| !shell.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into());
         (program, config.args.clone())
     }
 }
@@ -181,11 +204,15 @@ mod tests {
         let mut output = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(200)) {
-                output.extend_from_slice(&chunk);
-                if String::from_utf8_lossy(&output).contains("hello") {
-                    break;
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    output.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&output).contains("hello") {
+                        break;
+                    }
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         assert!(
