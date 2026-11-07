@@ -1721,6 +1721,7 @@ dependencies = [
  "ttf-parser",
  "unicode-segmentation",
  "unicode-width",
+ "vte",
  "winit",
 ]
 
