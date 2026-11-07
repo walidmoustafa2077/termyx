@@ -1,10 +1,5 @@
 //! Configuration file loading and defaults.
 
-// `main.rs` does not call `Config::load` until Task 3 adds the event loop, so
-// the binary crate root reports every item here as unused. Remove this allow
-// when `main` wire up lands.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
@@ -70,7 +65,11 @@ impl<'de> Deserialize<'de> for BaseDirection {
         Ok(match value.as_str() {
             "rtl" => Self::Rtl,
             "auto" => Self::Auto,
-            _ => Self::Ltr,
+            "ltr" => Self::Ltr,
+            _ => {
+                tracing::warn!("unknown base_direction {value:?}; using ltr");
+                Self::Ltr
+            }
         })
     }
 }
@@ -178,12 +177,78 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// Section names and field names accepted by the schema. Mirrors the struct
+/// fields above; anything else in the file is logged and ignored.
+const KNOWN_KEYS: &[(&str, &[&str])] = &[
+    ("font", &["family", "arabic_family", "size", "line_height"]),
+    ("bidi", &["enabled", "base_direction"]),
+    ("window", &["width", "height", "padding"]),
+    ("scrollback", &["lines"]),
+    ("selection", &["trim_trailing"]),
+    (
+        "theme",
+        &[
+            "background",
+            "foreground",
+            "cursor",
+            "selection",
+            "black",
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "white",
+            "bright_black",
+            "bright_red",
+            "bright_green",
+            "bright_yellow",
+            "bright_blue",
+            "bright_magenta",
+            "bright_cyan",
+            "bright_white",
+        ],
+    ),
+    ("shell", &["program", "args"]),
+];
+
+fn warn_unknown_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for section in table.keys() {
+        if !KNOWN_KEYS.iter().any(|(name, _)| *name == section.as_str()) {
+            tracing::warn!("unknown config section {section:?}; ignoring");
+        }
+    }
+    for (section, keys) in KNOWN_KEYS {
+        let Some(fields) = table.get(*section).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for key in fields.keys() {
+            if !keys.contains(&key.as_str()) {
+                tracing::warn!("unknown key {section}.{key}; ignoring");
+            }
+        }
+    }
+}
+
 impl Config {
+    /// Parses configuration from TOML text, warning about unknown sections and
+    /// keys, and clamping out-of-range values.
     pub fn from_toml_str(text: &str) -> Result<Self, ConfigError> {
+        let value: toml::Value = toml::from_str(text)?;
+        warn_unknown_keys(&value);
         Ok(toml::from_str::<Self>(text)?.validate())
     }
 
+    /// Clamps values into their supported ranges, replacing non-finite font
+    /// metrics with their defaults.
     pub fn validate(mut self) -> Self {
+        if !self.font.size.is_finite() {
+            self.font.size = 14.0;
+        }
         self.font.size = self.font.size.clamp(6.0, 48.0);
         if !self.font.line_height.is_finite() || self.font.line_height < 0.8 {
             self.font.line_height = 1.2;
@@ -192,6 +257,9 @@ impl Config {
         self
     }
 
+    /// Loads configuration from `path`, or from [`default_config_path`] when
+    /// `path` is `None`. A missing default file yields validated defaults; a
+    /// missing explicit file is an error.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let explicit = path.is_some();
         let path = path
@@ -209,7 +277,7 @@ impl Config {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("could not read config at {path}: {source}")]
+    #[error("could not read config at {path}")]
     Io {
         path: PathBuf,
         #[source]
@@ -219,6 +287,7 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
 }
 
+/// Returns the platform-specific default configuration file path.
 pub fn default_config_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -265,6 +334,12 @@ mod tests {
         assert_eq!(c.window.padding, 4);
         assert_eq!(c.scrollback.lines, 10_000);
         assert!(c.selection.trim_trailing);
+        assert_eq!(c.theme.background, "#0c0c0c");
+        assert_eq!(c.theme.foreground, "#cccccc");
+        assert_eq!(c.theme.cursor, "#ffffff");
+        assert_eq!(c.theme.selection, "#264f78");
+        assert_eq!(c.shell.program, "");
+        assert!(c.shell.args.is_empty());
     }
 
     #[test]
@@ -277,6 +352,20 @@ mod tests {
             .unwrap()
             .validate();
         assert_eq!(c.font.size, 6.0);
+    }
+
+    #[test]
+    fn nan_font_size_falls_back_to_default() {
+        let c = Config::from_toml_str("[font]\nsize = nan\n").unwrap();
+        assert_eq!(c.font.size, 14.0);
+    }
+
+    #[test]
+    fn line_height_falls_back_to_default() {
+        let c = Config::from_toml_str("[font]\nline_height = 0.5\n").unwrap();
+        assert_eq!(c.font.line_height, 1.2);
+        let c = Config::from_toml_str("[font]\nline_height = nan\n").unwrap();
+        assert_eq!(c.font.line_height, 1.2);
     }
 
     #[test]
