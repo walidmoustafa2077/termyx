@@ -1,3 +1,5 @@
+//! Grid rasterization to the window surface.
+
 mod atlas;
 mod glyph_cache;
 
@@ -46,5 +48,33 @@ impl Renderer {
             self.pixels[index] =
                 ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_renderer() -> Renderer {
+        Renderer::new(
+            Theme::from_config(&crate::config::ThemeConfig::default()),
+            4,
+        )
+    }
+
+    #[test]
+    fn resize_fills_with_background_color() {
+        let mut renderer = default_renderer();
+        renderer.resize(2, 1);
+        assert_eq!(renderer.pixels(), [0x000c_0c0c, 0x000c_0c0c]);
+    }
+
+    #[test]
+    fn zero_sized_resize_keeps_previous_pixels() {
+        let mut renderer = default_renderer();
+        renderer.resize(4, 3);
+        let expected_len = renderer.pixels().len();
+        renderer.resize(0, 0);
+        assert_eq!(renderer.pixels().len(), expected_len);
     }
 }

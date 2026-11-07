@@ -31,8 +31,8 @@ impl Rgb {
     }
 }
 
-// The full palette is parsed now; the renderer reads the remaining entries as
-// text and cursor drawing arrive in Task 4.
+// The full palette is parsed now; cursor, selection, and indexed-color
+// consumers arrive in Task 9, which removes these allowances.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -46,7 +46,13 @@ pub struct Theme {
 
 impl Theme {
     pub fn from_config(config: &ThemeConfig) -> Self {
-        let parse = |value: &str, fallback: Rgb| Rgb::from_hex(value).unwrap_or(fallback);
+        let parse = |value: &str, fallback: Rgb| match Rgb::from_hex(value) {
+            Some(rgb) => rgb,
+            None => {
+                tracing::warn!("invalid theme color {value:?}, falling back to {fallback:?}");
+                fallback
+            }
+        };
         Self {
             background: parse(&config.background, Rgb::new(12, 12, 12)),
             foreground: parse(&config.foreground, Rgb::new(204, 204, 204)),
@@ -75,7 +81,7 @@ impl Theme {
         }
     }
 
-    // Consumed by the renderer once indexed cell colors are drawn.
+    // Consumed by the indexed-color renderer in Task 9.
     #[allow(dead_code)]
     pub fn indexed(&self, index: u8) -> Rgb {
         match index {

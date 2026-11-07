@@ -14,14 +14,17 @@ use anyhow::Context;
 use std::path::PathBuf;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-fn config_path_from_args() -> Option<PathBuf> {
+fn config_path_from_args() -> anyhow::Result<Option<PathBuf>> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--config" {
-            return args.next().map(PathBuf::from);
+            let Some(path) = args.next() else {
+                anyhow::bail!("--config requires a path");
+            };
+            return Ok(Some(PathBuf::from(path)));
         }
     }
-    None
+    Ok(None)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,7 +33,7 @@ fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let config = config::Config::load(config_path_from_args().as_deref())
+    let config = config::Config::load(config_path_from_args()?.as_deref())
         .context("loading configuration")?;
     let event_loop = EventLoop::<event::UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);

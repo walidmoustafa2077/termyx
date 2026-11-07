@@ -1,3 +1,5 @@
+//! Window, surface, and event wiring.
+
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -43,10 +45,30 @@ impl ApplicationHandler<UserEvent> for App {
                 self.config.window.width,
                 self.config.window.height,
             ));
-        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        let surface =
-            softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                tracing::error!("failed to create window: {error}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let context = match softbuffer::Context::new(window.clone()) {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::error!("failed to create softbuffer context: {error}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let surface = match softbuffer::Surface::new(&context, window.clone()) {
+            Ok(surface) => surface,
+            Err(error) => {
+                tracing::error!("failed to create softbuffer surface: {error}");
+                event_loop.exit();
+                return;
+            }
+        };
         let mut renderer = Renderer::new(
             Theme::from_config(&self.config.theme),
             self.config.window.padding,
@@ -55,8 +77,8 @@ impl ApplicationHandler<UserEvent> for App {
         renderer.resize(size.width, size.height);
         self.renderer = Some(renderer);
         self.surface = Some(surface);
+        window.request_redraw();
         self.window = Some(window);
-        self.window.as_ref().unwrap().request_redraw();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
