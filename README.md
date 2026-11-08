@@ -69,6 +69,14 @@ digits in logical order, lam-alef across two cells with no shift, harakat on
 their base cells, and the prompt pinned left in the default mode. Selection and
 `Ctrl+Shift+C` copy the logical text.
 
+Status (controller check, 2026-11-08, Windows 11 x64): passed for the default
+`ltr` mode (prompt left, joined Arabic, correct mixed Arabic/`123`/`abc` order,
+lam-alef aligned), pure Arabic, right-to-left drag selection with
+`Ctrl+Shift+C` returning the exact logical string, `rtl` base direction
+(right-anchored prompt, cursor at the logical end), and resizing to 800x500
+without a panic. The Persian/Urdu and harakat examples above were not
+separately re-run in this check.
+
 ## Known limitations
 
 - Bidi is per row. A soft-wrapped RTL paragraph is ordered row by row.
