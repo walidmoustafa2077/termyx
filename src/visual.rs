@@ -1,6 +1,7 @@
 //! Per-row logical-to-visual mapping.
 
-use crate::term::{Affinity, CursorState};
+use crate::config::BaseDirection;
+use crate::term::{Affinity, CursorState, RowSnapshot};
 
 /// Maps logical cell columns to visual columns for one row.
 ///
@@ -19,6 +20,34 @@ impl VisualMap {
             cols,
             logical_to_visual: (0..cols).collect(),
             visual_to_logical: (0..cols).collect(),
+        }
+    }
+
+    // Wired into the frame in Task 3; tests are the only callers until then.
+    #[allow(dead_code)]
+    pub fn from_bidi(row: &RowSnapshot, base: BaseDirection) -> Self {
+        let analysis = crate::bidi::analyze(row, base);
+        let cols = analysis.levels.len();
+        let mut logical_to_visual = vec![0; cols];
+        let mut visual_to_logical = vec![0; cols];
+        for run in &analysis.runs {
+            for offset in 0..run.cells.len() {
+                let logical = run.cells.start + offset;
+                let visual = if run.rtl {
+                    run.slots.end - 1 - offset
+                } else {
+                    run.slots.start + offset
+                };
+                if logical < cols && visual < cols {
+                    logical_to_visual[logical] = visual;
+                    visual_to_logical[visual] = logical;
+                }
+            }
+        }
+        Self {
+            cols,
+            logical_to_visual,
+            visual_to_logical,
         }
     }
 
