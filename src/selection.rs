@@ -136,6 +136,21 @@ impl Selection {
         true
     }
 
+    /// First/last selected rows and left/right visual columns. Block geometry
+    /// lives here so highlight and copy cannot drift apart.
+    fn visual_bounds(&self, maps: &[VisualMap]) -> Option<(usize, usize, usize, usize)> {
+        let anchor_map = maps.get(self.anchor.row)?;
+        let focus_map = maps.get(self.focus.row)?;
+        let a = anchor_map.visual_of(self.anchor.col);
+        let b = focus_map.visual_of(self.focus.col);
+        Some((
+            self.anchor.row.min(self.focus.row),
+            self.anchor.row.max(self.focus.row),
+            a.min(b),
+            a.max(b),
+        ))
+    }
+
     /// True when the cell is inside this selection. Block mode compares
     /// visual columns; the maps carry each row's bidi layout.
     pub fn is_selected(
@@ -148,19 +163,10 @@ impl Selection {
         if self.mode == SelectionMode::Simple {
             return self.contains(row, logical);
         }
-        let first = self.anchor.row.min(self.focus.row);
-        let last = self.anchor.row.max(self.focus.row);
-        if row < first || row > last {
-            return false;
-        }
-        let (Some(anchor_map), Some(focus_map)) =
-            (maps.get(self.anchor.row), maps.get(self.focus.row))
-        else {
+        let Some((first, last, left, right)) = self.visual_bounds(maps) else {
             return false;
         };
-        let a = anchor_map.visual_of(self.anchor.col);
-        let b = focus_map.visual_of(self.focus.col);
-        visual >= a.min(b) && visual <= a.max(b)
+        row >= first && row <= last && visual >= left && visual <= right
     }
 
     /// Copy a visual rectangle row by row, skipping continuation cells.
@@ -170,16 +176,9 @@ impl Selection {
         maps: &[VisualMap],
         trim_trailing: bool,
     ) -> String {
-        let (Some(anchor_map), Some(focus_map)) =
-            (maps.get(self.anchor.row), maps.get(self.focus.row))
-        else {
+        let Some((first, last, left, right)) = self.visual_bounds(maps) else {
             return String::new();
         };
-        let a = anchor_map.visual_of(self.anchor.col);
-        let b = focus_map.visual_of(self.focus.col);
-        let (left, right) = (a.min(b), a.max(b));
-        let first = self.anchor.row.min(self.focus.row);
-        let last = self.anchor.row.max(self.focus.row);
         let mut out = String::new();
         for row in first..=last {
             let (Some(line), Some(map)) = (snapshot.lines.get(row), maps.get(row)) else {
@@ -459,6 +458,33 @@ mod tests {
     }
 
     #[test]
+    fn reverse_block_drag_covers_the_same_rectangle() {
+        let snapshot = GridSnapshot {
+            cols: 5,
+            rows: 2,
+            lines: vec![row("hello"), row("world")],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let maps = identity_maps(2, 5);
+        let mut selection = Selection::block(position(1, 3));
+        selection.update(position(0, 1));
+
+        assert!(selection.is_selected(0, 1, 1, &maps));
+        assert!(selection.is_selected(1, 3, 3, &maps));
+        assert!(!selection.is_selected(0, 0, 0, &maps));
+        assert!(!selection.is_selected(1, 4, 4, &maps));
+        assert_eq!(selection.to_text_block(&snapshot, &maps, true), "ell\norl");
+    }
+
+    #[test]
     fn block_selection_uses_visual_columns_in_rtl() {
         let snapshot = GridSnapshot {
             cols: 5,
@@ -484,15 +510,10 @@ mod tests {
             anchor_visual.min(focus_visual),
             anchor_visual.max(focus_visual),
         );
-        assert!(selection.is_selected(0, 3, right, &maps));
-        assert!(!selection.is_selected(0, 3, left.saturating_sub(1), &maps));
-        assert_eq!(
-            selection
-                .to_text_block(&snapshot, &maps, false)
-                .chars()
-                .count(),
-            3
-        );
+        assert!(selection.is_selected(0, maps[0].logical_of(right), right, &maps));
+        let outside = left.saturating_sub(1);
+        assert!(!selection.is_selected(0, maps[0].logical_of(outside), outside, &maps));
+        assert_eq!(selection.to_text_block(&snapshot, &maps, false), "حرم");
     }
 
     #[test]

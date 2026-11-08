@@ -859,8 +859,11 @@ mod tests {
         let at = |x: u32, y: u32| renderer.pixels()[y as usize * width + x as usize];
         // Sample the cell corner so glyph ink never covers the selection fill.
         let selected = at(padding + 1, padding + 1);
+        let outside_row = at(padding + 2 * cell_w + 1, padding + 1);
         let outside = at(padding + 2 * cell_w + 1, padding + cell_h + 1);
         assert_eq!(selected, packed(renderer.theme.selection));
+        // Row 0 col 2 is inside a Simple selection but outside this rectangle.
+        assert_ne!(outside_row, packed(renderer.theme.selection));
         assert_ne!(outside, packed(renderer.theme.selection));
     }
 

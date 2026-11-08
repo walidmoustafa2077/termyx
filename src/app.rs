@@ -428,7 +428,8 @@ impl App {
                 }
             }
 
-            if button == MouseButton::Left
+            if self.app_mouse_button.is_none()
+                && button == MouseButton::Left
                 && self.modifiers.alt_key()
                 && !self.modifiers.control_key()
                 && !self.modifiers.shift_key()
@@ -436,9 +437,9 @@ impl App {
                 let (x, y) = self.cursor_pos;
                 if let Some(position) = self.pos_at(x, y) {
                     // Alt+drag is reserved for block selection, even in mouse-reporting apps.
+                    // A button already forwarded to the app keeps its own release.
                     self.selection = Some(Selection::block(position));
                     self.mouse_down = true;
-                    self.app_mouse_button = None;
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
