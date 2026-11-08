@@ -8,7 +8,7 @@ use super::atlas::{Atlas, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
-    /// 0 = primary face, 1 = Arabic fallback face.
+    /// 0 = primary face, 1 = Arabic fallback face, 2.. = symbol fallback faces.
     pub font: u8,
     pub glyph: u16,
     pub size_px: u32,

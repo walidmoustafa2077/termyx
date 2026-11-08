@@ -171,15 +171,12 @@ fn load_primary(database: &Database, family: &str) -> Result<(Vec<u8>, u32), Fon
 
 fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec<FontFace> {
     let mut symbols = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
     for family in SYMBOL_FALLBACKS {
         if primary.eq_ignore_ascii_case(family)
             || arabic.is_some_and(|name| name.eq_ignore_ascii_case(family))
-            || seen.iter().any(|name| name.eq_ignore_ascii_case(family))
         {
             continue;
         }
-        seen.push((*family).to_string());
         let query = Query {
             families: &[Family::Name(family)],
             weight: Weight::NORMAL,
@@ -333,6 +330,49 @@ mod tests {
         assert!(face.font.glyph_id('ا').0 != 0);
         assert!(!face.family.is_empty());
         assert!(font.has_arabic());
+    }
+
+    #[test]
+    fn font_for_id_maps_primary_arabic_and_symbol_faces() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        assert!(
+            std::ptr::eq(fonts.font_for_id(0).0, &fonts.font),
+            "id 0 must be the primary face"
+        );
+        assert_eq!(fonts.font_for_id(0).2, fonts.index);
+
+        match &fonts.arabic {
+            Some(arabic) => {
+                let (font, _, index) = fonts.font_for_id(1);
+                assert!(
+                    std::ptr::eq(font, &arabic.font),
+                    "id 1 must be the Arabic face"
+                );
+                assert_eq!(index, arabic.index);
+            }
+            None => assert!(
+                std::ptr::eq(fonts.font_for_id(1).0, &fonts.font),
+                "id 1 must fall back to the primary face when Arabic is absent"
+            ),
+        }
+
+        for (offset, face) in fonts.symbols.iter().enumerate() {
+            let id = u8::try_from(offset + 2).expect("symbol face id");
+            let (font, _, index) = fonts.font_for_id(id);
+            assert!(
+                std::ptr::eq(font, &face.font),
+                "id {id} must be a symbol face"
+            );
+            assert_eq!(index, face.index);
+        }
+
+        let unknown = u8::try_from(fonts.symbols.len() + 3).expect("unknown id");
+        assert!(
+            std::ptr::eq(fonts.font_for_id(unknown).0, &fonts.font),
+            "an unknown id must fall back to the primary face"
+        );
     }
 
     #[test]

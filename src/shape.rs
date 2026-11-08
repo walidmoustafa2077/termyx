@@ -77,7 +77,7 @@ pub struct ShapeCache {
 struct ShapeKey {
     text: String,
     rtl: bool,
-    /// 0 = primary face, 1 = Arabic fallback face.
+    /// 0 = primary face, 1 = Arabic fallback face, 2.. = symbol fallback faces.
     font: u8,
 }
 

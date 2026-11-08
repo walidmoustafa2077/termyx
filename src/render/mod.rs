@@ -238,12 +238,15 @@ impl Renderer {
             let (offset, scale_x) = fit_cluster(natural, slot_w);
             let mut pen = padding + slot_start as f32 * cell_w + offset;
 
-            for glyph in &cluster.glyphs {
+            for (glyph_index, glyph) in cluster.glyphs.iter().enumerate() {
                 let mut font_id = u8::from(run.arabic);
                 let (mut font, _, _) = self.fonts.font_for(run.arabic);
                 // ab_glyph ids are u16; an out-of-range id becomes .notdef.
                 let mut id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
-                if glyph.glyph_id == 0 {
+                // Only the cluster's first glyph may switch faces: later glyphs
+                // share the cluster's text, so looking them up would paint the
+                // base character's fallback glyph a second time.
+                if glyph_index == 0 && glyph.glyph_id == 0 {
                     if let Some((symbol_face, symbol_glyph)) = self.fonts.symbol_for(&cluster.text)
                     {
                         font_id = symbol_face;
@@ -1126,6 +1129,98 @@ mod tests {
         assert_eq!(
             renderer.pixels()[y * width + x as usize],
             packed(renderer.theme.indexed(8))
+        );
+    }
+
+    #[test]
+    fn symbol_fallback_paints_a_missing_glyph() {
+        use ab_glyph::Font;
+        let mut renderer = default_renderer();
+        if renderer.fonts.symbol_for("✕").is_none() {
+            eprintln!("skipping: no symbol fallback font installed");
+            return;
+        }
+        if renderer.fonts.font.glyph_id('✕').0 != 0 {
+            eprintln!("skipping: the primary face already covers U+2715");
+            return;
+        }
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = single_cell_snapshot(Cell {
+            text: "✕".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding();
+        let columns = painted_columns(&renderer);
+        assert!(
+            !columns.is_empty(),
+            "the fallback glyph must paint foreground ink"
+        );
+        assert!(
+            columns
+                .iter()
+                .all(|column| *column >= padding && *column < padding + 2 * cell_w),
+            "the glyph must paint in its own cell: {columns:?}"
+        );
+
+        // Without the symbol faces the same cell rasterizes differently, so the
+        // ink above came from the fallback path rather than from .notdef.
+        let with_fallback = renderer.pixels().to_vec();
+        renderer.fonts.symbols.clear();
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        assert_ne!(
+            with_fallback,
+            renderer.pixels(),
+            "the symbol face must change the raster"
+        );
+    }
+
+    #[test]
+    fn missing_trailing_glyphs_do_not_reuse_the_base_glyph() {
+        use ab_glyph::Font;
+        let mut with = default_renderer();
+        if with.fonts.symbols.is_empty() {
+            eprintln!("skipping: no symbol fallback font installed");
+            return;
+        }
+        // The primary face must map the base digit but not the keycap mark, so
+        // the shaped cluster has a missing trailing glyph.
+        if with.fonts.font.glyph_id('1').0 == 0 || with.fonts.font.glyph_id('\u{20E3}').0 != 0 {
+            eprintln!("skipping: the primary face lacks the keycap coverage this test needs");
+            return;
+        }
+        if with.fonts.symbol_for("1").is_none() {
+            eprintln!("skipping: no symbol face maps the cluster's base glyph");
+            return;
+        }
+        let mut without = default_renderer();
+        without.fonts.symbols.clear();
+
+        let snapshot = single_cell_snapshot(Cell {
+            text: "1\u{20E3}".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        let cell_w = with.fonts.cell_w;
+        let cell_h = with.fonts.cell_h;
+        for renderer in [&mut with, &mut without] {
+            renderer.resize(cell_w * 2, cell_h * 2);
+            renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+            renderer.sync();
+        }
+        assert_eq!(
+            with.pixels(),
+            without.pixels(),
+            "a missing trailing glyph must not paint the cluster's base glyph again"
+        );
+        assert!(
+            !painted_columns(&with).is_empty(),
+            "the base glyph must still paint"
         );
     }
 }
