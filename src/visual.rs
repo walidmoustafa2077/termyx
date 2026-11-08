@@ -15,6 +15,9 @@ pub struct VisualMap {
     runs: Vec<VisualRun>,
     logical_to_visual: Vec<usize>,
     visual_to_logical: Vec<usize>,
+    /// Whether the run order and levels came from UAX #9 analysis. Identity
+    /// maps have no levels, so shaping falls back to the text's script.
+    analyzed: bool,
 }
 
 impl VisualMap {
@@ -35,6 +38,7 @@ impl VisualMap {
             runs,
             logical_to_visual: (0..cols).collect(),
             visual_to_logical: (0..cols).collect(),
+            analyzed: false,
         }
     }
 
@@ -90,24 +94,26 @@ impl VisualMap {
             runs,
             logical_to_visual,
             visual_to_logical,
+            analyzed: true,
         }
     }
 
-    // These three accessors are consumed by shaping in Task 4; until then only
-    // the tests read them.
-    #[allow(dead_code)]
     pub fn cols(&self) -> usize {
         self.cols
     }
 
-    #[allow(dead_code)]
     pub fn levels(&self) -> &[u8] {
         &self.levels
     }
 
-    #[allow(dead_code)]
     pub fn runs(&self) -> &[VisualRun] {
         &self.runs
+    }
+
+    /// Whether the levels and runs came from bidi analysis rather than a
+    /// logical-order identity mapping.
+    pub fn is_bidi_analyzed(&self) -> bool {
+        self.analyzed
     }
 
     /// Visual column of a logical cell. Clamps to the last cell.
@@ -287,6 +293,14 @@ mod tests {
         let ltr_first = row(&["a", "b", "c", " ", " ", " ", " "]);
         let map = VisualMap::for_row(&ltr_first, &bidi(BaseDirection::Auto));
         assert_eq!(map.visual_of(0), 0);
+    }
+
+    #[test]
+    fn only_bidi_maps_report_analysis() {
+        assert!(!VisualMap::identity(3).is_bidi_analyzed());
+        assert!(
+            VisualMap::from_bidi(&row(&["a", "b", "c"]), BaseDirection::Ltr).is_bidi_analyzed()
+        );
     }
 
     #[test]

@@ -1,7 +1,4 @@
 //! Per-row UAX #9 analysis: flatten cells to UTF-8 and map visual runs.
-//!
-// Wired into the frame in Task 3; the tests below are the only callers until
-// then.
 
 use std::ops::Range;
 
@@ -150,13 +147,16 @@ pub fn analyze(row: &RowSnapshot, base: BaseDirection) -> BidiRow {
     BidiRow { levels, runs }
 }
 
-// Consumed by the renderer's invisible-cell check in Task 6.
-#[allow(dead_code)]
 pub fn is_bidi_control(ch: char) -> bool {
     matches!(
         ch,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
     )
+}
+
+/// A cell whose entire text is bidi controls paints no glyph.
+pub fn is_bidi_control_only(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_bidi_control)
 }
 
 #[cfg(test)]
@@ -317,6 +317,16 @@ mod tests {
         for ch in ['a', 'م', ' ', '\u{200B}'] {
             assert!(!is_bidi_control(ch), "{ch:?} is not a bidi control");
         }
+    }
+
+    #[test]
+    fn cells_made_only_of_bidi_controls_paint_nothing() {
+        assert!(is_bidi_control_only("\u{200F}"));
+        assert!(is_bidi_control_only("\u{202A}\u{200E}"));
+        assert!(!is_bidi_control_only(""));
+        assert!(!is_bidi_control_only("a"));
+        assert!(!is_bidi_control_only("\u{200F}a"));
+        assert!(!is_bidi_control_only(" "));
     }
 
     #[test]

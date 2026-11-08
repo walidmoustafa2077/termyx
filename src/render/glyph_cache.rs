@@ -8,6 +8,8 @@ use super::atlas::{Atlas, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
+    /// 0 = primary face, 1 = Arabic fallback face.
+    pub font: u8,
     pub glyph: u16,
     pub size_px: u32,
 }
@@ -32,8 +34,15 @@ impl GlyphCache {
         }
     }
 
-    pub fn get(&mut self, font: &FontVec, glyph: GlyphId, size_px: f32) -> Option<GlyphSlot> {
+    pub fn get(
+        &mut self,
+        font_id: u8,
+        font: &FontVec,
+        glyph: GlyphId,
+        size_px: f32,
+    ) -> Option<GlyphSlot> {
         let key = GlyphKey {
+            font: font_id,
             glyph: glyph.0,
             size_px: size_px.round() as u32,
         };
@@ -88,10 +97,22 @@ mod tests {
             .expect("font");
         let glyph = fonts.font.glyph_id('A');
         let mut cache = GlyphCache::new();
-        let first = cache.get(&fonts.font, glyph, fonts.size_px).unwrap();
-        let second = cache.get(&fonts.font, glyph, fonts.size_px).unwrap();
+        let first = cache.get(0, &fonts.font, glyph, fonts.size_px).unwrap();
+        let second = cache.get(0, &fonts.font, glyph, fonts.size_px).unwrap();
         assert_eq!(first.rect, second.rect);
         assert!(first.rect.w > 0 && first.rect.h > 0);
+    }
+
+    #[test]
+    fn font_id_is_part_of_the_key() {
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+            .expect("font");
+        let glyph = fonts.font.glyph_id('A');
+        let mut cache = GlyphCache::new();
+        assert!(cache.get(0, &fonts.font, glyph, fonts.size_px).is_some());
+        assert!(cache.get(1, &fonts.font, glyph, fonts.size_px).is_some());
+        assert_eq!(cache.slots.len(), 2);
     }
 
     #[test]
@@ -101,13 +122,13 @@ mod tests {
             .expect("font");
         let glyph = fonts.font.glyph_id(' ');
         let mut cache = GlyphCache::new();
-        assert!(cache.get(&fonts.font, glyph, fonts.size_px).is_none());
-        assert!(cache.get(&fonts.font, glyph, fonts.size_px).is_none());
+        assert!(cache.get(0, &fonts.font, glyph, fonts.size_px).is_none());
+        assert!(cache.get(0, &fonts.font, glyph, fonts.size_px).is_none());
         let key = GlyphKey {
+            font: 0,
             glyph: glyph.0,
             size_px: fonts.size_px.round() as u32,
         };
-        // The second call is served from the cache: the key must hold `None`.
         assert!(matches!(cache.slots.get(&key), Some(&None)));
     }
 }

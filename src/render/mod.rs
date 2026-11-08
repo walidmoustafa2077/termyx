@@ -3,11 +3,14 @@
 mod atlas;
 mod glyph_cache;
 
+use ab_glyph::GlyphId;
 use tiny_skia::Pixmap;
 
+use crate::bidi;
 use crate::fonts::FontSet;
 use crate::selection::Selection;
-use crate::term::{Color, GridSnapshot};
+use crate::shape;
+use crate::term::{Color, GridSnapshot, RowSnapshot};
 use crate::theme::{Rgb, Theme};
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -20,6 +23,7 @@ pub struct Renderer {
     pub cache: GlyphCache,
     pub theme: Theme,
     padding: u32,
+    shape_cache: shape::ShapeCache,
 }
 
 impl Renderer {
@@ -33,6 +37,7 @@ impl Renderer {
             cache: GlyphCache::new(),
             theme,
             padding,
+            shape_cache: shape::ShapeCache::new(),
         })
     }
 
@@ -63,50 +68,168 @@ impl Renderer {
         maps: &[VisualMap],
         selection: Option<&Selection>,
     ) {
+        self.shape_cache.clear();
         self.draw_background();
-
         let cell_w = self.fonts.cell_w as f32;
         let cell_h = self.fonts.cell_h as f32;
-        let ascent = self.fonts.ascent;
         let padding = self.padding as f32;
-        let cursor_color = self.theme.cursor;
 
+        self.draw_cell_backgrounds(snapshot, maps, selection, cell_w, cell_h);
+
+        let mut shaped_rows: Vec<Vec<shape::ShapedRun>> = Vec::with_capacity(snapshot.lines.len());
+        if let Some(faces) = shape::Faces::from_fonts(&self.fonts) {
+            for (row, line) in snapshot.lines.iter().enumerate() {
+                let Some(map) = maps.get(row) else {
+                    shaped_rows.push(Vec::new());
+                    continue;
+                };
+                let text = bidi::RowText::flatten(line);
+                shaped_rows.push(shape::shape_row(&text, map, &faces, &mut self.shape_cache));
+            }
+        } else {
+            shaped_rows.resize_with(snapshot.lines.len(), Vec::new);
+        }
+
+        for (row, runs) in shaped_rows.iter().enumerate() {
+            let Some(line) = snapshot.lines.get(row) else {
+                continue;
+            };
+            for run in runs {
+                self.draw_shaped_run(run, line, row, cell_w, cell_h);
+            }
+        }
+
+        self.draw_decorations(snapshot, maps, cell_w, cell_h);
+
+        if snapshot.display_offset == 0 {
+            if let Some(map) = maps.get(snapshot.cursor.row) {
+                let visual = map.cursor_visual(&snapshot.cursor);
+                let x = padding + visual as f32 * cell_w;
+                let y = padding + snapshot.cursor.row as f32 * cell_h;
+                self.fill_rect(x, y, 2.0, cell_h, self.theme.cursor);
+            }
+        }
+    }
+
+    fn draw_cell_backgrounds(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        selection: Option<&Selection>,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
         for (row, line) in snapshot.lines.iter().enumerate() {
             let Some(map) = maps.get(row) else {
                 continue;
             };
-            let y = padding + row as f32 * cell_h;
+            let y = self.padding as f32 + row as f32 * cell_h;
             for (logical, cell) in line.cells.iter().enumerate() {
-                let x = padding + map.visual_of(logical) as f32 * cell_w;
-                let foreground = self.resolve(cell.style.fg);
+                let x = self.padding as f32 + map.visual_of(logical) as f32 * cell_w;
                 let background = cell
                     .style
                     .bg
                     .map(|bg| self.resolve(bg))
                     .unwrap_or(self.theme.background);
-                let (foreground, background) = if cell.style.inverse {
-                    (background, foreground)
+                // An inverse cell shows its foreground behind the glyph.
+                let background = if cell.style.inverse {
+                    self.resolve(cell.style.fg)
                 } else {
-                    (foreground, background)
+                    background
                 };
                 if cell.style.bg.is_some() || cell.style.inverse {
                     self.fill_rect(x, y, cell_w, cell_h, background);
                 }
                 if selection.is_some_and(|selection| selection.contains(row, logical)) {
-                    let color = self.theme.selection;
-                    self.fill_rect(x, y, cell_w, cell_h, color);
+                    self.fill_rect(x, y, cell_w, cell_h, self.theme.selection);
                 }
+            }
+        }
+    }
+
+    fn draw_shaped_run(
+        &mut self,
+        run: &shape::ShapedRun,
+        line: &RowSnapshot,
+        row: usize,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        let padding = self.padding as f32;
+        let baseline = padding + row as f32 * cell_h + self.fonts.ascent;
+        let units = run.units_per_em.max(1) as f32;
+        let scale = self.fonts.size_px / units;
+        let font_id = u8::from(run.arabic);
+        let (font, _, _) = self.fonts.font_for(run.arabic);
+
+        for cluster in &run.clusters {
+            let Some(first) = line.cells.get(cluster.cells.start) else {
+                continue;
+            };
+            if first.style.hidden {
+                continue;
+            }
+            if cluster.cells.len() == 1 && bidi::is_bidi_control_only(&first.text) {
+                continue;
+            }
+            let color = self.resolve(first.style.fg);
+            let slot_start = cluster.slots.start.max(run.slots.start);
+            let slot_end = cluster.slots.end.min(run.slots.end);
+            if slot_start >= slot_end {
+                continue;
+            }
+            let slot_w = (slot_end - slot_start) as f32 * cell_w;
+            let natural: f32 = cluster
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.x_advance as f32 * scale)
+                .sum();
+            let (offset, scale_x) = fit_cluster(natural, slot_w);
+            let mut pen = padding + slot_start as f32 * cell_w + offset;
+
+            for glyph in &cluster.glyphs {
+                let id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
+                if let Some(slot) = self.cache.get(font_id, font, id, self.fonts.size_px) {
+                    let x = pen + glyph.x_offset as f32 * scale * scale_x;
+                    let y = baseline - glyph.y_offset as f32 * scale;
+                    blit_scaled(
+                        &mut self.pixmap,
+                        &self.cache.atlas,
+                        slot,
+                        x,
+                        y,
+                        color,
+                        scale_x,
+                    );
+                }
+                pen += glyph.x_advance as f32 * scale * scale_x;
+            }
+        }
+    }
+
+    fn draw_decorations(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        for (row, line) in snapshot.lines.iter().enumerate() {
+            let Some(map) = maps.get(row) else {
+                continue;
+            };
+            let y = self.padding as f32 + row as f32 * cell_h;
+            for (logical, cell) in line.cells.iter().enumerate() {
                 if cell.style.hidden {
                     continue;
                 }
-                if cell.width > 0 && !cell.text.is_empty() {
-                    self.draw_text(x, y + ascent, &cell.text, foreground);
-                }
+                let foreground = self.resolve(cell.style.fg);
+                let x = self.padding as f32 + map.visual_of(logical) as f32 * cell_w;
                 let span = cell_w * cell.width.max(1) as f32;
                 if cell.style.underline {
                     self.fill_rect(
                         x,
-                        (y + ascent + 1.0).min(y + cell_h - 1.0),
+                        (y + self.fonts.ascent + 1.0).min(y + cell_h - 1.0),
                         span,
                         1.0,
                         foreground,
@@ -115,15 +238,6 @@ impl Renderer {
                 if cell.style.strikethrough {
                     self.fill_rect(x, y + (cell_h / 2.0).round(), span, 1.0, foreground);
                 }
-            }
-        }
-
-        if snapshot.display_offset == 0 {
-            if let Some(map) = maps.get(snapshot.cursor.row) {
-                let visual = map.cursor_visual(&snapshot.cursor);
-                let x = padding + visual as f32 * cell_w;
-                let y = padding + snapshot.cursor.row as f32 * cell_h;
-                self.fill_rect(x, y, 2.0, cell_h, cursor_color);
             }
         }
     }
@@ -166,33 +280,6 @@ impl Renderer {
         &self.fonts
     }
 
-    pub fn draw_text(&mut self, x: f32, baseline: f32, text: &str, color: Rgb) {
-        let mut pen = x;
-        let mut base_pen = x;
-        for ch in text.chars() {
-            // Control characters report no width; treat them as one cell so
-            // the pen still advances. Combining marks report a width of zero.
-            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-            let draw_pen = if width == 0 { base_pen } else { pen };
-            if let Some(glyph) = self.fonts.glyph(ch) {
-                if let Some(slot) = self.cache.get(&self.fonts.font, glyph, self.fonts.size_px) {
-                    blit(
-                        &mut self.pixmap,
-                        &self.cache.atlas,
-                        slot,
-                        draw_pen,
-                        baseline,
-                        color,
-                    );
-                }
-            }
-            if width > 0 {
-                base_pen = pen;
-                pen += width as f32 * self.fonts.cell_w as f32;
-            }
-        }
-    }
-
     /// Copies the pixmap into the CPU pixel buffer. Must run after drawing and
     /// before [`Renderer::pixels`] is read.
     pub fn sync(&mut self) {
@@ -211,31 +298,46 @@ impl Renderer {
     }
 }
 
-fn blit(
+/// Centers a cluster that fits its slot and scales one that does not.
+fn fit_cluster(natural: f32, slot_w: f32) -> (f32, f32) {
+    if slot_w <= 0.0 || natural <= 0.0 {
+        return (0.0, 1.0);
+    }
+    if natural > slot_w * 1.05 {
+        (0.0, slot_w / natural)
+    } else {
+        ((slot_w - natural) / 2.0, 1.0)
+    }
+}
+
+fn blit_scaled(
     pixmap: &mut Pixmap,
     atlas: &Atlas,
     slot: GlyphSlot,
     pen_x: f32,
     baseline: f32,
     color: Rgb,
+    scale_x: f32,
 ) {
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let stride = width as usize * 4;
-    let dst_x = pen_x.round() as i32 + slot.bearing_x;
+    let dst_w = (slot.rect.w as f32 * scale_x).round().max(1.0) as i32;
+    let dst_x = pen_x.round() as i32 + (slot.bearing_x as f32 * scale_x).round() as i32;
     let dst_y = baseline.round() as i32 + slot.bearing_y;
     let atlas_width = atlas.width();
     let data = pixmap.data_mut();
     for row in 0..slot.rect.h as i32 {
-        for col in 0..slot.rect.w as i32 {
+        for col in 0..dst_w {
             let x = dst_x + col;
             let y = dst_y + row;
             if x < 0 || y < 0 || x >= width || y >= height {
                 continue;
             }
-            let mask_x = slot.rect.x as i32 + col;
+            let src_col = (col as f32 / scale_x).floor().min((slot.rect.w - 1) as f32) as u32;
+            let mask_x = slot.rect.x + src_col;
             let mask_y = slot.rect.y as i32 + row;
-            let coverage = atlas.data()[(mask_y as u32 * atlas_width + mask_x as u32) as usize];
+            let coverage = atlas.data()[(mask_y as u32 * atlas_width + mask_x) as usize];
             if coverage == 0 {
                 continue;
             }
@@ -257,9 +359,8 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ThemeConfig;
-    use crate::term::{Affinity, Cell, CursorState, RowSnapshot, Style};
-    use crate::theme::Rgb;
+    use crate::config::{BaseDirection, ThemeConfig};
+    use crate::term::{Affinity, Cell, CursorState, LogicalPos, RowSnapshot, Style};
 
     fn default_renderer() -> Renderer {
         let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
@@ -267,6 +368,16 @@ mod tests {
             .expect("a monospace font must exist");
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
             .expect("renderer must be constructible")
+    }
+
+    fn arabic_renderer() -> Option<Renderer> {
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+            .ok()?;
+        if !fonts.has_arabic() {
+            return None;
+        }
+        Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4).ok()
     }
 
     fn packed(color: Rgb) -> u32 {
@@ -279,6 +390,24 @@ mod tests {
             rows: 1,
             lines: vec![RowSnapshot {
                 cells: vec![cell],
+                wrapped: false,
+            }],
+            cursor: CursorState {
+                row: 1,
+                logical: 0,
+                affinity: Affinity::Before,
+            },
+            display_offset: 0,
+        }
+    }
+
+    fn row_snapshot(cells: Vec<Cell>) -> GridSnapshot {
+        let cols = cells.len();
+        GridSnapshot {
+            cols,
+            rows: 1,
+            lines: vec![RowSnapshot {
+                cells,
                 wrapped: false,
             }],
             cursor: CursorState {
@@ -337,50 +466,191 @@ mod tests {
     }
 
     #[test]
-    fn draw_text_paints_foreground_pixels() {
-        let mut renderer = default_renderer();
-        let width = renderer.fonts.cell_w * 4;
-        let height = renderer.fonts.cell_h * 2;
-        renderer.resize(width, height);
-        let foreground = renderer.theme.foreground;
-        renderer.draw_text(0.0, renderer.fonts.ascent, "M", foreground);
-        renderer.sync();
-        assert!(renderer.pixels().iter().any(|pixel| *pixel != 0x000c_0c0c));
+    fn fit_cluster_centers_narrow_and_shrinks_wide_clusters() {
+        assert_eq!(fit_cluster(5.0, 10.0), (2.5, 1.0));
+        let (offset, scale) = fit_cluster(20.0, 10.0);
+        assert_eq!(offset, 0.0);
+        assert!((scale - 0.5).abs() < f32::EPSILON);
+        assert_eq!(fit_cluster(0.0, 10.0), (0.0, 1.0));
     }
 
     #[test]
-    fn glyphs_advance_exactly_one_cell() {
+    fn latin_cluster_is_painted_at_its_cell_slot() {
         let mut renderer = default_renderer();
         let cell_w = renderer.fonts.cell_w;
-        let height = renderer.fonts.cell_h * 2;
-        renderer.resize(cell_w * 3, height);
-        let foreground = renderer.theme.foreground;
-        renderer.draw_text(0.0, renderer.fonts.ascent, "MM", foreground);
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 4, cell_h * 2);
+        let snapshot = row_snapshot(vec![
+            Cell {
+                text: " ".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: " ".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "M".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: " ".into(),
+                width: 1,
+                style: Style::default(),
+            },
+        ]);
+        renderer.draw(&snapshot, &[VisualMap::identity(4)], None);
         renderer.sync();
+        let padding = renderer.padding();
         let columns = painted_columns(&renderer);
-        // The second glyph starts in its own cell, so its leftmost painted
-        // column lies on or after the boundary between cell 0 and cell 1.
-        let second_glyph_left = columns
+        assert!(!columns.is_empty());
+        assert!(columns
             .iter()
-            .copied()
-            .find(|column| *column >= cell_w)
-            .expect("the second glyph must be painted");
-        assert!(second_glyph_left >= cell_w - 1);
-        assert!(*columns.last().unwrap() < cell_w * 2);
+            .all(|column| *column + 1 >= padding + 2 * cell_w && *column < padding + 3 * cell_w));
     }
 
     #[test]
-    fn combining_marks_do_not_advance_the_pen() {
+    fn lam_alef_ligature_spans_two_cells_without_shifting_following_text() {
+        let Some(mut renderer) = arabic_renderer() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 4, cell_h * 2);
+        let snapshot = row_snapshot(vec![
+            Cell {
+                text: "ل".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "ا".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "x".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: " ".into(),
+                width: 1,
+                style: Style::default(),
+            },
+        ]);
+        let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        renderer.draw(&snapshot, &maps, None);
+        renderer.sync();
+        let start = renderer.padding();
+        let columns = painted_columns(&renderer);
+        assert!(
+            columns.iter().any(|column| *column < start + cell_w),
+            "the ligature must paint in the first cell: {columns:?}"
+        );
+        assert!(
+            columns
+                .iter()
+                .any(|column| *column >= start + cell_w && *column < start + 2 * cell_w),
+            "the ligature must cross into the second cell: {columns:?}"
+        );
+        assert!(
+            columns
+                .iter()
+                .any(|column| *column >= start + 2 * cell_w && *column < start + 3 * cell_w),
+            "the following glyph must stay in cell 2: {columns:?}"
+        );
+        assert!(
+            columns.iter().all(|column| *column < start + 3 * cell_w),
+            "nothing may paint past the row: {columns:?}"
+        );
+    }
+
+    #[test]
+    fn selection_fills_visual_slots_of_logical_cells() {
+        let Some(mut renderer) = arabic_renderer() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 7, cell_h * 2);
+        let snapshot = row_snapshot(vec![
+            Cell {
+                text: "a".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "b".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "c".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "م".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "ر".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: "ح".into(),
+                width: 1,
+                style: Style::default(),
+            },
+            Cell {
+                text: " ".into(),
+                width: 1,
+                style: Style::default(),
+            },
+        ]);
+        let mut selection = Selection::new(LogicalPos { row: 0, col: 3 });
+        selection.update(LogicalPos { row: 0, col: 5 });
+        let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.sync();
+        let selection_color = packed(renderer.theme.selection);
+        let padding = renderer.padding();
+        let width = renderer.pixmap.width() as usize;
+        for slot in 0..7 {
+            let x = padding + slot * cell_w + 1;
+            let y = padding + 1;
+            let pixel = renderer.pixels()[y as usize * width + x as usize];
+            let selected = (3..6).contains(&slot);
+            assert_eq!(
+                pixel == selection_color,
+                selected,
+                "slot {slot} selection state"
+            );
+        }
+    }
+
+    #[test]
+    fn bidi_control_cells_paint_nothing() {
         let mut renderer = default_renderer();
         let cell_w = renderer.fonts.cell_w;
-        let height = renderer.fonts.cell_h * 2;
-        renderer.resize(cell_w * 3, height);
-        let foreground = renderer.theme.foreground;
-        renderer.draw_text(0.0, renderer.fonts.ascent, "e\u{0301}", foreground);
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = row_snapshot(vec![Cell {
+            text: "\u{200F}".into(),
+            width: 1,
+            style: Style::default(),
+        }]);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
         renderer.sync();
-        let columns = painted_columns(&renderer);
-        assert!(!columns.is_empty(), "the base glyph must be painted");
-        assert!(*columns.last().unwrap() < cell_w);
+        assert!(painted_rows(&renderer).is_empty());
     }
 
     #[test]

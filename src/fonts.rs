@@ -1,10 +1,6 @@
 //! Font discovery, loading, and metrics.
-//!
-// Consumed by shaping and the renderer in Task 6; the tests below are the only
-// callers of the new fallback API until then.
-#![allow(dead_code)]
 
-use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont};
+use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use fontdb::{Database, Family, Query, Stretch, Style, Weight};
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +41,7 @@ pub struct FontSet {
     pub cell_w: u32,
     pub cell_h: u32,
     pub ascent: f32,
-    // No runtime consumer; part of the published font-metrics pair.
+    // Published metric (Phase 0 plan, Task 5); the renderer only needs ascent.
     #[allow(dead_code)]
     pub descent: f32,
     pub arabic: Option<FontFace>,
@@ -99,13 +95,6 @@ impl FontSet {
             (true, Some(face)) => (&face.font, &face.data, face.index),
             _ => (&self.font, &self.data, self.index),
         }
-    }
-
-    /// The glyph for `ch` in the primary face, or `None` when the face has no
-    /// mapping for it.
-    pub fn glyph(&self, ch: char) -> Option<GlyphId> {
-        let glyph = self.font.glyph_id(ch);
-        (glyph.0 != 0).then_some(glyph)
     }
 }
 
