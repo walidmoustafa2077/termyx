@@ -84,7 +84,7 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term::{Affinity, Cell, Color, CursorState, RowSnapshot, Style};
+    use crate::term::{Affinity, Cell, Color, CursorShape, CursorState, RowSnapshot, Style};
 
     fn position(row: usize, col: usize) -> LogicalPos {
         LogicalPos { row, col }
@@ -118,6 +118,8 @@ mod tests {
                 row: 0,
                 logical: 0,
                 affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
             },
             display_offset: 0,
         }
@@ -186,6 +188,8 @@ mod tests {
                 row: 0,
                 logical: 0,
                 affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
             },
             display_offset: 0,
         }

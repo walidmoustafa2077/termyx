@@ -10,7 +10,7 @@ use crate::bidi;
 use crate::fonts::FontSet;
 use crate::selection::Selection;
 use crate::shape;
-use crate::term::{Color, GridSnapshot, RowSnapshot, Style};
+use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -79,16 +79,38 @@ impl Renderer {
 
         self.draw_cell_backgrounds(snapshot, maps, selection, cell_w, cell_h);
 
-        let cursor = if snapshot.display_offset == 0 {
-            maps.get(snapshot.cursor.row)
-                .map(|map| (snapshot.cursor.row, map.cursor_visual(&snapshot.cursor)))
+        let cursor = if snapshot.display_offset == 0 && snapshot.cursor.visible {
+            maps.get(snapshot.cursor.row).map(|map| {
+                (
+                    snapshot.cursor.row,
+                    map.cursor_visual(&snapshot.cursor),
+                    snapshot.cursor.shape,
+                )
+            })
         } else {
             None
         };
-        if let Some((row, visual)) = cursor {
+        if let Some((row, visual, shape)) = cursor {
             let x = padding + visual as f32 * cell_w;
             let y = padding + row as f32 * cell_h;
-            self.fill_rect(x, y, cell_w, cell_h, self.theme.cursor);
+            match shape {
+                CursorShape::Block => {
+                    self.fill_rect(x, y, cell_w, cell_h, self.theme.cursor);
+                }
+                CursorShape::Beam => {
+                    let width = (cell_w / 8.0).max(1.0);
+                    self.fill_rect(x, y, width, cell_h, self.theme.cursor);
+                }
+                CursorShape::Underline => {
+                    self.fill_rect(x, y + cell_h - 2.0, cell_w, 2.0, self.theme.cursor);
+                }
+                CursorShape::HollowBlock => {
+                    self.fill_rect(x, y, cell_w, 1.0, self.theme.cursor);
+                    self.fill_rect(x, y + cell_h - 1.0, cell_w, 1.0, self.theme.cursor);
+                    self.fill_rect(x, y, 1.0, cell_h, self.theme.cursor);
+                    self.fill_rect(x + cell_w - 1.0, y, 1.0, cell_h, self.theme.cursor);
+                }
+            }
         }
 
         let mut shaped_rows: Vec<Vec<shape::ShapedRun>> = Vec::with_capacity(snapshot.lines.len());
@@ -156,7 +178,7 @@ impl Renderer {
         row: usize,
         cell_w: f32,
         cell_h: f32,
-        cursor: Option<(usize, usize)>,
+        cursor: Option<(usize, usize, CursorShape)>,
     ) {
         let padding = self.padding as f32;
         // The cell grid comes from the primary face; a system Arabic fallback
@@ -178,8 +200,8 @@ impl Renderer {
                 continue;
             }
             let (color, _) = self.cell_colors(first.style);
-            let under_cursor = cursor.is_some_and(|(cursor_row, visual)| {
-                cursor_row == row && cluster.slots.contains(&visual)
+            let under_cursor = cursor.is_some_and(|(cursor_row, visual, shape)| {
+                shape == CursorShape::Block && cursor_row == row && cluster.slots.contains(&visual)
             });
             let color = if under_cursor {
                 self.theme.background
@@ -390,7 +412,7 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
 mod tests {
     use super::*;
     use crate::config::{BaseDirection, ThemeConfig};
-    use crate::term::{Affinity, Cell, CursorState, LogicalPos, RowSnapshot, Style};
+    use crate::term::{Affinity, Cell, CursorShape, CursorState, LogicalPos, RowSnapshot, Style};
 
     fn default_renderer() -> Renderer {
         let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
@@ -426,9 +448,23 @@ mod tests {
                 row: 1,
                 logical: 0,
                 affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
             },
             display_offset: 0,
         }
+    }
+
+    fn cursor_snapshot(shape: CursorShape, visible: bool) -> GridSnapshot {
+        let mut snapshot = single_cell_snapshot(Cell {
+            text: " ".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        snapshot.cursor.row = 0;
+        snapshot.cursor.shape = shape;
+        snapshot.cursor.visible = visible;
+        snapshot
     }
 
     fn row_snapshot(cells: Vec<Cell>) -> GridSnapshot {
@@ -444,6 +480,8 @@ mod tests {
                 row: 1,
                 logical: 0,
                 affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
             },
             display_offset: 0,
         }
@@ -695,6 +733,89 @@ mod tests {
             packed(renderer.theme.cursor),
             "the block must span the whole cell, not a thin bar"
         );
+    }
+
+    #[test]
+    fn hidden_cursor_paints_nothing() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = cursor_snapshot(CursorShape::Block, false);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let index = padding * renderer.pixmap.width() as usize + padding;
+        assert_eq!(renderer.pixels()[index], packed(renderer.theme.background));
+    }
+
+    #[test]
+    fn beam_cursor_is_a_narrow_left_bar() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = cursor_snapshot(CursorShape::Beam, true);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let row = padding * width;
+        assert_eq!(
+            renderer.pixels()[row + padding],
+            packed(renderer.theme.cursor)
+        );
+        assert_eq!(
+            renderer.pixels()[row + padding + cell_w as usize - 2],
+            packed(renderer.theme.background)
+        );
+    }
+
+    #[test]
+    fn underline_cursor_sits_on_the_bottom_edge() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = cursor_snapshot(CursorShape::Underline, true);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let bottom = padding + cell_h as usize - 1;
+        assert_eq!(
+            renderer.pixels()[bottom * width + padding + 2],
+            packed(renderer.theme.cursor)
+        );
+        assert_eq!(
+            renderer.pixels()[padding * width + padding + 2],
+            packed(renderer.theme.background)
+        );
+    }
+
+    #[test]
+    fn hollow_cursor_draws_an_outline() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = cursor_snapshot(CursorShape::HollowBlock, true);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let right = padding + cell_w as usize - 1;
+        let bottom = padding + cell_h as usize - 1;
+        assert_eq!(
+            renderer.pixels()[padding * width + padding],
+            packed(renderer.theme.cursor)
+        );
+        assert_eq!(
+            renderer.pixels()[bottom * width + right],
+            packed(renderer.theme.cursor)
+        );
+        let center = (padding + cell_h as usize / 2) * width + padding + cell_w as usize / 2;
+        assert_eq!(renderer.pixels()[center], packed(renderer.theme.background));
     }
 
     #[test]

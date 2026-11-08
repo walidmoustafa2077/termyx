@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     use crate::config::BaseDirection;
-    use crate::term::{Cell, RowSnapshot, Style};
+    use crate::term::{Cell, CursorShape, RowSnapshot, Style};
     use unicode_width::UnicodeWidthStr;
 
     fn cell(text: &str) -> Cell {
@@ -221,6 +221,8 @@ mod tests {
             row: 0,
             logical,
             affinity,
+            shape: CursorShape::Block,
+            visible: true,
         }
     }
 

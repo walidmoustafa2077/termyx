@@ -5,7 +5,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use unicode_width::UnicodeWidthStr;
-use vte::ansi::{Color as AnsiColor, NamedColor, Processor};
+use vte::ansi::{Color as AnsiColor, CursorShape as AnsiCursorShape, NamedColor, Processor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Color {
@@ -48,10 +48,20 @@ pub enum Affinity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Beam,
+    HollowBlock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorState {
     pub row: usize,
     pub logical: usize,
     pub affinity: Affinity,
+    pub shape: CursorShape,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -219,18 +229,26 @@ impl Terminal {
             });
         }
 
+        let shape = map_cursor_shape(content.cursor.shape);
+        let visible = content.cursor.shape != AnsiCursorShape::Hidden
+            && content.mode.contains(TermMode::SHOW_CURSOR);
+
         let cursor = if content.display_offset == 0 {
             let row = content.cursor.point.line.0.max(0) as usize;
             CursorState {
                 row: row.min(rows.saturating_sub(1)),
                 logical: content.cursor.point.column.0.min(cols),
                 affinity: Affinity::Before,
+                shape,
+                visible,
             }
         } else {
             CursorState {
                 row: 0,
                 logical: 0,
                 affinity: Affinity::Before,
+                shape,
+                visible,
             }
         };
 
@@ -261,6 +279,16 @@ impl Terminal {
         }
 
         (used_rows, content.cursor.point.line.0.max(0) as usize)
+    }
+}
+
+fn map_cursor_shape(shape: AnsiCursorShape) -> CursorShape {
+    match shape {
+        AnsiCursorShape::Block => CursorShape::Block,
+        AnsiCursorShape::Underline => CursorShape::Underline,
+        AnsiCursorShape::Beam => CursorShape::Beam,
+        AnsiCursorShape::HollowBlock => CursorShape::HollowBlock,
+        AnsiCursorShape::Hidden => CursorShape::Block,
     }
 }
 
@@ -468,6 +496,25 @@ mod tests {
         let converted = convert_cell(&cell);
         assert_eq!(converted.text, " ");
         assert_eq!(converted.width, 1);
+    }
+
+    #[test]
+    fn cursor_shape_and_visibility_are_captured() {
+        let mut term = Terminal::new(20, 5, 1_000);
+
+        term.feed(b"\x1b[4 q");
+        let cursor = term.snapshot().cursor;
+        assert_eq!(cursor.shape, CursorShape::Underline);
+        assert!(cursor.visible);
+
+        term.feed(b"\x1b[6 q");
+        assert_eq!(term.snapshot().cursor.shape, CursorShape::Beam);
+
+        term.feed(b"\x1b[?25l");
+        assert!(!term.snapshot().cursor.visible);
+
+        term.feed(b"\x1b[?25h");
+        assert!(term.snapshot().cursor.visible);
     }
 
     #[test]
