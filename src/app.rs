@@ -12,14 +12,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::config::Config;
+use crate::config::{BidiConfig, Config};
 use crate::event::UserEvent;
 use crate::fonts::FontSet;
 use crate::input::{self, KeyInput, Mods};
 use crate::pty::PtySession;
 use crate::render::Renderer;
 use crate::selection::Selection;
-use crate::term::{LogicalPos, Terminal};
+use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
 
@@ -312,6 +312,7 @@ impl App {
 
     fn pos_at(&self, x: f64, y: f64) -> Option<LogicalPos> {
         let renderer = self.renderer.as_ref()?;
+        let terminal = self.terminal.as_ref()?;
         let (row, visual) = cell_at(
             x,
             y,
@@ -321,11 +322,9 @@ impl App {
             self.cols,
             self.rows,
         );
-        let map = VisualMap::identity(self.cols);
-        Some(LogicalPos {
-            row,
-            col: map.logical_at(visual),
-        })
+        let snapshot = terminal.snapshot();
+        let line = snapshot.lines.get(row)?;
+        Some(logical_pos_at(row, visual, line, &self.config.bidi))
     }
 
     fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
@@ -487,6 +486,13 @@ fn mods_from(modifiers: ModifiersState) -> Mods {
     }
 }
 
+fn logical_pos_at(row: usize, visual: usize, line: &RowSnapshot, bidi: &BidiConfig) -> LogicalPos {
+    LogicalPos {
+        row,
+        col: VisualMap::for_row(line, bidi).logical_at(visual),
+    }
+}
+
 fn cell_at(
     x: f64,
     y: f64,
@@ -526,6 +532,9 @@ fn cap_paste(mut text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::config::BaseDirection;
+    use crate::term::{Cell, RowSnapshot, Style};
 
     #[test]
     fn grid_size_uses_padding_and_minimums() {
@@ -623,5 +632,45 @@ mod tests {
         let capped = cap_paste(text);
         assert_eq!(capped.chars().count(), MAX_PASTE_CHARS);
         assert!(capped.chars().all(|ch| ch == 'é'));
+    }
+
+    fn bidi_line() -> RowSnapshot {
+        RowSnapshot {
+            cells: ["a", "b", "c", "م", "ر", "ح"]
+                .iter()
+                .map(|text| Cell {
+                    text: (*text).to_string(),
+                    width: 1,
+                    style: Style::default(),
+                })
+                .collect(),
+            wrapped: false,
+        }
+    }
+
+    #[test]
+    fn logical_position_uses_the_row_bidi_map() {
+        let line = bidi_line();
+        let bidi = BidiConfig {
+            enabled: true,
+            base_direction: BaseDirection::Ltr,
+        };
+        assert_eq!(
+            logical_pos_at(2, 5, &line, &bidi),
+            LogicalPos { row: 2, col: 3 }
+        );
+    }
+
+    #[test]
+    fn disabled_bidi_hit_tests_identity() {
+        let line = bidi_line();
+        let bidi = BidiConfig {
+            enabled: false,
+            base_direction: BaseDirection::Ltr,
+        };
+        assert_eq!(
+            logical_pos_at(0, 5, &line, &bidi),
+            LogicalPos { row: 0, col: 5 }
+        );
     }
 }

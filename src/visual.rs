@@ -372,4 +372,14 @@ mod tests {
         assert_eq!(map.visual_of(2), 2);
         assert!(map.levels().iter().all(|level| *level == 0));
     }
+
+    #[test]
+    fn hit_testing_through_an_rtl_run_returns_logical_cells() {
+        let map = VisualMap::from_bidi(&row(&["a", "b", "c", "م", "ر", "ح"]), BaseDirection::Ltr);
+        assert_eq!(map.logical_at(0), 0);
+        assert_eq!(map.logical_at(2), 2);
+        assert_eq!(map.logical_at(3), 5);
+        assert_eq!(map.logical_at(4), 4);
+        assert_eq!(map.logical_at(5), 3);
+    }
 }

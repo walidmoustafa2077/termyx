@@ -166,4 +166,49 @@ mod tests {
         assert_eq!(selection.to_text(&snapshot, true), "hi");
         assert_eq!(selection.to_text(&snapshot, false), "hi   ");
     }
+
+    fn arabic_snapshot() -> GridSnapshot {
+        GridSnapshot {
+            cols: 6,
+            rows: 1,
+            lines: vec![RowSnapshot {
+                cells: ["a", "b", "c", "م", "ر", "ح"]
+                    .iter()
+                    .map(|text| Cell {
+                        text: (*text).to_string(),
+                        width: 1,
+                        style: Style::default(),
+                    })
+                    .collect(),
+                wrapped: false,
+            }],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+            },
+            display_offset: 0,
+        }
+    }
+
+    #[test]
+    fn copy_returns_logical_order_for_an_rtl_row() {
+        let mut selection = Selection::new(position(0, 3));
+        selection.update(position(0, 5));
+        assert_eq!(selection.to_text(&arabic_snapshot(), true), "مرح");
+    }
+
+    #[test]
+    fn copy_returns_logical_order_for_a_mixed_row() {
+        let mut selection = Selection::new(position(0, 0));
+        selection.update(position(0, 5));
+        assert_eq!(selection.to_text(&arabic_snapshot(), true), "abcمرح");
+    }
+
+    #[test]
+    fn reverse_drag_still_copies_in_logical_order() {
+        let mut selection = Selection::new(position(0, 5));
+        selection.update(position(0, 3));
+        assert_eq!(selection.to_text(&arabic_snapshot(), true), "مرح");
+    }
 }
