@@ -17,6 +17,27 @@ cargo run --release
 Windows requires the MSVC build tools. Linux requires `libxkbcommon`,
 `libwayland`, and `libx11-xcb` development packages.
 
+## Run
+
+Double-click `run.cmd`, or run it from PowerShell:
+
+```powershell
+.\run.cmd
+```
+
+The script builds the release binary if it is missing, then launches it.
+The executable itself is:
+
+```
+target\release\termyx.exe
+```
+
+After changing source, rebuild before running:
+
+```powershell
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release
+```
+
 ## Configuration
 
 Pass `--config <path>` to use a specific file. The default path is:
