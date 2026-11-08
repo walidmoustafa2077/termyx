@@ -262,8 +262,8 @@ mod tests {
     use crate::theme::Rgb;
 
     fn default_renderer() -> Renderer {
-        let fonts = FontSet::load("Consolas", 14.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", 14.0, 1.2))
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
             .expect("a monospace font must exist");
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
             .expect("renderer must be constructible")

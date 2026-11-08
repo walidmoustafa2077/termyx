@@ -87,6 +87,7 @@ impl App {
 
         let fonts = FontSet::load(
             &self.config.font.family,
+            &self.config.font.arabic_family,
             self.config.font.size,
             self.config.font.line_height,
         )?;

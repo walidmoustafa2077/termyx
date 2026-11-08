@@ -1415,6 +1415,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ttf-parser",
  "unicode-bidi",
  "unicode-width",
  "vte",

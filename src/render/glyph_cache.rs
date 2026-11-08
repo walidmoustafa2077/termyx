@@ -83,8 +83,8 @@ mod tests {
 
     #[test]
     fn caches_the_same_glyph_slot() {
-        let fonts = FontSet::load("Consolas", 14.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", 14.0, 1.2))
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
             .expect("font");
         let glyph = fonts.font.glyph_id('A');
         let mut cache = GlyphCache::new();
@@ -96,8 +96,8 @@ mod tests {
 
     #[test]
     fn missing_glyph_returns_none_and_is_cached() {
-        let fonts = FontSet::load("Consolas", 14.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", 14.0, 1.2))
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
             .expect("font");
         let glyph = fonts.font.glyph_id(' ');
         let mut cache = GlyphCache::new();
