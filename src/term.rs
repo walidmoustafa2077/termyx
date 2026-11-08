@@ -79,6 +79,7 @@ pub struct GridSnapshot {
     pub lines: Vec<RowSnapshot>,
     pub cursor: CursorState,
     pub display_offset: usize,
+    pub history: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -230,6 +231,11 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// Number of rows currently held in scrollback.
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -301,6 +307,7 @@ impl Terminal {
             lines,
             cursor,
             display_offset: content.display_offset,
+            history: self.history_size(),
         }
     }
 
@@ -620,6 +627,14 @@ mod tests {
             other => panic!("expected clipboard event, got {other:?}"),
         }
         assert!(user_event_for(alacritty_terminal::event::Event::Bell).is_none());
+    }
+
+    #[test]
+    fn history_size_tracks_scrolled_rows() {
+        let mut terminal = Terminal::new(10, 5, 100);
+        terminal.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\nk");
+        assert!(terminal.history_size() > 0);
+        assert_eq!(terminal.snapshot().history, terminal.history_size());
     }
 
     #[test]

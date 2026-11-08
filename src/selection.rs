@@ -196,6 +196,7 @@ mod tests {
                 visible: true,
             },
             display_offset: 0,
+            history: 0,
         }
     }
 
@@ -266,6 +267,7 @@ mod tests {
                 visible: true,
             },
             display_offset: 0,
+            history: 0,
         }
     }
 

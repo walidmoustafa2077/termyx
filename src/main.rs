@@ -8,6 +8,7 @@ mod fonts;
 mod input;
 mod pty;
 mod render;
+mod scrollbar;
 mod selection;
 mod shape;
 mod term;

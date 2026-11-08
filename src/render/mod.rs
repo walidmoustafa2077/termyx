@@ -8,6 +8,7 @@ use tiny_skia::Pixmap;
 
 use crate::bidi;
 use crate::fonts::FontSet;
+use crate::scrollbar;
 use crate::selection::Selection;
 use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
@@ -143,6 +144,23 @@ impl Renderer {
         }
 
         self.draw_decorations(snapshot, maps, cell_w, cell_h);
+
+        if let Some(geom) = scrollbar::geometry(
+            self.pixmap.width(),
+            self.padding,
+            self.fonts.cell_h,
+            snapshot.rows,
+            snapshot.history,
+            snapshot.display_offset,
+        ) {
+            self.fill_rect(
+                geom.x,
+                geom.thumb_y,
+                geom.width,
+                geom.thumb_h,
+                self.theme.indexed(8),
+            );
+        }
     }
 
     fn draw_cell_backgrounds(
@@ -452,6 +470,7 @@ mod tests {
                 visible: true,
             },
             display_offset: 0,
+            history: 0,
         }
     }
 
@@ -504,6 +523,34 @@ mod tests {
                 visible: true,
             },
             display_offset: 0,
+            history: 0,
+        }
+    }
+
+    fn scroll_snapshot(rows: usize, history: usize, offset: usize) -> GridSnapshot {
+        let cell = Cell {
+            text: " ".into(),
+            width: 1,
+            style: Style::default(),
+        };
+        GridSnapshot {
+            cols: 1,
+            rows,
+            lines: (0..rows)
+                .map(|_| RowSnapshot {
+                    cells: vec![cell.clone()],
+                    wrapped: false,
+                })
+                .collect(),
+            cursor: CursorState {
+                row: rows,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: false,
+            },
+            display_offset: offset,
+            history,
         }
     }
 
@@ -1043,5 +1090,34 @@ mod tests {
         assert!(rows.iter().all(|row| *row == first), "one-pixel rule");
         let expected = renderer.padding() as f32 + (cell_h as f32 / 2.0).round();
         assert_eq!(first, expected as usize);
+    }
+
+    #[test]
+    fn scrollbar_thumb_is_painted() {
+        let mut renderer = default_renderer();
+        renderer.resize(200, 300);
+        let snapshot = scroll_snapshot(10, 20, 5);
+        let maps: Vec<_> = (0..snapshot.rows)
+            .map(|_| VisualMap::identity(snapshot.cols))
+            .collect();
+        renderer.draw(&snapshot, &maps, None);
+        renderer.sync();
+
+        let geom = crate::scrollbar::geometry(
+            renderer.pixmap.width(),
+            renderer.padding,
+            renderer.fonts.cell_h,
+            snapshot.rows,
+            snapshot.history,
+            snapshot.display_offset,
+        )
+        .expect("history should show a scrollbar");
+        let x = (geom.x + geom.width / 2.0).round() as u32;
+        let y = (geom.thumb_y + geom.thumb_h / 2.0).round() as usize;
+        let width = renderer.pixmap.width() as usize;
+        assert_eq!(
+            renderer.pixels()[y * width + x as usize],
+            packed(renderer.theme.indexed(8))
+        );
     }
 }

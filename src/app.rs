@@ -19,6 +19,7 @@ use crate::fonts::FontSet;
 use crate::input::{self, KeyInput, Mods};
 use crate::pty::PtySession;
 use crate::render::Renderer;
+use crate::scrollbar::{self, ScrollbarGeometry};
 use crate::selection::{line_bounds, word_bounds, Selection};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
@@ -60,6 +61,8 @@ pub struct App {
     // Sub-row pixel wheel deltas carried between events so touchpads that emit
     // fractions of a cell per event still scroll.
     wheel_remainder: f32,
+    scrollbar_drag: bool,
+    scrollbar_grab: f32,
     cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
@@ -83,6 +86,8 @@ impl App {
             last_click: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
+            scrollbar_drag: false,
+            scrollbar_grab: 0.0,
             cursor_pos: (0.0, 0.0),
             cols: 80,
             rows: 24,
@@ -304,6 +309,11 @@ impl App {
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
 
+        if self.scrollbar_drag {
+            self.scroll_to_thumb(y as f32 - self.scrollbar_grab);
+            return;
+        }
+
         if let Some(button) = self.app_mouse_button {
             // A forwarded button is down: report motion regardless of Shift so
             // the gesture started by the press stays balanced.
@@ -405,6 +415,19 @@ impl App {
         };
 
         if state == ElementState::Pressed {
+            if button == MouseButton::Left {
+                if let Some((_geom, grab)) =
+                    self.scrollbar_hit(self.cursor_pos.0, self.cursor_pos.1)
+                {
+                    self.scrollbar_drag = true;
+                    self.scrollbar_grab = grab;
+                    self.app_mouse_button = None;
+                    self.mouse_down = false;
+                    self.scroll_to_thumb(self.cursor_pos.1 as f32 - grab);
+                    return;
+                }
+            }
+
             if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
@@ -456,6 +479,9 @@ impl App {
                 }
                 _ => return,
             }
+        } else if self.scrollbar_drag {
+            self.scrollbar_drag = false;
+            return;
         } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
             // Route by the state captured at press time: a forwarded press is
             // released even when Shift or the mouse mode changed mid-gesture.
@@ -497,6 +523,60 @@ impl App {
             .as_ref()
             .map(Terminal::mode)
             .unwrap_or_else(TermMode::empty)
+    }
+
+    fn scrollbar_geometry(&self) -> Option<ScrollbarGeometry> {
+        let renderer = self.renderer.as_ref()?;
+        let terminal = self.terminal.as_ref()?;
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        scrollbar::geometry(
+            size.width,
+            renderer.padding(),
+            renderer.fonts().cell_h,
+            self.rows,
+            terminal.history_size(),
+            terminal.display_offset(),
+        )
+    }
+
+    fn scrollbar_hit(&self, x: f64, y: f64) -> Option<(ScrollbarGeometry, f32)> {
+        let geom = self.scrollbar_geometry()?;
+        let x = x as f32;
+        let y = y as f32;
+        if x < geom.x || x > geom.x + geom.width {
+            return None;
+        }
+        if y < geom.track_y || y > geom.track_y + geom.track_h {
+            return None;
+        }
+        let grab = if y >= geom.thumb_y && y <= geom.thumb_y + geom.thumb_h {
+            y - geom.thumb_y
+        } else {
+            geom.thumb_h / 2.0
+        };
+        Some((geom, grab))
+    }
+
+    fn scroll_to_thumb(&mut self, thumb_top: f32) {
+        let Some(geom) = self.scrollbar_geometry() else {
+            return;
+        };
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        let history = terminal.history_size();
+        let target = scrollbar::offset_for_thumb_top(thumb_top, &geom, history);
+        let current = terminal.display_offset();
+        if target == current {
+            return;
+        }
+        terminal.scroll_display(target as i32 - current as i32);
+        self.selection = None;
+        self.mouse_down = false;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn send_mouse(&mut self, kind: input::MouseEventKind, button: Option<input::MouseButton>) {
@@ -688,6 +768,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.send_mouse(input::MouseEventKind::Release, Some(button));
                     }
                     self.mouse_down = false;
+                    self.scrollbar_drag = false;
                 }
                 if self.app_mouse_mode().contains(TermMode::FOCUS_IN_OUT) {
                     self.write_input(&input::encode_focus(focused));
