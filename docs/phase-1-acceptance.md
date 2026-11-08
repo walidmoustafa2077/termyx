@@ -8,7 +8,7 @@ throwaway scripts were kept outside the repository (see the end of this file).
 
 - Windows 10/11 x64, MSVC toolchain; release build of `8a979d3`.
 - Default font/theme/scrollback from `src/config.rs` (Cascadia Mono 14,
-  10,000 scrollback lines); window default 1200x800.
+  10,000 scrollback lines); window default 1440x800.
 - Acceptance host had no `vim`, `nvim`, `nano`, bash, or zsh, and no WSL.
 - A fullscreen video and external window manager were active on the desktop
   during the run (see "Environment caveats").

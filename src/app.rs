@@ -510,12 +510,11 @@ impl App {
         } else {
             self.mouse_down = false;
             if button == MouseButton::Left && self.config.selection.copy_on_select {
-                let selected = self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.anchor != selection.focus);
-                if selected {
-                    self.copy_selection();
+                if let Some(selection) = &self.selection {
+                    let collapsed = selection.anchor == selection.focus;
+                    if should_copy_on_release(self.click_count, collapsed) {
+                        self.copy_selection();
+                    }
                 }
             }
         }
@@ -914,6 +913,12 @@ fn next_click_count(
     }
 }
 
+/// Copy-on-select copies when the gesture covered more than one cell, or when
+/// it was a double/triple click whose word or line happens to be one cell.
+fn should_copy_on_release(click_count: u8, collapsed: bool) -> bool {
+    click_count >= 2 || !collapsed
+}
+
 fn mods_from(modifiers: ModifiersState) -> Mods {
     Mods {
         ctrl: modifiers.control_key(),
@@ -1224,5 +1229,15 @@ mod tests {
             next_click_count(previous, 1, now + Duration::from_millis(500), 10.0, 10.0),
             1
         );
+    }
+
+    #[test]
+    fn collapsed_single_click_does_not_copy() {
+        assert!(!should_copy_on_release(1, true));
+    }
+
+    #[test]
+    fn collapsed_double_click_copies() {
+        assert!(should_copy_on_release(2, true));
     }
 }
