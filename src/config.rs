@@ -1,4 +1,4 @@
-//! Configuration file loading and defaults.
+﻿//! Configuration file loading and defaults.
 
 use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ impl Default for FontConfig {
             family: "Consolas".into(),
             arabic_family: "Kawkab Mono".into(),
             size: 17.0,
-            line_height: 1.2,
+            line_height: 1.05,
         }
     }
 }
@@ -251,7 +251,7 @@ impl Config {
         }
         self.font.size = self.font.size.clamp(6.0, 48.0);
         if !self.font.line_height.is_finite() || self.font.line_height < 0.8 {
-            self.font.line_height = 1.2;
+            self.font.line_height = 1.05;
         }
         self.scrollback.lines = self.scrollback.lines.clamp(1_000, 200_000);
         self.window.width = self.window.width.clamp(200, 10_000);
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(c.font.family, "Consolas");
         assert_eq!(c.font.arabic_family, "Kawkab Mono");
         assert_eq!(c.font.size, 17.0);
-        assert_eq!(c.font.line_height, 1.2);
+        assert_eq!(c.font.line_height, 1.05);
         assert!(c.bidi.enabled);
         assert_eq!(c.bidi.base_direction, BaseDirection::Ltr);
         assert_eq!(c.window.width, 1200);
@@ -382,9 +382,9 @@ mod tests {
     #[test]
     fn line_height_falls_back_to_default() {
         let c = Config::from_toml_str("[font]\nline_height = 0.5\n").unwrap();
-        assert_eq!(c.font.line_height, 1.2);
+        assert_eq!(c.font.line_height, 1.05);
         let c = Config::from_toml_str("[font]\nline_height = nan\n").unwrap();
-        assert_eq!(c.font.line_height, 1.2);
+        assert_eq!(c.font.line_height, 1.05);
     }
 
     #[test]

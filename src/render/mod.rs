@@ -79,6 +79,18 @@ impl Renderer {
 
         self.draw_cell_backgrounds(snapshot, maps, selection, cell_w, cell_h);
 
+        let cursor = if snapshot.display_offset == 0 {
+            maps.get(snapshot.cursor.row)
+                .map(|map| (snapshot.cursor.row, map.cursor_visual(&snapshot.cursor)))
+        } else {
+            None
+        };
+        if let Some((row, visual)) = cursor {
+            let x = padding + visual as f32 * cell_w;
+            let y = padding + row as f32 * cell_h;
+            self.fill_rect(x, y, cell_w, cell_h, self.theme.cursor);
+        }
+
         let mut shaped_rows: Vec<Vec<shape::ShapedRun>> = Vec::with_capacity(snapshot.lines.len());
         if let Some(faces) = shape::Faces::from_fonts(&self.fonts) {
             for (row, line) in snapshot.lines.iter().enumerate() {
@@ -104,20 +116,11 @@ impl Renderer {
                 continue;
             };
             for run in runs {
-                self.draw_shaped_run(run, line, row, cell_w, cell_h);
+                self.draw_shaped_run(run, line, row, cell_w, cell_h, cursor);
             }
         }
 
         self.draw_decorations(snapshot, maps, cell_w, cell_h);
-
-        if snapshot.display_offset == 0 {
-            if let Some(map) = maps.get(snapshot.cursor.row) {
-                let visual = map.cursor_visual(&snapshot.cursor);
-                let x = padding + visual as f32 * cell_w;
-                let y = padding + snapshot.cursor.row as f32 * cell_h;
-                self.fill_rect(x, y, 2.0, cell_h, self.theme.cursor);
-            }
-        }
     }
 
     fn draw_cell_backgrounds(
@@ -153,6 +156,7 @@ impl Renderer {
         row: usize,
         cell_w: f32,
         cell_h: f32,
+        cursor: Option<(usize, usize)>,
     ) {
         let padding = self.padding as f32;
         // The cell grid comes from the primary face; a system Arabic fallback
@@ -174,6 +178,14 @@ impl Renderer {
                 continue;
             }
             let (color, _) = self.cell_colors(first.style);
+            let under_cursor = cursor.is_some_and(|(cursor_row, visual)| {
+                cursor_row == row && cluster.slots.contains(&visual)
+            });
+            let color = if under_cursor {
+                self.theme.background
+            } else {
+                color
+            };
             let slot_start = cluster.slots.start.max(run.slots.start);
             let slot_end = cluster.slots.end.min(run.slots.end);
             if slot_start >= slot_end {
@@ -655,6 +667,34 @@ mod tests {
                 "slot {slot} selection state"
             );
         }
+    }
+
+    #[test]
+    fn cursor_is_a_filled_block() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let mut snapshot = single_cell_snapshot(Cell {
+            text: " ".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        snapshot.cursor.row = 0;
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let row = padding * width;
+        assert_eq!(
+            renderer.pixels()[row + padding],
+            packed(renderer.theme.cursor)
+        );
+        assert_eq!(
+            renderer.pixels()[row + padding + cell_w as usize - 1],
+            packed(renderer.theme.cursor),
+            "the block must span the whole cell, not a thin bar"
+        );
     }
 
     #[test]

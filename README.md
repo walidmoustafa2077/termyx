@@ -1,4 +1,4 @@
-# Termyx
+﻿# Termyx
 
 A fast, native terminal emulator with first-class RTL support.
 
