@@ -100,6 +100,16 @@ impl App {
             .with_title(DEFAULT_TITLE)
             .with_inner_size(LogicalSize::new(width, height));
         let window = Arc::new(event_loop.create_window(attributes)?);
+        // Center on the primary monitor so the OS never places the window over
+        // the taskbar or past the screen edge.
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let outer = window.outer_size();
+            let monitor_pos = monitor.position();
+            let monitor_size = monitor.size();
+            let x = monitor_pos.x + (monitor_size.width.saturating_sub(outer.width) / 2) as i32;
+            let y = monitor_pos.y + (monitor_size.height.saturating_sub(outer.height) / 2) as i32;
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         // winit starts with IME disabled on Windows; committed composition text
         // arrives as `WindowEvent::Ime` and is forwarded to the PTY.
         window.set_ime_allowed(true);
@@ -703,13 +713,14 @@ fn grid_size(width: u32, height: u32, cell_w: u32, cell_h: u32, padding: u32) ->
     (cols, rows)
 }
 
-/// Caps the configured startup size so the window fits the primary monitor.
+/// Caps the configured startup size so the window fits the primary monitor
+/// (90% of its width, 80% of its height).
 fn initial_window_size(width: u32, height: u32, monitor: Option<(u32, u32)>) -> (u32, u32) {
     let Some((monitor_w, monitor_h)) = monitor else {
         return (width, height);
     };
     let max_w = monitor_w.saturating_mul(9) / 10;
-    let max_h = monitor_h.saturating_mul(85) / 100;
+    let max_h = monitor_h.saturating_mul(4) / 5;
     (width.min(max_w), height.min(max_h))
 }
 
@@ -861,7 +872,7 @@ mod tests {
     fn initial_window_size_fits_the_primary_monitor() {
         assert_eq!(
             initial_window_size(1440, 800, Some((1600, 900))),
-            (1440, 765)
+            (1440, 720)
         );
     }
 
@@ -874,7 +885,7 @@ mod tests {
     fn initial_window_size_fits_a_small_monitor() {
         assert_eq!(
             initial_window_size(1440, 800, Some((1024, 768))),
-            (921, 652)
+            (921, 614)
         );
     }
 
