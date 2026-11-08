@@ -134,8 +134,19 @@ impl Terminal {
         }
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
+    /// Feed raw PTY bytes to the VT parser.
+    ///
+    /// Returns `true` when this feed pushed at least one row into scrollback
+    /// history. Callers use that to invalidate row-anchored state such as a
+    /// text selection.
+    ///
+    /// Limitation: once scrollback is at its cap, `total_lines` stops growing,
+    /// so a scroll at the cap is not reported. A TUI that redraws the visible
+    /// screen in place never grows history, which is the behavior callers want.
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
+        let before = self.term.grid().total_lines();
         self.processor.advance(&mut self.term, bytes);
+        self.term.grid().total_lines() > before
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -517,6 +528,18 @@ mod tests {
 
         term.feed(b"\x1b[?25h");
         assert!(term.snapshot().cursor.visible);
+    }
+
+    #[test]
+    fn feed_reports_scroll_when_output_enters_history() {
+        let mut term = Terminal::new(20, 5, 100);
+        assert!(!term.feed(b"hello"));
+
+        let mut scrolled = false;
+        for _ in 0..10 {
+            scrolled |= term.feed(b"x\r\n");
+        }
+        assert!(scrolled);
     }
 
     #[test]

@@ -504,13 +504,14 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput(bytes) => {
-                if let Some(terminal) = &mut self.terminal {
-                    terminal.feed(&bytes);
+                if let Some(terminal) = self.terminal.as_mut() {
+                    if terminal.feed(&bytes) {
+                        // Only invalidate a selection when rows actually moved
+                        // into history. A TUI redrawing in place must keep the
+                        // user's selection so it can still be copied.
+                        self.selection = None;
+                    }
                 }
-                // Output can scroll rows under a fixed logical anchor (even at
-                // the scrollback cap, where history size stops growing), so a
-                // pending selection may now cover different text.
-                self.selection = None;
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
