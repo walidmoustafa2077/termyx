@@ -182,7 +182,9 @@ impl Renderer {
                 if cell.style.bg.is_some() || cell.style.inverse {
                     self.fill_rect(x, y, cell_w, cell_h, background);
                 }
-                if selection.is_some_and(|selection| selection.contains(row, logical)) {
+                if selection.is_some_and(|selection| {
+                    selection.is_selected(row, logical, map.visual_of(logical), maps)
+                }) {
                     self.fill_rect(x, y, cell_w, cell_h, self.theme.selection);
                 }
             }
@@ -783,6 +785,83 @@ mod tests {
                 "slot {slot} selection state"
             );
         }
+    }
+
+    #[test]
+    fn block_selection_fills_a_rectangle() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        // One extra column of room keeps the padding outside the sampled cells.
+        renderer.resize(cell_w * 4, cell_h * 2);
+        let snapshot = GridSnapshot {
+            cols: 3,
+            rows: 2,
+            lines: vec![
+                RowSnapshot {
+                    cells: vec![
+                        Cell {
+                            text: "a".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                        Cell {
+                            text: "b".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                        Cell {
+                            text: "c".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                    ],
+                    wrapped: false,
+                },
+                RowSnapshot {
+                    cells: vec![
+                        Cell {
+                            text: "d".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                        Cell {
+                            text: "e".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                        Cell {
+                            text: "f".into(),
+                            width: 1,
+                            style: Style::default(),
+                        },
+                    ],
+                    wrapped: false,
+                },
+            ],
+            cursor: CursorState {
+                row: 2,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: false,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let maps: Vec<VisualMap> = (0..2).map(|_| VisualMap::identity(3)).collect();
+        let mut selection = Selection::block(LogicalPos { row: 0, col: 0 });
+        selection.update(LogicalPos { row: 1, col: 1 });
+        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.sync();
+        let padding = renderer.padding();
+        let width = renderer.pixmap.width() as usize;
+        let at = |x: u32, y: u32| renderer.pixels()[y as usize * width + x as usize];
+        // Sample the cell corner so glyph ink never covers the selection fill.
+        let selected = at(padding + 1, padding + 1);
+        let outside = at(padding + 2 * cell_w + 1, padding + cell_h + 1);
+        assert_eq!(selected, packed(renderer.theme.selection));
+        assert_ne!(outside, packed(renderer.theme.selection));
     }
 
     #[test]

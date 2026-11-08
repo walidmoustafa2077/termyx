@@ -1,6 +1,7 @@
 //! Logical-order selection and clipboard copy.
 
 use crate::term::{Cell, GridSnapshot, LogicalPos, RowSnapshot};
+use crate::visual::VisualMap;
 
 /// Inclusive logical cell range of the word containing `col`.
 ///
@@ -76,9 +77,17 @@ fn next_base(cells: &[Cell], from: usize) -> Option<usize> {
     (from + 1..cells.len()).find(|&index| cells[index].width > 0)
 }
 
+/// Whether a selection follows logical text or a visual rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionMode {
+    Simple,
+    Block,
+}
+
 /// A logical-order text selection. Visual order never enters this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
+    pub mode: SelectionMode,
     pub anchor: LogicalPos,
     pub focus: LogicalPos,
 }
@@ -86,6 +95,15 @@ pub struct Selection {
 impl Selection {
     pub fn new(anchor: LogicalPos) -> Self {
         Self {
+            mode: SelectionMode::Simple,
+            anchor,
+            focus: anchor,
+        }
+    }
+
+    pub fn block(anchor: LogicalPos) -> Self {
+        Self {
+            mode: SelectionMode::Block,
             anchor,
             focus: anchor,
         }
@@ -116,6 +134,75 @@ impl Selection {
             return false;
         }
         true
+    }
+
+    /// True when the cell is inside this selection. Block mode compares
+    /// visual columns; the maps carry each row's bidi layout.
+    pub fn is_selected(
+        &self,
+        row: usize,
+        logical: usize,
+        visual: usize,
+        maps: &[VisualMap],
+    ) -> bool {
+        if self.mode == SelectionMode::Simple {
+            return self.contains(row, logical);
+        }
+        let first = self.anchor.row.min(self.focus.row);
+        let last = self.anchor.row.max(self.focus.row);
+        if row < first || row > last {
+            return false;
+        }
+        let (Some(anchor_map), Some(focus_map)) =
+            (maps.get(self.anchor.row), maps.get(self.focus.row))
+        else {
+            return false;
+        };
+        let a = anchor_map.visual_of(self.anchor.col);
+        let b = focus_map.visual_of(self.focus.col);
+        visual >= a.min(b) && visual <= a.max(b)
+    }
+
+    /// Copy a visual rectangle row by row, skipping continuation cells.
+    pub fn to_text_block(
+        &self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        trim_trailing: bool,
+    ) -> String {
+        let (Some(anchor_map), Some(focus_map)) =
+            (maps.get(self.anchor.row), maps.get(self.focus.row))
+        else {
+            return String::new();
+        };
+        let a = anchor_map.visual_of(self.anchor.col);
+        let b = focus_map.visual_of(self.focus.col);
+        let (left, right) = (a.min(b), a.max(b));
+        let first = self.anchor.row.min(self.focus.row);
+        let last = self.anchor.row.max(self.focus.row);
+        let mut out = String::new();
+        for row in first..=last {
+            let (Some(line), Some(map)) = (snapshot.lines.get(row), maps.get(row)) else {
+                continue;
+            };
+            if row > first {
+                out.push('\n');
+            }
+            let mut text = String::new();
+            for visual in left..=right {
+                let logical = map.logical_of(visual);
+                if let Some(cell) = line.cells.get(logical) {
+                    if cell.width > 0 {
+                        text.push_str(&cell.text);
+                    }
+                }
+            }
+            if trim_trailing {
+                text = text.trim_end_matches(' ').to_string();
+            }
+            out.push_str(&text);
+        }
+        out
     }
 
     /// Copy in logical order, skipping wide-character continuation cells.
@@ -158,7 +245,9 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BaseDirection;
     use crate::term::{Affinity, Cell, Color, CursorShape, CursorState, RowSnapshot, Style};
+    use crate::visual::VisualMap;
 
     fn position(row: usize, col: usize) -> LogicalPos {
         LogicalPos { row, col }
@@ -336,5 +425,106 @@ mod tests {
     fn line_bounds_covers_the_whole_row() {
         let line = row("foo.bar baz");
         assert_eq!(line_bounds(&line), (0, 10));
+    }
+
+    fn identity_maps(rows: usize, cols: usize) -> Vec<VisualMap> {
+        (0..rows).map(|_| VisualMap::identity(cols)).collect()
+    }
+
+    #[test]
+    fn block_selection_covers_a_visual_rectangle() {
+        let snapshot = GridSnapshot {
+            cols: 5,
+            rows: 2,
+            lines: vec![row("hello"), row("world")],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let maps = identity_maps(2, 5);
+        let mut selection = Selection::block(position(0, 1));
+        selection.update(position(1, 3));
+
+        assert!(selection.is_selected(0, 1, 1, &maps));
+        assert!(selection.is_selected(1, 3, 3, &maps));
+        assert!(!selection.is_selected(0, 0, 0, &maps));
+        assert!(!selection.is_selected(1, 4, 4, &maps));
+        assert_eq!(selection.to_text_block(&snapshot, &maps, true), "ell\norl");
+    }
+
+    #[test]
+    fn block_selection_uses_visual_columns_in_rtl() {
+        let snapshot = GridSnapshot {
+            cols: 5,
+            rows: 1,
+            lines: vec![row("مرحبا")],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let maps = vec![VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        let mut selection = Selection::block(position(0, 0));
+        selection.update(position(0, 2));
+
+        let anchor_visual = maps[0].visual_of(0);
+        let focus_visual = maps[0].visual_of(2);
+        let (left, right) = (
+            anchor_visual.min(focus_visual),
+            anchor_visual.max(focus_visual),
+        );
+        assert!(selection.is_selected(0, 3, right, &maps));
+        assert!(!selection.is_selected(0, 3, left.saturating_sub(1), &maps));
+        assert_eq!(
+            selection
+                .to_text_block(&snapshot, &maps, false)
+                .chars()
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn block_copy_skips_wide_continuations() {
+        let snapshot = GridSnapshot {
+            cols: 3,
+            rows: 1,
+            lines: vec![RowSnapshot {
+                cells: vec![cell('漢'), cell(' '), cell('x')],
+                wrapped: false,
+            }],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let mut line = snapshot.lines[0].clone();
+        line.cells[0].width = 2;
+        line.cells[1].text = String::new();
+        line.cells[1].width = 0;
+        let snapshot = GridSnapshot {
+            lines: vec![line],
+            ..snapshot
+        };
+        let maps = identity_maps(1, 3);
+        let mut selection = Selection::block(position(0, 0));
+        selection.update(position(0, 2));
+        assert_eq!(selection.to_text_block(&snapshot, &maps, true), "漢x");
     }
 }

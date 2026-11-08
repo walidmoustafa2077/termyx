@@ -20,7 +20,7 @@ use crate::input::{self, KeyInput, Mods};
 use crate::pty::PtySession;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry};
-use crate::selection::{line_bounds, word_bounds, Selection};
+use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
@@ -428,6 +428,24 @@ impl App {
                 }
             }
 
+            if button == MouseButton::Left
+                && self.modifiers.alt_key()
+                && !self.modifiers.control_key()
+                && !self.modifiers.shift_key()
+            {
+                let (x, y) = self.cursor_pos;
+                if let Some(position) = self.pos_at(x, y) {
+                    // Alt+drag is reserved for block selection, even in mouse-reporting apps.
+                    self.selection = Some(Selection::block(position));
+                    self.mouse_down = true;
+                    self.app_mouse_button = None;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                return;
+            }
+
             if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
@@ -641,7 +659,17 @@ impl App {
         let Some(terminal) = &self.terminal else {
             return;
         };
-        let text = selection.to_text(&terminal.snapshot(), self.config.selection.trim_trailing);
+        let snapshot = terminal.snapshot();
+        let text = if selection.mode == SelectionMode::Block {
+            let maps: Vec<VisualMap> = snapshot
+                .lines
+                .iter()
+                .map(|line| VisualMap::for_row(line, &self.config.bidi))
+                .collect();
+            selection.to_text_block(&snapshot, &maps, self.config.selection.trim_trailing)
+        } else {
+            selection.to_text(&snapshot, self.config.selection.trim_trailing)
+        };
         let Some(clipboard) = self.clipboard() else {
             return;
         };
