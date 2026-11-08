@@ -39,6 +39,9 @@ pub struct App {
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
+    // Button forwarded to a mouse-reporting application, if any. Local text
+    // selection uses `mouse_down` instead.
+    app_mouse_button: Option<input::MouseButton>,
     // Sub-row pixel wheel deltas carried between events so touchpads that emit
     // fractions of a cell per event still scroll.
     wheel_remainder: f32,
@@ -61,6 +64,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
+            app_mouse_button: None,
             wheel_remainder: 0.0,
             cursor_pos: (0.0, 0.0),
             cols: 80,
@@ -226,8 +230,17 @@ impl App {
                 }
             }
         }
-        let Some(key) = map_key(&event.logical_key) else {
-            return;
+        // Shift+Tab is backtab; `map_key` cannot tell them apart because Tab is
+        // a named key.
+        let key = if self.modifiers.shift_key()
+            && matches!(event.logical_key, Key::Named(NamedKey::Tab))
+        {
+            KeyInput::BackTab
+        } else {
+            let Some(key) = map_key(&event.logical_key) else {
+                return;
+            };
+            key
         };
         let mode = self
             .terminal
@@ -255,6 +268,23 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+
+        if let Some(button) = self.app_mouse_button {
+            let mode = self.app_mouse_mode();
+            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+                && !self.modifiers.shift_key()
+            {
+                self.send_mouse(input::MouseEventKind::Motion, Some(button));
+            }
+            return;
+        }
+
+        let mode = self.app_mouse_mode();
+        if mode.contains(TermMode::MOUSE_MOTION) && !self.modifiers.shift_key() {
+            self.send_mouse(input::MouseEventKind::Motion, None);
+            return;
+        }
+
         if !self.mouse_down {
             return;
         }
@@ -270,6 +300,28 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.app_mouse_mode().intersects(TermMode::MOUSE_MODE) && !self.modifiers.shift_key() {
+            let (x, y) = match delta {
+                MouseScrollDelta::LineDelta(x, y) => (x, y),
+                MouseScrollDelta::PixelDelta(position) => (position.x as f32, position.y as f32),
+            };
+            let kind = if y > 0.0 {
+                Some(input::MouseEventKind::WheelUp)
+            } else if y < 0.0 {
+                Some(input::MouseEventKind::WheelDown)
+            } else if x > 0.0 {
+                Some(input::MouseEventKind::WheelRight)
+            } else if x < 0.0 {
+                Some(input::MouseEventKind::WheelLeft)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                self.send_mouse(kind, None);
+            }
+            return;
+        }
+
         let cell_h = match &self.renderer {
             Some(renderer) => renderer.fonts().cell_h as f32,
             None => return,
@@ -294,9 +346,33 @@ impl App {
         }
     }
 
-    fn on_mouse(&mut self, state: ElementState) {
+    fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
+        let Some(input_button) = map_mouse_button(button) else {
+            return;
+        };
+
+        if self.app_mouse_mode().intersects(TermMode::MOUSE_MODE) && !self.modifiers.shift_key() {
+            let (kind, reported) = match state {
+                ElementState::Pressed => {
+                    self.app_mouse_button = Some(input_button);
+                    (input::MouseEventKind::Press, input_button)
+                }
+                ElementState::Released => (
+                    input::MouseEventKind::Release,
+                    self.app_mouse_button.take().unwrap_or(input_button),
+                ),
+            };
+            self.send_mouse(kind, Some(reported));
+            return;
+        }
+
+        // Shift+drag and non-reporting apps keep local text selection.
+        self.app_mouse_button = None;
         match state {
             ElementState::Pressed => {
+                if button != MouseButton::Left {
+                    return;
+                }
                 let Some(position) = self.pos_at(self.cursor_pos.0, self.cursor_pos.1) else {
                     return;
                 };
@@ -307,6 +383,38 @@ impl App {
         }
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    fn app_mouse_mode(&self) -> TermMode {
+        self.terminal
+            .as_ref()
+            .map(Terminal::mode)
+            .unwrap_or_else(TermMode::empty)
+    }
+
+    fn send_mouse(&mut self, kind: input::MouseEventKind, button: Option<input::MouseButton>) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (row, column) = cell_at(
+            self.cursor_pos.0,
+            self.cursor_pos.1,
+            renderer.padding() as f64,
+            renderer.fonts().cell_w as f64,
+            renderer.fonts().cell_h as f64,
+            self.cols,
+            self.rows,
+        );
+        let event = input::MouseEvent {
+            kind,
+            button,
+            column,
+            row,
+            mods: mods_from(self.modifiers),
+        };
+        if let Some(bytes) = input::encode_mouse(event, self.app_mouse_mode()) {
+            self.write_input(&bytes);
         }
     }
 
@@ -432,11 +540,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(position.x, position.y)
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => self.on_mouse(state),
+            WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
+            WindowEvent::Focused(focused) => {
+                if self.app_mouse_mode().contains(TermMode::FOCUS_IN_OUT) {
+                    self.write_input(&input::encode_focus(focused));
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.on_key(event)
             }
@@ -475,6 +584,27 @@ fn map_key(key: &Key) -> Option<KeyInput> {
         Key::Named(NamedKey::Insert) => Some(KeyInput::Insert),
         Key::Named(NamedKey::PageUp) => Some(KeyInput::PageUp),
         Key::Named(NamedKey::PageDown) => Some(KeyInput::PageDown),
+        Key::Named(NamedKey::F1) => Some(KeyInput::Function(1)),
+        Key::Named(NamedKey::F2) => Some(KeyInput::Function(2)),
+        Key::Named(NamedKey::F3) => Some(KeyInput::Function(3)),
+        Key::Named(NamedKey::F4) => Some(KeyInput::Function(4)),
+        Key::Named(NamedKey::F5) => Some(KeyInput::Function(5)),
+        Key::Named(NamedKey::F6) => Some(KeyInput::Function(6)),
+        Key::Named(NamedKey::F7) => Some(KeyInput::Function(7)),
+        Key::Named(NamedKey::F8) => Some(KeyInput::Function(8)),
+        Key::Named(NamedKey::F9) => Some(KeyInput::Function(9)),
+        Key::Named(NamedKey::F10) => Some(KeyInput::Function(10)),
+        Key::Named(NamedKey::F11) => Some(KeyInput::Function(11)),
+        Key::Named(NamedKey::F12) => Some(KeyInput::Function(12)),
+        _ => None,
+    }
+}
+
+fn map_mouse_button(button: MouseButton) -> Option<input::MouseButton> {
+    match button {
+        MouseButton::Left => Some(input::MouseButton::Left),
+        MouseButton::Middle => Some(input::MouseButton::Middle),
+        MouseButton::Right => Some(input::MouseButton::Right),
         _ => None,
     }
 }
@@ -483,6 +613,7 @@ fn mods_from(modifiers: ModifiersState) -> Mods {
     Mods {
         ctrl: modifiers.control_key(),
         alt: modifiers.alt_key(),
+        shift: modifiers.shift_key(),
     }
 }
 
@@ -549,7 +680,7 @@ mod tests {
             Some(KeyInput::Char('a'))
         );
         assert_eq!(map_key(&Key::Named(NamedKey::Enter)), Some(KeyInput::Enter));
-        assert_eq!(map_key(&Key::Named(NamedKey::F1)), None);
+        assert_eq!(map_key(&Key::Named(NamedKey::CapsLock)), None);
     }
 
     #[test]
@@ -557,6 +688,26 @@ mod tests {
         let mods = mods_from(ModifiersState::CONTROL | ModifiersState::ALT);
         assert!(mods.ctrl);
         assert!(mods.alt);
+    }
+
+    #[test]
+    fn modifiers_map_include_shift() {
+        let mods = mods_from(ModifiersState::SHIFT);
+        assert!(mods.shift);
+        assert!(!mods.ctrl);
+        assert!(!mods.alt);
+    }
+
+    #[test]
+    fn map_key_recognizes_function_keys() {
+        assert_eq!(
+            map_key(&Key::Named(NamedKey::F1)),
+            Some(KeyInput::Function(1))
+        );
+        assert_eq!(
+            map_key(&Key::Named(NamedKey::F12)),
+            Some(KeyInput::Function(12))
+        );
     }
 
     #[test]
