@@ -25,7 +25,7 @@ Double-click `run.cmd`, or run it from PowerShell:
 .\run.cmd
 ```
 
-The script builds the release binary if it is missing, then launches it.
+The script rebuilds the release binary (incremental) and launches it.
 The executable itself is:
 
 ```
@@ -73,6 +73,26 @@ from Arial, Tahoma, Noto Naskh Arabic, Noto Sans Arabic, DejaVu Sans, FreeSerif,
 or Segoe UI, in that order. A face is only accepted when it shapes `لا` as a
 single lam-alef ligature. See `assets/fonts/README.md`.
 
+## Terminal protocol support
+
+The VT parser and grid come from `alacritty_terminal`, so standard terminal
+behavior is protocol-level rather than app-specific: ANSI/VT sequences, 16/256/
+truecolor, alternate screen, scroll regions, wide cells, combining marks,
+bracketed paste, and DEC modes.
+
+- **Application mouse reporting**: X10/1000 click, 1002 button-drag, 1003 any
+  motion, UTF-8 coordinates (1005), and SGR (1006). Hold **Shift** to force
+  local text selection; otherwise the wheel and clicks go to the application.
+- **Keys**: Shift+Tab/backtab, F1–F12, modified arrows/Home/End/navigation, and
+  application cursor mode. Ctrl+Alt characters are prefixed with `ESC`.
+- **Cursor**: block, beam, underline, and hollow-block shapes (DECSCUSR), and
+  visibility (DECTCEM).
+- **Focus and title**: focus in/out reports when enabled, and OSC 0/2 title
+  updates including reset.
+- **OSC 52**: copy-only clipboard storage. Clipboard read (paste) remains
+  disabled by default.
+- **IME**: committed text is sent to the shell; there is no preedit overlay.
+
 ## Phase 2 acceptance
 
 Run on Windows 10/11 x64 with PowerShell:
@@ -107,5 +127,8 @@ separately re-run in this check.
 - A caret or selection boundary inside a two-cell lam-alef draws at the cell
   boundary; the ligature is still drawn once.
 - The Kawkab Mono asset is not bundled in this phase; system fallback is used.
-- Tabs, splits, profiles, search, images, application mouse reporting, IME
-  preedit, and AI are later phases.
+- OSC 8 hyperlinks are parsed and stored per cell but are not clickable yet.
+- OSC 133 shell integration is not parsed; prompts and command marks are not
+  exposed to the terminal.
+- IME preedit is not shown; only committed text reaches the shell.
+- Tabs, splits, profiles, search, images, and AI are later phases.

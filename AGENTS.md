@@ -53,14 +53,16 @@ If a request conflicts with them, ask before drifting.
 - The UI thread owns the window, renderer, terminal, and interaction state.
   There is one PTY reader thread.
 
-## Current scope (Phase 0/1)
+## Current scope (Phases 0–2 + Batch 1)
 
-In: one window, one shell session, LTR rendering, scrollback, resize,
-selection/copy/paste, config, logging.
+In: one window, one shell session, bidi/RTL rendering with Arabic shaping,
+scrollback, resize, selection/copy/paste, config, logging, application mouse
+reporting (DEC modes 1000/1002/1003/1005/1006 with Shift+drag local selection),
+extended keys (Shift+Tab, F1–F12, modified navigation), cursor shape/visibility,
+focus reporting, window title (OSC 0/2), and OSC 52 copy.
 
-Not yet: bidi, shaping, bundled Arabic font, tabs, splits, profiles, command
-palette, search, AI, images, application mouse reporting (DEC modes), IME
-preedit.
+Not yet: bundled Arabic font, OSC 8 clickable links, OSC 133 shell integration,
+IME preedit, tabs, splits, profiles, command palette, search, AI, images.
 
 ## Workflow
 
