@@ -108,12 +108,14 @@ impl Default for ScrollbackConfig {
 #[serde(default)]
 pub struct SelectionConfig {
     pub trim_trailing: bool,
+    pub copy_on_select: bool,
 }
 
 impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             trim_trailing: true,
+            copy_on_select: true,
         }
     }
 }
@@ -184,7 +186,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("bidi", &["enabled", "base_direction"]),
     ("window", &["width", "height", "padding"]),
     ("scrollback", &["lines"]),
-    ("selection", &["trim_trailing"]),
+    ("selection", &["trim_trailing", "copy_on_select"]),
     (
         "theme",
         &[
@@ -337,6 +339,7 @@ mod tests {
         assert_eq!(c.window.padding, 4);
         assert_eq!(c.scrollback.lines, 10_000);
         assert!(c.selection.trim_trailing);
+        assert!(c.selection.copy_on_select);
         assert_eq!(c.theme.background, "#0c0c0c");
         assert_eq!(c.theme.foreground, "#cccccc");
         assert_eq!(c.theme.cursor, "#ffffff");

@@ -1,6 +1,80 @@
 //! Logical-order selection and clipboard copy.
 
-use crate::term::{GridSnapshot, LogicalPos};
+use crate::term::{Cell, GridSnapshot, LogicalPos, RowSnapshot};
+
+/// Inclusive logical cell range of the word containing `col`.
+///
+/// A width-0 continuation cell resolves to the base cell it continues, so a
+/// double-click never selects half of a wide character. Whitespace selects only
+/// itself; every other cell expands over its own class.
+pub fn word_bounds(line: &RowSnapshot, col: usize) -> (usize, usize) {
+    if line.cells.is_empty() {
+        return (0, 0);
+    }
+    let last = line.cells.len() - 1;
+    let mut col = col.min(last);
+    while col > 0 && line.cells[col].width == 0 {
+        col -= 1;
+    }
+    let Some(class) = cell_class(&line.cells[col]) else {
+        return (col, col);
+    };
+
+    let mut start = col;
+    while let Some(previous) = previous_base(&line.cells, start) {
+        if cell_class(&line.cells[previous]) != Some(class) {
+            break;
+        }
+        start = previous;
+    }
+
+    let mut end = col;
+    while let Some(next) = next_base(&line.cells, end) {
+        if cell_class(&line.cells[next]) != Some(class) {
+            break;
+        }
+        end = next;
+    }
+    while end < last && line.cells[end + 1].width == 0 {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Inclusive logical cell range of the whole row.
+pub fn line_bounds(line: &RowSnapshot) -> (usize, usize) {
+    (0, line.cells.len().saturating_sub(1))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellClass {
+    Word,
+    Punctuation,
+}
+
+/// Classifies a base cell. Whitespace, including the empty text of a
+/// continuation cell, never expands.
+fn cell_class(cell: &Cell) -> Option<CellClass> {
+    if cell.text.chars().all(char::is_whitespace) {
+        return None;
+    }
+    let first = cell.text.chars().next()?;
+    if first.is_alphanumeric() || first == '_' {
+        Some(CellClass::Word)
+    } else {
+        Some(CellClass::Punctuation)
+    }
+}
+
+/// Index of the base cell before `from`, skipping continuation cells.
+fn previous_base(cells: &[Cell], from: usize) -> Option<usize> {
+    (0..from).rev().find(|&index| cells[index].width > 0)
+}
+
+/// Index of the base cell after `from`, skipping continuation cells.
+fn next_base(cells: &[Cell], from: usize) -> Option<usize> {
+    (from + 1..cells.len()).find(|&index| cells[index].width > 0)
+}
 
 /// A logical-order text selection. Visual order never enters this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,5 +288,51 @@ mod tests {
         let mut selection = Selection::new(position(0, 5));
         selection.update(position(0, 3));
         assert_eq!(selection.to_text(&arabic_snapshot(), true), "مرح");
+    }
+
+    #[test]
+    fn word_bounds_selects_the_word_under_the_cursor() {
+        let line = row("foo.bar baz");
+        assert_eq!(word_bounds(&line, 5), (4, 6));
+    }
+
+    #[test]
+    fn word_bounds_selects_the_punctuation_run() {
+        let line = row("foo.bar baz");
+        assert_eq!(word_bounds(&line, 3), (3, 3));
+    }
+
+    #[test]
+    fn word_bounds_on_whitespace_selects_only_that_cell() {
+        let line = row("foo.bar baz");
+        assert_eq!(word_bounds(&line, 7), (7, 7));
+    }
+
+    #[test]
+    fn word_bounds_resolves_wide_continuations_to_their_base() {
+        let line = RowSnapshot {
+            cells: vec![
+                Cell {
+                    text: "世".into(),
+                    width: 2,
+                    style: Style::default(),
+                },
+                Cell {
+                    text: String::new(),
+                    width: 0,
+                    style: Style::default(),
+                },
+                cell('.'),
+            ],
+            wrapped: false,
+        };
+        assert_eq!(word_bounds(&line, 1), (0, 1));
+        assert_eq!(word_bounds(&line, 0), (0, 1));
+    }
+
+    #[test]
+    fn line_bounds_covers_the_whole_row() {
+        let line = row("foo.bar baz");
+        assert_eq!(line_bounds(&line), (0, 10));
     }
 }

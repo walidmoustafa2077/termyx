@@ -2,6 +2,7 @@
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
@@ -18,7 +19,7 @@ use crate::fonts::FontSet;
 use crate::input::{self, KeyInput, Mods};
 use crate::pty::PtySession;
 use crate::render::Renderer;
-use crate::selection::Selection;
+use crate::selection::{line_bounds, word_bounds, Selection};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
@@ -33,6 +34,12 @@ const MAX_OSC52_BYTES: usize = 100 * 1024;
 
 const DEFAULT_TITLE: &str = "Termyx";
 
+/// Longest delay between two clicks of one multi-click gesture.
+const CLICK_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Largest cursor movement between two clicks of one multi-click gesture.
+const CLICK_DISTANCE: f64 = 4.0;
+
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
@@ -45,6 +52,8 @@ pub struct App {
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
+    click_count: u8,
+    last_click: Option<(Instant, f64, f64)>,
     // Button forwarded to a mouse-reporting application, if any. Local text
     // selection uses `mouse_down` instead.
     app_mouse_button: Option<input::MouseButton>,
@@ -70,6 +79,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
+            click_count: 0,
+            last_click: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
             cursor_pos: (0.0, 0.0),
@@ -390,14 +401,48 @@ impl App {
 
             // Shift+drag and non-reporting apps keep local text selection.
             self.app_mouse_button = None;
+
+            // A right click that stays local pastes; the forwarding branch
+            // above has already claimed the click for mouse-reporting apps.
+            if button == MouseButton::Right {
+                self.paste_clipboard();
+                return;
+            }
             if button != MouseButton::Left {
                 return;
             }
-            let Some(position) = self.pos_at(self.cursor_pos.0, self.cursor_pos.1) else {
+
+            let (x, y) = self.cursor_pos;
+            let Some(position) = self.pos_at(x, y) else {
                 return;
             };
-            self.selection = Some(Selection::new(position));
-            self.mouse_down = true;
+            let now = Instant::now();
+            self.click_count = next_click_count(self.last_click, self.click_count, now, x, y);
+            self.last_click = Some((now, x, y));
+
+            match self.click_count {
+                1 => {
+                    self.selection = Some(Selection::new(position));
+                    self.mouse_down = true;
+                }
+                2 | 3 => {
+                    let whole_line = self.click_count == 3;
+                    let Some((start, end)) = self.bounds_at(position, whole_line) else {
+                        return;
+                    };
+                    let mut selection = Selection::new(LogicalPos {
+                        row: position.row,
+                        col: start,
+                    });
+                    selection.update(LogicalPos {
+                        row: position.row,
+                        col: end,
+                    });
+                    self.selection = Some(selection);
+                    self.mouse_down = false;
+                }
+                _ => return,
+            }
         } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
             // Route by the state captured at press time: a forwarded press is
             // released even when Shift or the mouse mode changed mid-gesture.
@@ -406,11 +451,32 @@ impl App {
             return;
         } else {
             self.mouse_down = false;
+            if button == MouseButton::Left && self.config.selection.copy_on_select {
+                let selected = self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.anchor != selection.focus);
+                if selected {
+                    self.copy_selection();
+                }
+            }
         }
 
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// Inclusive cell range of the word or row containing `position`.
+    fn bounds_at(&self, position: LogicalPos, whole_line: bool) -> Option<(usize, usize)> {
+        let terminal = self.terminal.as_ref()?;
+        let snapshot = terminal.snapshot();
+        let line = snapshot.lines.get(position.row)?;
+        Some(if whole_line {
+            line_bounds(line)
+        } else {
+            word_bounds(line, position.col)
+        })
     }
 
     fn app_mouse_mode(&self) -> TermMode {
@@ -690,6 +756,30 @@ fn release_button(tracked: Option<input::MouseButton>) -> Option<input::MouseBut
     tracked
 }
 
+/// Returns 1, 2, or 3 for consecutive clicks within 400 ms and 4 px. A fourth
+/// consecutive click starts a new cycle at 1.
+fn next_click_count(
+    previous: Option<(Instant, f64, f64)>,
+    previous_count: u8,
+    now: Instant,
+    x: f64,
+    y: f64,
+) -> u8 {
+    let repeated = previous.is_some_and(|(then, then_x, then_y)| {
+        now.saturating_duration_since(then) <= CLICK_TIMEOUT
+            && (x - then_x).abs() <= CLICK_DISTANCE
+            && (y - then_y).abs() <= CLICK_DISTANCE
+    });
+    if !repeated {
+        return 1;
+    }
+    match previous_count {
+        1 => 2,
+        2 => 3,
+        _ => 1,
+    }
+}
+
 fn mods_from(modifiers: ModifiersState) -> Mods {
     Mods {
         ctrl: modifiers.control_key(),
@@ -929,6 +1019,55 @@ mod tests {
         assert_eq!(
             logical_pos_at(0, 5, &line, &bidi),
             LogicalPos { row: 0, col: 5 }
+        );
+    }
+
+    #[test]
+    fn first_click_counts_as_one() {
+        assert_eq!(next_click_count(None, 0, Instant::now(), 10.0, 10.0), 1);
+    }
+
+    #[test]
+    fn nearby_clicks_within_the_timeout_increase_the_count() {
+        let now = Instant::now();
+        let previous = Some((now, 10.0, 10.0));
+        assert_eq!(
+            next_click_count(previous, 1, now + Duration::from_millis(200), 12.0, 11.0),
+            2
+        );
+        assert_eq!(
+            next_click_count(previous, 2, now + Duration::from_millis(200), 12.0, 11.0),
+            3
+        );
+    }
+
+    #[test]
+    fn fourth_click_restarts_the_cycle() {
+        let now = Instant::now();
+        let previous = Some((now, 10.0, 10.0));
+        assert_eq!(
+            next_click_count(previous, 3, now + Duration::from_millis(200), 10.0, 10.0),
+            1
+        );
+    }
+
+    #[test]
+    fn distant_click_starts_a_new_cycle() {
+        let now = Instant::now();
+        let previous = Some((now, 10.0, 10.0));
+        assert_eq!(
+            next_click_count(previous, 1, now + Duration::from_millis(100), 20.0, 10.0),
+            1
+        );
+    }
+
+    #[test]
+    fn slow_click_starts_a_new_cycle() {
+        let now = Instant::now();
+        let previous = Some((now, 10.0, 10.0));
+        assert_eq!(
+            next_click_count(previous, 1, now + Duration::from_millis(500), 10.0, 10.0),
+            1
         );
     }
 }
