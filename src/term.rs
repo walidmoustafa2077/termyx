@@ -112,6 +112,7 @@ fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
     match event {
         Event::Title(title) => Some(crate::event::UserEvent::Title(title)),
         Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle),
+        Event::ClipboardStore(_, text) => Some(crate::event::UserEvent::ClipboardStore(text)),
         _ => None,
     }
 }
@@ -581,6 +582,13 @@ mod tests {
             user_event_for(alacritty_terminal::event::Event::ResetTitle),
             Some(crate::event::UserEvent::ResetTitle)
         ));
+        match user_event_for(alacritty_terminal::event::Event::ClipboardStore(
+            alacritty_terminal::term::ClipboardType::Clipboard,
+            "copied".into(),
+        )) {
+            Some(crate::event::UserEvent::ClipboardStore(text)) => assert_eq!(text, "copied"),
+            other => panic!("expected clipboard event, got {other:?}"),
+        }
         assert!(user_event_for(alacritty_terminal::event::Event::Bell).is_none());
     }
 

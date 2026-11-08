@@ -9,4 +9,6 @@ pub enum UserEvent {
     Title(String),
     /// The child reset the window title (`OSC 104` / `OSC 110`).
     ResetTitle,
+    /// The child stored text on the system clipboard (`OSC 52`).
+    ClipboardStore(String),
 }

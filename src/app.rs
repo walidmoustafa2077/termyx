@@ -533,6 +533,14 @@ impl ApplicationHandler<UserEvent> for App {
                     window.set_title(DEFAULT_TITLE);
                 }
             }
+            UserEvent::ClipboardStore(text) => {
+                let Some(clipboard) = self.clipboard() else {
+                    return;
+                };
+                if let Err(err) = clipboard.set_text(text) {
+                    tracing::warn!(%err, "OSC 52 clipboard store failed");
+                }
+            }
         }
     }
 
