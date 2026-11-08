@@ -1,11 +1,13 @@
 //! Terminal grid model and VT state.
 
+use alacritty_terminal::event::Event;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use unicode_width::UnicodeWidthStr;
 use vte::ansi::{Color as AnsiColor, CursorShape as AnsiCursorShape, NamedColor, Processor};
+use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Color {
@@ -101,10 +103,25 @@ impl Dimensions for TermSize {
 }
 
 #[derive(Clone)]
-struct EventProxy;
+struct EventProxy {
+    proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+}
+
+/// Map the terminal events Termyx observes onto UI-thread events.
+fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
+    match event {
+        Event::Title(title) => Some(crate::event::UserEvent::Title(title)),
+        Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle),
+        _ => None,
+    }
+}
 
 impl EventListener for EventProxy {
-    fn send_event(&self, _event: alacritty_terminal::event::Event) {}
+    fn send_event(&self, event: Event) {
+        if let (Some(proxy), Some(event)) = (&self.proxy, user_event_for(event)) {
+            let _ = proxy.send_event(event);
+        }
+    }
 }
 
 pub struct Terminal {
@@ -115,7 +132,18 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// Test-only constructor: no event bridge, no window to notify.
+    #[cfg(test)]
     pub fn new(cols: usize, rows: usize, scrollback: usize) -> Self {
+        Self::new_with_events(cols, rows, scrollback, None)
+    }
+
+    pub fn new_with_events(
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+    ) -> Self {
         let size = TermSize {
             cols,
             rows,
@@ -125,7 +153,7 @@ impl Terminal {
             scrolling_history: scrollback,
             ..TermConfig::default()
         };
-        let term = Term::new(config, &size, EventProxy);
+        let term = Term::new(config, &size, EventProxy { proxy });
         Self {
             term,
             processor: Processor::new(),
@@ -540,6 +568,20 @@ mod tests {
             scrolled |= term.feed(b"x\r\n");
         }
         assert!(scrolled);
+    }
+
+    #[test]
+    fn terminal_events_are_bridged_to_user_events() {
+        match user_event_for(alacritty_terminal::event::Event::Title("build".into())) {
+            Some(crate::event::UserEvent::Title(title)) => assert_eq!(title, "build"),
+            other => panic!("expected title event, got {other:?}"),
+        }
+
+        assert!(matches!(
+            user_event_for(alacritty_terminal::event::Event::ResetTitle),
+            Some(crate::event::UserEvent::ResetTitle)
+        ));
+        assert!(user_event_for(alacritty_terminal::event::Event::Bell).is_none());
     }
 
     #[test]

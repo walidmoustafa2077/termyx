@@ -27,6 +27,8 @@ use crate::visual::VisualMap;
 /// would freeze the UI thread while writing to a shell that may not drain it.
 const MAX_PASTE_CHARS: usize = 1_048_576;
 
+const DEFAULT_TITLE: &str = "Termyx";
+
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
@@ -74,7 +76,7 @@ impl App {
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
         let attributes = Window::default_attributes()
-            .with_title("Termyx")
+            .with_title(DEFAULT_TITLE)
             .with_inner_size(LogicalSize::new(
                 self.config.window.width,
                 self.config.window.height,
@@ -110,7 +112,12 @@ impl App {
             renderer.fonts().cell_h,
             renderer.padding(),
         );
-        let terminal = Terminal::new(cols, rows, self.config.scrollback.lines);
+        let terminal = Terminal::new_with_events(
+            cols,
+            rows,
+            self.config.scrollback.lines,
+            Some(self.proxy.clone()),
+        );
         let pty = PtySession::spawn(
             &self.config.shell,
             cols as u16,
@@ -514,6 +521,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
+                }
+            }
+            UserEvent::Title(title) => {
+                if let Some(window) = &self.window {
+                    window.set_title(&title);
+                }
+            }
+            UserEvent::ResetTitle => {
+                if let Some(window) = &self.window {
+                    window.set_title(DEFAULT_TITLE);
                 }
             }
         }
