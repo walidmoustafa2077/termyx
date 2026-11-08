@@ -1,5 +1,6 @@
 //! Per-row logical-to-visual mapping.
 
+use crate::bidi::{self, VisualRun};
 use crate::config::BaseDirection;
 use crate::term::{Affinity, CursorState, RowSnapshot};
 
@@ -10,14 +11,28 @@ use crate::term::{Affinity, CursorState, RowSnapshot};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualMap {
     cols: usize,
+    levels: Vec<u8>,
+    runs: Vec<VisualRun>,
     logical_to_visual: Vec<usize>,
     visual_to_logical: Vec<usize>,
 }
 
 impl VisualMap {
     pub fn identity(cols: usize) -> Self {
+        let runs = if cols == 0 {
+            Vec::new()
+        } else {
+            vec![VisualRun {
+                cells: 0..cols,
+                slots: 0..cols,
+                level: 0,
+                rtl: false,
+            }]
+        };
         Self {
             cols,
+            levels: vec![0; cols],
+            runs,
             logical_to_visual: (0..cols).collect(),
             visual_to_logical: (0..cols).collect(),
         }
@@ -26,11 +41,15 @@ impl VisualMap {
     // Wired into the frame in Task 3; tests are the only callers until then.
     #[allow(dead_code)]
     pub fn from_bidi(row: &RowSnapshot, base: BaseDirection) -> Self {
-        let analysis = crate::bidi::analyze(row, base);
-        let cols = analysis.levels.len();
+        let analysis = bidi::analyze(row, base);
+        Self::build(row, analysis.levels, analysis.runs)
+    }
+
+    fn build(row: &RowSnapshot, levels: Vec<u8>, runs: Vec<VisualRun>) -> Self {
+        let cols = levels.len();
         let mut logical_to_visual = vec![0; cols];
         let mut visual_to_logical = vec![0; cols];
-        for run in &analysis.runs {
+        for run in &runs {
             debug_assert_eq!(run.cells.len(), run.slots.len());
             let mut logical = run.cells.start;
             let mut slot = if run.rtl {
@@ -61,9 +80,28 @@ impl VisualMap {
         }
         Self {
             cols,
+            levels,
+            runs,
             logical_to_visual,
             visual_to_logical,
         }
+    }
+
+    // These three accessors are consumed by shaping in Task 4; until then only
+    // the tests read them.
+    #[allow(dead_code)]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[allow(dead_code)]
+    pub fn levels(&self) -> &[u8] {
+        &self.levels
+    }
+
+    #[allow(dead_code)]
+    pub fn runs(&self) -> &[VisualRun] {
+        &self.runs
     }
 
     /// Visual column of a logical cell. Clamps to the last cell.
@@ -112,6 +150,26 @@ impl VisualMap {
 mod tests {
     use super::*;
 
+    use crate::config::BaseDirection;
+    use crate::term::{Cell, RowSnapshot, Style};
+    use unicode_width::UnicodeWidthStr;
+
+    fn cell(text: &str) -> Cell {
+        let width = UnicodeWidthStr::width(text).clamp(1, 2) as u8;
+        Cell {
+            text: text.to_string(),
+            width,
+            style: Style::default(),
+        }
+    }
+
+    fn row(texts: &[&str]) -> RowSnapshot {
+        RowSnapshot {
+            cells: texts.iter().map(|text| cell(text)).collect(),
+            wrapped: false,
+        }
+    }
+
     fn cursor(logical: usize, affinity: Affinity) -> CursorState {
         CursorState {
             row: 0,
@@ -157,5 +215,33 @@ mod tests {
         let map = VisualMap::identity(10);
         assert_eq!(map.logical_at(0), 0);
         assert_eq!(map.logical_at(4), 4);
+    }
+
+    #[test]
+    fn identity_exposes_one_ltr_run_and_zero_levels() {
+        let map = VisualMap::identity(4);
+        assert_eq!(map.cols(), 4);
+        assert_eq!(map.levels(), &[0, 0, 0, 0]);
+        assert_eq!(map.runs().len(), 1);
+        assert_eq!(map.runs()[0].cells, 0..4);
+        assert_eq!(map.runs()[0].slots, 0..4);
+        assert!(!map.runs()[0].rtl);
+    }
+
+    #[test]
+    fn bidi_runs_are_exposed_in_visual_order() {
+        let map = VisualMap::from_bidi(&row(&["a", "b", "c", "م", "ر", "ح"]), BaseDirection::Ltr);
+        assert_eq!(map.levels(), &[0, 0, 0, 1, 1, 1]);
+        assert_eq!(map.runs().len(), 2);
+        assert_eq!(map.runs()[0].slots, 0..3);
+        assert_eq!(map.runs()[1].slots, 3..6);
+        assert!(map.runs()[1].rtl);
+    }
+
+    #[test]
+    fn empty_rows_have_no_runs() {
+        let map = VisualMap::identity(0);
+        assert_eq!(map.cols(), 0);
+        assert!(map.runs().is_empty());
     }
 }
