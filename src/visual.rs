@@ -5,8 +5,8 @@ use crate::term::{Affinity, CursorState, RowSnapshot};
 
 /// Maps logical cell columns to visual columns for one row.
 ///
-/// Phase 1 is identity. Phase 2 replaces the constructor with UAX#9 output;
-/// every caller already goes through this type.
+/// Every caller goes through this type: `identity` is Phase 1 and `from_bidi`
+/// is the Phase 2 UAX#9 replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualMap {
     cols: usize,
@@ -31,17 +31,32 @@ impl VisualMap {
         let mut logical_to_visual = vec![0; cols];
         let mut visual_to_logical = vec![0; cols];
         for run in &analysis.runs {
-            for offset in 0..run.cells.len() {
-                let logical = run.cells.start + offset;
-                let visual = if run.rtl {
-                    run.slots.end - 1 - offset
-                } else {
-                    run.slots.start + offset
-                };
-                if logical < cols && visual < cols {
-                    logical_to_visual[logical] = visual;
-                    visual_to_logical[visual] = logical;
+            debug_assert_eq!(run.cells.len(), run.slots.len());
+            let mut logical = run.cells.start;
+            let mut slot = if run.rtl {
+                run.slots.end
+            } else {
+                run.slots.start
+            };
+            while logical < run.cells.end {
+                // A wide glyph is one glyph over two cells: its base keeps the
+                // left slot and its continuation the right slot, even in RTL.
+                let width =
+                    usize::from(row.cells[logical].width.max(1)).min(run.cells.end - logical);
+                if run.rtl {
+                    slot -= width;
                 }
+                for offset in 0..width {
+                    let (cell, visual) = (logical + offset, slot + offset);
+                    if cell < cols && visual < cols {
+                        logical_to_visual[cell] = visual;
+                        visual_to_logical[visual] = cell;
+                    }
+                }
+                if !run.rtl {
+                    slot += width;
+                }
+                logical += width;
             }
         }
         Self {

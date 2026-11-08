@@ -48,8 +48,9 @@ impl RowText {
         }
     }
 
-    /// Cell containing `byte`. Continuation cells own no bytes, so this never
-    /// returns a width-0 cell.
+    /// Cell containing `byte`; an out-of-range byte clamps to the last cell.
+    /// Continuation cells own no bytes, so in-range lookups never return a
+    /// width-0 cell.
     pub fn cell_of_byte(&self, byte: usize) -> usize {
         if self.widths.is_empty() {
             return 0;
@@ -161,8 +162,7 @@ pub fn is_bidi_control(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BaseDirection;
-    use crate::term::{Cell, RowSnapshot, Style};
+    use crate::term::{Cell, Style};
     use crate::visual::VisualMap;
     use unicode_width::UnicodeWidthStr;
 
@@ -203,6 +203,16 @@ mod tests {
     }
 
     #[test]
+    fn combining_mark_bytes_belong_to_the_base_cell() {
+        let row = row(&["a\u{064E}"]);
+        let text = RowText::flatten(&row);
+        assert_eq!(text.text, "a\u{064E}");
+        assert_eq!(text.cell_starts, vec![0, 3]);
+        assert_eq!(text.byte_cells, vec![0, 0, 0]);
+        assert_eq!(text.cell_of_byte(2), 0);
+    }
+
+    #[test]
     fn wide_char_continuation_shares_the_base_cell() {
         let row = RowSnapshot {
             cells: vec![cell("中"), spacer()],
@@ -216,6 +226,24 @@ mod tests {
         assert_eq!(bidi.runs.len(), 1);
         assert_eq!(bidi.runs[0].cells, 0..2);
         assert_eq!(bidi.runs[0].slots, 0..2);
+    }
+
+    #[test]
+    fn wide_glyph_base_stays_left_of_its_continuation_in_an_rtl_run() {
+        let row = RowSnapshot {
+            cells: vec![cell("م"), cell("😀"), spacer(), cell("ر")],
+            wrapped: false,
+        };
+        let bidi = analyze(&row, BaseDirection::Ltr);
+        assert_eq!(bidi.levels, vec![1, 1, 1, 1]);
+        let map = VisualMap::from_bidi(&row, BaseDirection::Ltr);
+        assert_eq!(map.visual_of(0), 3);
+        assert_eq!(map.visual_of(1), 1);
+        assert_eq!(map.visual_of(2), 2);
+        assert_eq!(map.visual_of(3), 0);
+        for logical in 0..row.cells.len() {
+            assert_eq!(map.logical_of(map.visual_of(logical)), logical);
+        }
     }
 
     #[test]
@@ -241,6 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn rtl_base_direction_raises_latin_to_level_two() {
+        let row = row(&["a", "b", "c"]);
+        let bidi = analyze(&row, BaseDirection::Rtl);
+        assert_eq!(bidi.levels, vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn auto_base_direction_follows_the_first_strong_character() {
+        let row = row(&["م", "ر", "ح"]);
+        let bidi = analyze(&row, BaseDirection::Auto);
+        assert_eq!(bidi.levels, vec![1, 1, 1]);
+    }
+
+    #[test]
     fn mixed_row_keeps_latin_left_and_reverses_the_arabic_run() {
         let row = row(&["a", "b", "c", "م", "ر", "ح"]);
         let bidi = analyze(&row, BaseDirection::Ltr);
@@ -262,6 +304,28 @@ mod tests {
         let map = VisualMap::from_bidi(&row, BaseDirection::Ltr);
         assert_eq!(map.visual_of(0), 0);
         assert_eq!(map.visual_of(1), 1);
+    }
+
+    #[test]
+    fn bidi_controls_are_recognized() {
+        for ch in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            assert!(is_bidi_control(ch), "{ch:?} should be a bidi control");
+        }
+        for ch in ['a', 'م', ' ', '\u{200B}'] {
+            assert!(!is_bidi_control(ch), "{ch:?} is not a bidi control");
+        }
+    }
+
+    #[test]
+    fn right_to_left_override_reverses_latin_text() {
+        let row = row(&["\u{202E}", "a", "b", "c", "\u{202C}"]);
+        let map = VisualMap::from_bidi(&row, BaseDirection::Ltr);
+        assert_eq!(map.visual_of(1), 3);
+        assert_eq!(map.visual_of(2), 2);
+        assert_eq!(map.visual_of(3), 1);
     }
 
     #[test]
