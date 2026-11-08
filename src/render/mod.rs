@@ -10,7 +10,7 @@ use crate::bidi;
 use crate::fonts::FontSet;
 use crate::selection::Selection;
 use crate::shape;
-use crate::term::{Color, GridSnapshot, RowSnapshot};
+use crate::term::{Color, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -24,6 +24,8 @@ pub struct Renderer {
     pub theme: Theme,
     padding: u32,
     shape_cache: shape::ShapeCache,
+    /// Whether the missing-shaping warning has already been logged.
+    shape_warned: bool,
 }
 
 impl Renderer {
@@ -38,6 +40,7 @@ impl Renderer {
             theme,
             padding,
             shape_cache: shape::ShapeCache::new(),
+            shape_warned: false,
         })
     }
 
@@ -87,6 +90,12 @@ impl Renderer {
                 shaped_rows.push(shape::shape_row(&text, map, &faces, &mut self.shape_cache));
             }
         } else {
+            if !self.shape_warned {
+                self.shape_warned = true;
+                tracing::warn!(
+                    "font data could not be parsed for shaping; drawing backgrounds only"
+                );
+            }
             shaped_rows.resize_with(snapshot.lines.len(), Vec::new);
         }
 
@@ -126,17 +135,7 @@ impl Renderer {
             let y = self.padding as f32 + row as f32 * cell_h;
             for (logical, cell) in line.cells.iter().enumerate() {
                 let x = self.padding as f32 + map.visual_of(logical) as f32 * cell_w;
-                let background = cell
-                    .style
-                    .bg
-                    .map(|bg| self.resolve(bg))
-                    .unwrap_or(self.theme.background);
-                // An inverse cell shows its foreground behind the glyph.
-                let background = if cell.style.inverse {
-                    self.resolve(cell.style.fg)
-                } else {
-                    background
-                };
+                let (_, background) = self.cell_colors(cell.style);
                 if cell.style.bg.is_some() || cell.style.inverse {
                     self.fill_rect(x, y, cell_w, cell_h, background);
                 }
@@ -156,6 +155,8 @@ impl Renderer {
         cell_h: f32,
     ) {
         let padding = self.padding as f32;
+        // The cell grid comes from the primary face; a system Arabic fallback
+        // with a taller ascent may paint a pixel or two above the cell top.
         let baseline = padding + row as f32 * cell_h + self.fonts.ascent;
         let units = run.units_per_em.max(1) as f32;
         let scale = self.fonts.size_px / units;
@@ -172,7 +173,7 @@ impl Renderer {
             if cluster.cells.len() == 1 && bidi::is_bidi_control_only(&first.text) {
                 continue;
             }
-            let color = self.resolve(first.style.fg);
+            let (color, _) = self.cell_colors(first.style);
             let slot_start = cluster.slots.start.max(run.slots.start);
             let slot_end = cluster.slots.end.min(run.slots.end);
             if slot_start >= slot_end {
@@ -188,6 +189,7 @@ impl Renderer {
             let mut pen = padding + slot_start as f32 * cell_w + offset;
 
             for glyph in &cluster.glyphs {
+                // ab_glyph ids are u16; an out-of-range id becomes .notdef.
                 let id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
                 if let Some(slot) = self.cache.get(font_id, font, id, self.fonts.size_px) {
                     let x = pen + glyph.x_offset as f32 * scale * scale_x;
@@ -223,7 +225,7 @@ impl Renderer {
                 if cell.style.hidden {
                     continue;
                 }
-                let foreground = self.resolve(cell.style.fg);
+                let (foreground, _) = self.cell_colors(cell.style);
                 let x = self.padding as f32 + map.visual_of(logical) as f32 * cell_w;
                 let span = cell_w * cell.width.max(1) as f32;
                 if cell.style.underline {
@@ -254,6 +256,22 @@ impl Renderer {
             Color::Default => self.theme.foreground,
             Color::Indexed(index) => self.theme.indexed(index),
             Color::Rgb(r, g, b) => Rgb::new(r, g, b),
+        }
+    }
+
+    /// Resolved `(glyph, background)` colors. An inverse cell swaps the pair,
+    /// so its glyphs take the background color and its fill takes the
+    /// foreground color.
+    fn cell_colors(&self, style: Style) -> (Rgb, Rgb) {
+        let foreground = self.resolve(style.fg);
+        let background = style
+            .bg
+            .map(|bg| self.resolve(bg))
+            .unwrap_or(self.theme.background);
+        if style.inverse {
+            (background, foreground)
+        } else {
+            (foreground, background)
         }
     }
 
@@ -616,7 +634,7 @@ mod tests {
                 style: Style::default(),
             },
         ]);
-        let mut selection = Selection::new(LogicalPos { row: 0, col: 3 });
+        let mut selection = Selection::new(LogicalPos { row: 0, col: 4 });
         selection.update(LogicalPos { row: 0, col: 5 });
         let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
         renderer.draw(&snapshot, &maps, Some(&selection));
@@ -628,7 +646,9 @@ mod tests {
             let x = padding + slot * cell_w + 1;
             let y = padding + 1;
             let pixel = renderer.pixels()[y as usize * width + x as usize];
-            let selected = (3..6).contains(&slot);
+            // Logical 4 and 5 land on visual slots 4 and 3: the reversed range
+            // proves selection is filled by visual placement, not logical index.
+            let selected = (3..5).contains(&slot);
             assert_eq!(
                 pixel == selection_color,
                 selected,
@@ -676,6 +696,49 @@ mod tests {
             renderer.pixels()[index],
             packed(renderer.theme.foreground),
             "an inverse blank cell paints the foreground color"
+        );
+    }
+
+    #[test]
+    fn inverse_cells_paint_glyphs_and_decorations_in_the_swapped_color() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let fill = renderer.theme.indexed(1);
+        let ink = renderer.theme.indexed(2);
+        let style = Style {
+            fg: Color::Indexed(1),
+            bg: Some(Color::Indexed(2)),
+            inverse: true,
+            underline: true,
+            ..Style::default()
+        };
+        let cell = Cell {
+            text: "M".into(),
+            width: 1,
+            style,
+        };
+        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        assert_eq!(
+            renderer.pixels()[padding * width + padding],
+            packed(fill),
+            "an inverse cell fills with its foreground color"
+        );
+        assert!(
+            renderer.pixels().iter().any(|pixel| *pixel == packed(ink)),
+            "the glyph ink must use the swapped background color"
+        );
+        let underline_y = (renderer.padding() as f32 + renderer.fonts.ascent + 1.0)
+            .min(renderer.padding() as f32 + cell_h as f32 - 1.0)
+            .round() as usize;
+        assert_eq!(
+            renderer.pixels()[underline_y * width + padding],
+            packed(ink),
+            "decorations must use the swapped background color"
         );
     }
 
