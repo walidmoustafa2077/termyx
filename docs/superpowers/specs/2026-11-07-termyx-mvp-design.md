@@ -5,6 +5,11 @@
 **Scope:** Phases 0–3 (MVP)
 **Platforms:** Windows 10 1809+, Linux, macOS
 
+> **Batch 1 errata (2026-11-08):** Application mouse reporting, extended keys,
+> cursor shape/visibility, focus reporting, window title (OSC 0/2), and OSC 52
+> copy are now implemented; see README "Terminal protocol support". Any later
+> statement in this document that calls them out of scope is superseded.
+
 ---
 
 ## 1. Summary

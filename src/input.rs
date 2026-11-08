@@ -75,8 +75,8 @@ pub fn encode(key: KeyInput, mods: Mods, mode: TermMode) -> Option<Vec<u8>> {
         KeyInput::Down => Some(encode_arrow(b'B', mods, mode)),
         KeyInput::Right => Some(encode_arrow(b'C', mods, mode)),
         KeyInput::Left => Some(encode_arrow(b'D', mods, mode)),
-        KeyInput::Home => Some(encode_home_end(b'H', mods)),
-        KeyInput::End => Some(encode_home_end(b'F', mods)),
+        KeyInput::Home => Some(encode_home_end(b'H', mods, mode)),
+        KeyInput::End => Some(encode_home_end(b'F', mods, mode)),
         KeyInput::Insert => Some(encode_tilde(2, mods)),
         KeyInput::Delete => Some(encode_tilde(3, mods)),
         KeyInput::PageUp => Some(encode_tilde(5, mods)),
@@ -120,11 +120,13 @@ fn encode_arrow(final_byte: u8, mods: Mods, mode: TermMode) -> Vec<u8> {
     }
 }
 
-fn encode_home_end(final_byte: u8, mods: Mods) -> Vec<u8> {
+/// Unmodified Home/End follow application cursor mode like arrows; xterm sends
+/// `SS3 H`/`SS3 F` there. Modified forms are always CSI with a parameter.
+fn encode_home_end(final_byte: u8, mods: Mods, mode: TermMode) -> Vec<u8> {
     if has_modifier(mods) {
         csi_with_modifier(modifier_parameter(mods), final_byte)
     } else {
-        vec![0x1b, b'[', final_byte]
+        cursor_key(final_byte, mode)
     }
 }
 
@@ -350,6 +352,43 @@ mod tests {
     }
 
     #[test]
+    fn home_end_follow_application_cursor_mode() {
+        let normal = TermMode::empty();
+        let app = TermMode::APP_CURSOR;
+        assert_eq!(
+            encode(KeyInput::Home, plain(), normal),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(
+            encode(KeyInput::End, plain(), normal),
+            Some(b"\x1b[F".to_vec())
+        );
+        assert_eq!(
+            encode(KeyInput::Home, plain(), app),
+            Some(b"\x1bOH".to_vec())
+        );
+        assert_eq!(
+            encode(KeyInput::End, plain(), app),
+            Some(b"\x1bOF".to_vec())
+        );
+
+        // Modified Home/End keep the CSI parameter form in both modes.
+        let ctrl = Mods {
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert_eq!(
+            encode(KeyInput::Home, ctrl, app),
+            Some(b"\x1b[1;5H".to_vec())
+        );
+        assert_eq!(
+            encode(KeyInput::End, ctrl, normal),
+            Some(b"\x1b[1;5F".to_vec())
+        );
+    }
+
+    #[test]
     fn ctrl_letter_becomes_a_control_byte() {
         let mode = TermMode::empty();
         let mods = Mods {
@@ -534,6 +573,77 @@ mod tests {
         assert_eq!(
             encode_mouse(mouse(MouseEventKind::WheelUp, None), mode),
             Some(b"\x1b[<64;3;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_reports_middle_right_and_buttonless_motion() {
+        let mode = TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
+        assert_eq!(
+            encode_mouse(
+                mouse(MouseEventKind::Press, Some(MouseButton::Middle)),
+                mode
+            ),
+            Some(b"\x1b[<1;3;5M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse(mouse(MouseEventKind::Press, Some(MouseButton::Right)), mode),
+            Some(b"\x1b[<2;3;5M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse(mouse(MouseEventKind::Motion, None), mode),
+            Some(b"\x1b[<35;3;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_wheel_encodes_both_axes() {
+        let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert_eq!(
+            encode_mouse(mouse(MouseEventKind::WheelDown, None), mode),
+            Some(b"\x1b[<65;3;5M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse(mouse(MouseEventKind::WheelLeft, None), mode),
+            Some(b"\x1b[<66;3;5M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse(mouse(MouseEventKind::WheelRight, None), mode),
+            Some(b"\x1b[<67;3;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_applies_modifier_bits() {
+        let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        let event = MouseEvent {
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
+            column: 0,
+            row: 0,
+            mods: Mods {
+                ctrl: true,
+                alt: true,
+                shift: true,
+            },
+        };
+        // 0 + 4 (shift) + 8 (alt) + 16 (ctrl) = 28.
+        assert_eq!(encode_mouse(event, mode), Some(b"\x1b[<28;1;1M".to_vec()));
+    }
+
+    #[test]
+    fn legacy_mouse_saturates_coordinates_at_255() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        let event = MouseEvent {
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
+            column: 500,
+            row: 500,
+            mods: plain(),
+        };
+        assert_eq!(
+            encode_mouse(event, mode),
+            Some(vec![0x1b, b'[', b'M', 32, 255, 255])
         );
     }
 

@@ -8,6 +8,11 @@
 
 **Tech Stack:** Rust stable (MSVC on Windows), winit 0.30, softbuffer 0.4, tiny-skia 0.11, alacritty_terminal 0.26, portable-pty 0.8, fontdb 0.23, ttf-parser 0.25, ab_glyph 0.2, serde/toml, arboard 3, tracing, thiserror/anyhow.
 
+> **Batch 1 errata (2026-11-08):** Application mouse reporting, extended keys,
+> cursor shape/visibility, focus reporting, window title (OSC 0/2), and OSC 52
+> copy are now implemented; see README "Terminal protocol support". Statements
+> below that place them out of scope are superseded.
+
 **Spec:** `docs/superpowers/specs/2026-11-07-termyx-mvp-design.md`
 
 ## Global Constraints

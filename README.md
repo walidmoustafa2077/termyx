@@ -80,17 +80,19 @@ behavior is protocol-level rather than app-specific: ANSI/VT sequences, 16/256/
 truecolor, alternate screen, scroll regions, wide cells, combining marks,
 bracketed paste, and DEC modes.
 
-- **Application mouse reporting**: X10/1000 click, 1002 button-drag, 1003 any
-  motion, UTF-8 coordinates (1005), and SGR (1006). Hold **Shift** to force
+- **Application mouse reporting**: 1000 click, 1002 button-drag, 1003 any
+  motion, UTF-8 coordinates (1005), and SGR (1006); 1007 alternate scroll turns
+  the wheel into arrow keys in the alternate screen. Hold **Shift** to force
   local text selection; otherwise the wheel and clicks go to the application.
 - **Keys**: Shift+Tab/backtab, F1–F12, modified arrows/Home/End/navigation, and
   application cursor mode. Ctrl+Alt characters are prefixed with `ESC`.
-- **Cursor**: block, beam, underline, and hollow-block shapes (DECSCUSR), and
-  visibility (DECTCEM).
+- **Cursor**: block, beam, and underline shapes (DECSCUSR), and visibility
+  (DECTCEM). Hollow block is reserved and not reachable from DECSCUSR.
 - **Focus and title**: focus in/out reports when enabled, and OSC 0/2 title
-  updates including reset.
-- **OSC 52**: copy-only clipboard storage. Clipboard read (paste) remains
-  disabled by default.
+  updates. Reset comes from a title-stack pop or a resize with no title set,
+  not from OSC 104/110; an empty OSC title restores the default title.
+- **OSC 52**: copy-only clipboard storage; OSC 52 read requests are refused.
+  Local `Ctrl+Shift+V` paste works.
 - **IME**: committed text is sent to the shell; there is no preedit overlay.
 
 ## Phase 2 acceptance

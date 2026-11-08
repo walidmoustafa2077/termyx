@@ -165,17 +165,20 @@ impl Terminal {
 
     /// Feed raw PTY bytes to the VT parser.
     ///
-    /// Returns `true` when this feed pushed at least one row into scrollback
-    /// history. Callers use that to invalidate row-anchored state such as a
-    /// text selection.
+    /// Returns `true` when this feed moved rows, which invalidates row-anchored
+    /// state such as a text selection: history grew, the alternate screen
+    /// swapped grids, or the scrollback ring rotated at its cap. A TUI that
+    /// repaints in place below the cap returns `false`, so a selection made on
+    /// its visible content can still be copied.
     ///
-    /// Limitation: once scrollback is at its cap, `total_lines` stops growing,
-    /// so a scroll at the cap is not reported. A TUI that redraws the visible
-    /// screen in place never grows history, which is the behavior callers want.
+    /// At the cap the signal is conservative: `total_lines` stays constant
+    /// while the ring rotates, so even an in-place repaint there reports a
+    /// scroll and drops the selection.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         let before = self.term.grid().total_lines();
         self.processor.advance(&mut self.term, bytes);
-        self.term.grid().total_lines() > before
+        let after = self.term.grid().total_lines();
+        after != before || before >= self.size.total_lines
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -569,6 +572,33 @@ mod tests {
             scrolled |= term.feed(b"x\r\n");
         }
         assert!(scrolled);
+    }
+
+    #[test]
+    fn in_place_repaint_below_the_cap_does_not_report_scroll() {
+        let mut term = Terminal::new(20, 5, 100);
+        for _ in 0..10 {
+            term.feed(b"x\r\n");
+        }
+        assert!(!term.feed(b"\x1b[HX"));
+    }
+
+    #[test]
+    fn feed_reports_scroll_at_the_cap_even_without_growth() {
+        let mut term = Terminal::new(20, 5, 10);
+        for _ in 0..40 {
+            term.feed(b"x\r\n");
+        }
+        assert!(term.feed(b"\x1b[HX"));
+    }
+
+    #[test]
+    fn entering_the_alternate_screen_reports_a_change() {
+        let mut term = Terminal::new(20, 5, 100);
+        for _ in 0..10 {
+            term.feed(b"x\r\n");
+        }
+        assert!(term.feed(b"\x1b[?1049h"));
     }
 
     #[test]

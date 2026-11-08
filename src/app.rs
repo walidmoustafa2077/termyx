@@ -27,6 +27,10 @@ use crate::visual::VisualMap;
 /// would freeze the UI thread while writing to a shell that may not drain it.
 const MAX_PASTE_CHARS: usize = 1_048_576;
 
+/// Upper bound on an OSC 52 payload, in bytes. The VT parser accumulates the
+/// whole sequence before the UI thread writes it to the clipboard.
+const MAX_OSC52_BYTES: usize = 100 * 1024;
+
 const DEFAULT_TITLE: &str = "Termyx";
 
 pub struct App {
@@ -277,11 +281,25 @@ impl App {
         self.cursor_pos = (x, y);
 
         if let Some(button) = self.app_mouse_button {
+            // A forwarded button is down: report motion regardless of Shift so
+            // the gesture started by the press stays balanced.
             let mode = self.app_mouse_mode();
-            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-                && !self.modifiers.shift_key()
-            {
+            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
                 self.send_mouse(input::MouseEventKind::Motion, Some(button));
+            }
+            return;
+        }
+
+        // A local drag must keep extending the selection even if Shift was
+        // released mid-gesture, before any 1003 motion steals the event.
+        if self.mouse_down {
+            if let Some(position) = self.pos_at(x, y) {
+                if let Some(selection) = &mut self.selection {
+                    selection.update(position);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             return;
         }
@@ -289,20 +307,6 @@ impl App {
         let mode = self.app_mouse_mode();
         if mode.contains(TermMode::MOUSE_MOTION) && !self.modifiers.shift_key() {
             self.send_mouse(input::MouseEventKind::Motion, None);
-            return;
-        }
-
-        if !self.mouse_down {
-            return;
-        }
-        let Some(position) = self.pos_at(x, y) else {
-            return;
-        };
-        if let Some(selection) = &mut self.selection {
-            selection.update(position);
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
         }
     }
 
@@ -337,6 +341,24 @@ impl App {
         if lines == 0 {
             return;
         }
+
+        let mode = self.app_mouse_mode();
+        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            // The alternate grid has no scrollback. Mode 1007 turns the wheel
+            // into cursor keys so pager-style TUIs still scroll.
+            let key = if lines > 0 {
+                KeyInput::Up
+            } else {
+                KeyInput::Down
+            };
+            if let Some(bytes) = input::encode(key, Mods::default(), mode) {
+                for _ in 0..lines.unsigned_abs() {
+                    self.write_input(&bytes);
+                }
+            }
+            return;
+        }
+
         let Some(terminal) = &mut self.terminal else {
             return;
         };
@@ -358,36 +380,34 @@ impl App {
             return;
         };
 
-        if self.app_mouse_mode().intersects(TermMode::MOUSE_MODE) && !self.modifiers.shift_key() {
-            let (kind, reported) = match state {
-                ElementState::Pressed => {
-                    self.app_mouse_button = Some(input_button);
-                    (input::MouseEventKind::Press, input_button)
-                }
-                ElementState::Released => (
-                    input::MouseEventKind::Release,
-                    self.app_mouse_button.take().unwrap_or(input_button),
-                ),
+        if state == ElementState::Pressed {
+            if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
+                self.app_mouse_button = Some(input_button);
+                self.mouse_down = false;
+                self.send_mouse(input::MouseEventKind::Press, Some(input_button));
+                return;
+            }
+
+            // Shift+drag and non-reporting apps keep local text selection.
+            self.app_mouse_button = None;
+            if button != MouseButton::Left {
+                return;
+            }
+            let Some(position) = self.pos_at(self.cursor_pos.0, self.cursor_pos.1) else {
+                return;
             };
-            self.send_mouse(kind, Some(reported));
+            self.selection = Some(Selection::new(position));
+            self.mouse_down = true;
+        } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+            // Route by the state captured at press time: a forwarded press is
+            // released even when Shift or the mouse mode changed mid-gesture.
+            self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+            self.mouse_down = false;
             return;
+        } else {
+            self.mouse_down = false;
         }
 
-        // Shift+drag and non-reporting apps keep local text selection.
-        self.app_mouse_button = None;
-        match state {
-            ElementState::Pressed => {
-                if button != MouseButton::Left {
-                    return;
-                }
-                let Some(position) = self.pos_at(self.cursor_pos.0, self.cursor_pos.1) else {
-                    return;
-                };
-                self.selection = Some(Selection::new(position));
-                self.mouse_down = true;
-            }
-            ElementState::Released => self.mouse_down = false,
-        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -513,10 +533,10 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyOutput(bytes) => {
                 if let Some(terminal) = self.terminal.as_mut() {
                     if terminal.feed(&bytes) {
-                        // Only invalidate a selection when rows actually moved
-                        // into history. A TUI redrawing in place must keep the
-                        // user's selection so it can still be copied.
+                        // Rows moved, so row-anchored selection positions are
+                        // stale. An in-place repaint keeps the selection.
                         self.selection = None;
+                        self.mouse_down = false;
                     }
                 }
                 if let Some(window) = &self.window {
@@ -525,7 +545,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Title(title) => {
                 if let Some(window) = &self.window {
-                    window.set_title(&title);
+                    if title.is_empty() {
+                        // `OSC 0;` / `OSC 2;` with no payload restores the
+                        // default title rather than blanking the window.
+                        window.set_title(DEFAULT_TITLE);
+                    } else {
+                        window.set_title(&title);
+                    }
                 }
             }
             UserEvent::ResetTitle => {
@@ -534,6 +560,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ClipboardStore(text) => {
+                if text.len() > MAX_OSC52_BYTES {
+                    tracing::warn!(
+                        limit = MAX_OSC52_BYTES,
+                        len = text.len(),
+                        "OSC 52 clipboard store rejected"
+                    );
+                    return;
+                }
                 let Some(clipboard) = self.clipboard() else {
                     return;
                 };
@@ -568,6 +602,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::Focused(focused) => {
+                if !focused {
+                    // A pressed button may never get its release after focus
+                    // loss; balance the application and end local drags.
+                    if let Some(button) = self.app_mouse_button.take() {
+                        self.send_mouse(input::MouseEventKind::Release, Some(button));
+                    }
+                    self.mouse_down = false;
+                }
                 if self.app_mouse_mode().contains(TermMode::FOCUS_IN_OUT) {
                     self.write_input(&input::encode_focus(focused));
                 }
@@ -633,6 +675,19 @@ fn map_mouse_button(button: MouseButton) -> Option<input::MouseButton> {
         MouseButton::Right => Some(input::MouseButton::Right),
         _ => None,
     }
+}
+
+/// A press is forwarded only when the application reports the mouse and Shift
+/// is not held. Shift is the documented escape hatch for local selection.
+fn forwards_mouse_press(mode: TermMode, shift: bool) -> bool {
+    mode.intersects(TermMode::MOUSE_MODE) && !shift
+}
+
+/// A release is forwarded only when the matching press was forwarded. Using the
+/// tracked button rather than the live mode or Shift keeps a mid-gesture change
+/// from losing or inventing a release.
+fn release_button(tracked: Option<input::MouseButton>) -> Option<input::MouseButton> {
+    tracked
 }
 
 fn mods_from(modifiers: ModifiersState) -> Mods {
@@ -809,6 +864,32 @@ mod tests {
         let capped = cap_paste(text);
         assert_eq!(capped.chars().count(), MAX_PASTE_CHARS);
         assert!(capped.chars().all(|ch| ch == 'é'));
+    }
+
+    #[test]
+    fn mouse_press_forwards_only_in_reporting_modes_without_shift() {
+        for mode in [
+            TermMode::MOUSE_REPORT_CLICK,
+            TermMode::MOUSE_DRAG,
+            TermMode::MOUSE_MOTION,
+        ] {
+            assert!(forwards_mouse_press(mode, false));
+            assert!(!forwards_mouse_press(mode, true));
+        }
+        assert!(!forwards_mouse_press(TermMode::empty(), false));
+        assert!(!forwards_mouse_press(TermMode::SGR_MOUSE, false));
+        assert!(!forwards_mouse_press(TermMode::ALT_SCREEN, false));
+    }
+
+    #[test]
+    fn local_release_after_local_press_is_not_forwarded() {
+        // Local gestures never record a tracked app button, so the release has
+        // nothing to report even if a mouse mode is active.
+        assert_eq!(release_button(None), None);
+        assert_eq!(
+            release_button(Some(input::MouseButton::Left)),
+            Some(input::MouseButton::Left)
+        );
     }
 
     fn bidi_line() -> RowSnapshot {
