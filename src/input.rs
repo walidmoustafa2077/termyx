@@ -80,15 +80,18 @@ fn cursor_key(final_byte: u8, mode: TermMode) -> Vec<u8> {
 /// Encode pasted text, optionally using xterm bracketed paste.
 ///
 /// Clipboard text is untrusted. Inside a bracketed paste a literal terminator
-/// would end the paste early and deliver the rest as typed input, so both
-/// markers are stripped before the text is wrapped. Non-bracketed paste stays
-/// verbatim.
+/// would end the paste early and deliver the rest as typed input, so each marker
+/// is replaced (not deleted) by U+FFFD before the text is wrapped: deleting the
+/// bytes would let the surrounding text splice back into a live marker.
+/// Non-bracketed paste stays verbatim.
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
         return text.as_bytes().to_vec();
     }
 
-    let text = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+    let text = text
+        .replace("\x1b[200~", "\u{FFFD}")
+        .replace("\x1b[201~", "\u{FFFD}");
     let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
     bytes.extend_from_slice(text.as_bytes());
@@ -209,12 +212,35 @@ mod tests {
     }
 
     #[test]
-    fn paste_strips_bracketed_paste_markers() {
-        // A payload that closes the paste must not be able to terminate it.
+    fn paste_replaces_bracketed_paste_markers() {
         let bytes = paste("safe\x1b[201~rm -rf /\x1b[200~tail", true);
-        assert_eq!(bytes, b"\x1b[200~saferm -rf /tail\x1b[201~".to_vec());
-        // The wrapper itself is the only pair of markers in the encoded text.
-        assert_eq!(bytes.windows(4).filter(|w| *w == b"\x1b[20").count(), 2);
+        assert_eq!(
+            bytes,
+            "\x1b[200~safe\u{FFFD}rm -rf /\u{FFFD}tail\x1b[201~".as_bytes()
+        );
+    }
+
+    #[test]
+    fn paste_cannot_splice_a_live_terminator() {
+        for payload in [
+            "a\x1b[201~b",
+            "a\x1b[20\x1b[201~1~b",
+            "a\x1b[200~\x1b[201~b",
+        ] {
+            let bytes = paste(payload, true);
+            assert_eq!(
+                bytes.windows(6).filter(|w| *w == b"\x1b[200~").count(),
+                1,
+                "exactly one opening marker for {payload:?}"
+            );
+            assert_eq!(
+                bytes.windows(6).filter(|w| *w == b"\x1b[201~").count(),
+                1,
+                "exactly one closing marker for {payload:?}"
+            );
+            assert!(bytes.starts_with(b"\x1b[200~"), "{payload:?}");
+            assert!(bytes.ends_with(b"\x1b[201~"), "{payload:?}");
+        }
     }
 
     #[test]

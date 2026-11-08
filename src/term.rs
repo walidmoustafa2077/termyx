@@ -177,11 +177,6 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
-    /// Number of lines held in scrollback history.
-    pub fn history_size(&self) -> usize {
-        self.term.grid().history_size()
-    }
-
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -485,15 +480,5 @@ mod tests {
         assert!(cells[2].style.underline);
         assert!(cells[3].style.strikethrough);
         assert!(!cells[4].style.inverse, "reset must clear attributes");
-    }
-
-    #[test]
-    fn feeding_lines_grows_scrollback_history() {
-        let mut term = Terminal::new(20, 3, 1_000);
-        assert_eq!(term.history_size(), 0);
-        for index in 0..10 {
-            term.feed(format!("line{index}\r\n").as_bytes());
-        }
-        assert!(term.history_size() > 0);
     }
 }

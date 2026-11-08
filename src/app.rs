@@ -392,21 +392,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput(bytes) => {
-                let history_before = self.terminal.as_ref().map(Terminal::history_size);
                 if let Some(terminal) = &mut self.terminal {
                     terminal.feed(&bytes);
                 }
-                // Rows shift up under fixed logical selection anchors once the
-                // grid scrolls, so the highlight would refer to other text.
-                if let Some(before) = history_before {
-                    if self
-                        .terminal
-                        .as_ref()
-                        .is_some_and(|terminal| terminal.history_size() > before)
-                    {
-                        self.selection = None;
-                    }
-                }
+                // Output can scroll rows under a fixed logical anchor (even at
+                // the scrollback cap, where history size stops growing), so a
+                // pending selection may now cover different text.
+                self.selection = None;
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
