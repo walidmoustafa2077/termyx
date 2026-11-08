@@ -97,6 +97,7 @@ mod tests {
             style: Style {
                 fg: Color::Default,
                 bg: None,
+                ..Style::default()
             },
         }
     }

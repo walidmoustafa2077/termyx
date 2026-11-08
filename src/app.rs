@@ -7,7 +7,7 @@ use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -22,6 +22,10 @@ use crate::selection::Selection;
 use crate::term::{LogicalPos, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
+
+/// Upper bound on a single paste, in Unicode scalar values. A larger clipboard
+/// would freeze the UI thread while writing to a shell that may not drain it.
+const MAX_PASTE_CHARS: usize = 1_048_576;
 
 pub struct App {
     config: Config,
@@ -72,6 +76,9 @@ impl App {
                 self.config.window.height,
             ));
         let window = Arc::new(event_loop.create_window(attributes)?);
+        // winit starts with IME disabled on Windows; committed composition text
+        // arrives as `WindowEvent::Ime` and is forwarded to the PTY.
+        window.set_ime_allowed(true);
 
         let context = Context::new(window.clone())
             .map_err(|err| anyhow::anyhow!("softbuffer context: {err}"))?;
@@ -84,7 +91,7 @@ impl App {
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
-        let mut renderer = Renderer::new(fonts, theme, self.config.window.padding);
+        let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
 
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -225,8 +232,17 @@ impl App {
         let Some(bytes) = input::encode(key, mods_from(self.modifiers), mode) else {
             return;
         };
+        self.write_input(&bytes);
+    }
+
+    /// Writes text to the shell through the shared PTY path.
+    fn send_text(&mut self, text: &str) {
+        self.write_input(text.as_bytes());
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) {
         if let Some(pty) = &mut self.pty {
-            if let Err(err) = pty.write(&bytes) {
+            if let Err(err) = pty.write(bytes) {
                 tracing::warn!(%err, "pty write failed");
             }
         }
@@ -267,6 +283,7 @@ impl App {
         }
         // Selection positions are logical viewport offsets; scrolling makes them stale.
         self.selection = None;
+        self.mouse_down = false;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -346,17 +363,14 @@ impl App {
                 return;
             }
         };
+        let text = cap_paste(text);
         let bracketed = self
             .terminal
             .as_ref()
             .map(|terminal| terminal.mode().contains(TermMode::BRACKETED_PASTE))
             .unwrap_or(false);
         let bytes = input::paste(&text, bracketed);
-        if let Some(pty) = &mut self.pty {
-            if let Err(err) = pty.write(&bytes) {
-                tracing::warn!(%err, "pty write failed");
-            }
-        }
+        self.write_input(&bytes);
     }
 }
 
@@ -378,8 +392,20 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput(bytes) => {
+                let history_before = self.terminal.as_ref().map(Terminal::history_size);
                 if let Some(terminal) = &mut self.terminal {
                     terminal.feed(&bytes);
+                }
+                // Rows shift up under fixed logical selection anchors once the
+                // grid scrolls, so the highlight would refer to other text.
+                if let Some(before) = history_before {
+                    if self
+                        .terminal
+                        .as_ref()
+                        .is_some_and(|terminal| terminal.history_size() > before)
+                    {
+                        self.selection = None;
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -418,6 +444,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.on_key(event)
             }
+            WindowEvent::Ime(Ime::Commit(text)) => self.send_text(&text),
+            // Composition preview (preedit) is Phase 3; the OS candidate window
+            // is enough until the grid can render it.
+            WindowEvent::Ime(_) => {}
             _ => {}
         }
     }
@@ -477,15 +507,23 @@ fn cell_at(
 }
 
 fn wheel_lines(delta: MouseScrollDelta, cell_h: f32, remainder: &mut f32) -> i32 {
-    match delta {
-        MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
-        MouseScrollDelta::PixelDelta(position) => {
-            *remainder += position.y as f32 / cell_h.max(1.0);
-            let lines = remainder.trunc();
-            *remainder -= lines;
-            lines as i32
-        }
+    *remainder += match delta {
+        MouseScrollDelta::LineDelta(_, y) => y * 3.0,
+        MouseScrollDelta::PixelDelta(position) => position.y as f32 / cell_h.max(1.0),
+    };
+    let lines = remainder.trunc();
+    *remainder -= lines;
+    lines as i32
+}
+
+/// Truncates a clipboard payload to [`MAX_PASTE_CHARS`] without splitting a
+/// UTF-8 scalar value.
+fn cap_paste(mut text: String) -> String {
+    if let Some((index, _)) = text.char_indices().nth(MAX_PASTE_CHARS) {
+        tracing::warn!(limit = MAX_PASTE_CHARS, "paste truncated");
+        text.truncate(index);
     }
+    text
 }
 
 #[cfg(test)]
@@ -570,5 +608,23 @@ mod tests {
         }
         assert_eq!(wheel_lines(delta, 20.0, &mut remainder), 1);
         assert_eq!(remainder, 0.0);
+    }
+
+    #[test]
+    fn wheel_lines_accumulates_fractional_line_deltas() {
+        let delta = MouseScrollDelta::LineDelta(0.0, 0.5);
+        let mut remainder = 0.0;
+        assert_eq!(wheel_lines(delta, 20.0, &mut remainder), 1);
+        assert_eq!(remainder, 0.5);
+        assert_eq!(wheel_lines(delta, 20.0, &mut remainder), 2);
+        assert_eq!(remainder, 0.0);
+    }
+
+    #[test]
+    fn cap_paste_truncates_without_splitting_utf8() {
+        let text = "é".repeat(MAX_PASTE_CHARS + 1);
+        let capped = cap_paste(text);
+        assert_eq!(capped.chars().count(), MAX_PASTE_CHARS);
+        assert!(capped.chars().all(|ch| ch == 'é'));
     }
 }

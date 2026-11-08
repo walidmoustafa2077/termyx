@@ -19,6 +19,10 @@ pub enum Color {
 pub struct Style {
     pub fg: Color,
     pub bg: Option<Color>,
+    pub inverse: bool,
+    pub hidden: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +177,11 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// Number of lines held in scrollback history.
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -261,9 +270,15 @@ impl Terminal {
 }
 
 fn convert_cell(cell: &TermCell) -> Cell {
+    // Bold, italic, and dim are deliberately deferred: the renderer has no
+    // bold/italic face or dim blending yet.
     let style = Style {
         fg: map_fg(cell.fg),
         bg: map_bg(cell.bg),
+        inverse: cell.flags.contains(Flags::INVERSE),
+        hidden: cell.flags.contains(Flags::HIDDEN),
+        underline: cell.flags.contains(Flags::UNDERLINE),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
     };
 
     if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -458,5 +473,27 @@ mod tests {
         let converted = convert_cell(&cell);
         assert_eq!(converted.text, " ");
         assert_eq!(converted.width, 1);
+    }
+
+    #[test]
+    fn text_attributes_are_carried_into_the_snapshot() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"\x1b[7mR\x1b[0m\x1b[8mH\x1b[0m\x1b[4mU\x1b[0m\x1b[9mS\x1b[0m");
+        let cells = &term.snapshot().lines[0].cells;
+        assert!(cells[0].style.inverse);
+        assert!(cells[1].style.hidden);
+        assert!(cells[2].style.underline);
+        assert!(cells[3].style.strikethrough);
+        assert!(!cells[4].style.inverse, "reset must clear attributes");
+    }
+
+    #[test]
+    fn feeding_lines_grows_scrollback_history() {
+        let mut term = Terminal::new(20, 3, 1_000);
+        assert_eq!(term.history_size(), 0);
+        for index in 0..10 {
+            term.feed(format!("line{index}\r\n").as_bytes());
+        }
+        assert!(term.history_size() > 0);
     }
 }

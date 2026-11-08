@@ -254,6 +254,9 @@ impl Config {
             self.font.line_height = 1.2;
         }
         self.scrollback.lines = self.scrollback.lines.clamp(1_000, 200_000);
+        self.window.width = self.window.width.clamp(200, 10_000);
+        self.window.height = self.window.height.clamp(200, 10_000);
+        self.window.padding = self.window.padding.clamp(0, 64);
         self
     }
 
@@ -394,6 +397,21 @@ mod tests {
             .unwrap()
             .validate();
         assert_eq!(c.scrollback.lines, 200_000);
+    }
+
+    #[test]
+    fn window_geometry_and_padding_are_clamped() {
+        let c =
+            Config::from_toml_str("[window]\nwidth = 0\nheight = 99999\npadding = 500\n").unwrap();
+        assert_eq!(c.window.width, 200);
+        assert_eq!(c.window.height, 10_000);
+        assert_eq!(c.window.padding, 64);
+
+        let c =
+            Config::from_toml_str("[window]\nwidth = 1200\nheight = 800\npadding = 0\n").unwrap();
+        assert_eq!(c.window.width, 1200);
+        assert_eq!(c.window.height, 800);
+        assert_eq!(c.window.padding, 0);
     }
 
     #[test]

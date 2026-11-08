@@ -10,8 +10,8 @@ mod term;
 mod theme;
 mod visual;
 
-use anyhow::Context;
 use std::path::PathBuf;
+use tracing_subscriber::filter::LevelFilter;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn config_path_from_args() -> anyhow::Result<Option<PathBuf>> {
@@ -29,12 +29,29 @@ fn config_path_from_args() -> anyhow::Result<Option<PathBuf>> {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(LevelFilter::WARN.into())
+                .with_env_var("TERMYX_LOG")
+                .from_env_lossy(),
+        )
         .with_target(false)
         .init();
 
-    let config = config::Config::load(config_path_from_args()?.as_deref())
-        .context("loading configuration")?;
+    let config = match config::Config::load(config_path_from_args()?.as_deref()) {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!("{err:#}");
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Termyx")
+                .set_description(format!(
+                    "Configuration could not be loaded:\n{err:#}\n\nUsing defaults."
+                ))
+                .show();
+            config::Config::default().validate()
+        }
+    };
     let event_loop = EventLoop::<event::UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();

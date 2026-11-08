@@ -78,11 +78,17 @@ fn cursor_key(final_byte: u8, mode: TermMode) -> Vec<u8> {
 }
 
 /// Encode pasted text, optionally using xterm bracketed paste.
+///
+/// Clipboard text is untrusted. Inside a bracketed paste a literal terminator
+/// would end the paste early and deliver the rest as typed input, so both
+/// markers are stripped before the text is wrapped. Non-bracketed paste stays
+/// verbatim.
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
         return text.as_bytes().to_vec();
     }
 
+    let text = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
     let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
     bytes.extend_from_slice(text.as_bytes());
@@ -200,5 +206,19 @@ mod tests {
     fn paste_wraps_only_when_bracketed() {
         assert_eq!(paste("hi", false), b"hi".to_vec());
         assert_eq!(paste("hi", true), b"\x1b[200~hi\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn paste_strips_bracketed_paste_markers() {
+        // A payload that closes the paste must not be able to terminate it.
+        let bytes = paste("safe\x1b[201~rm -rf /\x1b[200~tail", true);
+        assert_eq!(bytes, b"\x1b[200~saferm -rf /tail\x1b[201~".to_vec());
+        // The wrapper itself is the only pair of markers in the encoded text.
+        assert_eq!(bytes.windows(4).filter(|w| *w == b"\x1b[20").count(), 2);
+    }
+
+    #[test]
+    fn non_bracketed_paste_keeps_markers_verbatim() {
+        assert_eq!(paste("a\x1b[201~b", false), b"a\x1b[201~b".to_vec());
     }
 }

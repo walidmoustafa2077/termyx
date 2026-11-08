@@ -23,25 +23,38 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> Self {
-        Self {
-            pixmap: Pixmap::new(1, 1).expect("1x1 pixmap"),
+    pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
+        let pixmap = Pixmap::new(1, 1)
+            .ok_or_else(|| anyhow::anyhow!("could not allocate the initial pixmap"))?;
+        Ok(Self {
+            pixmap,
             pixels: vec![0],
             fonts,
             cache: GlyphCache::new(),
             theme,
             padding,
-        }
+        })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Resizes the drawing surface. Returns `false` for a zero size or when the
+    /// allocation fails, in which case the previous pixmap is kept.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
         if width == 0 || height == 0 {
-            return;
+            return false;
         }
-        self.pixmap = Pixmap::new(width, height).expect("pixmap allocation");
+        let Some(pixmap) = Pixmap::new(width, height) else {
+            tracing::error!(
+                width,
+                height,
+                "pixmap allocation failed; keeping previous size"
+            );
+            return false;
+        };
+        self.pixmap = pixmap;
         self.pixels = vec![0; (width as usize) * (height as usize)];
         self.pixmap.fill(self.theme.background.to_tiny());
         self.sync();
+        true
     }
 
     pub fn draw(
@@ -65,17 +78,42 @@ impl Renderer {
             let y = padding + row as f32 * cell_h;
             for (logical, cell) in line.cells.iter().enumerate() {
                 let x = padding + map.visual_of(logical) as f32 * cell_w;
-                if let Some(bg) = cell.style.bg {
-                    let color = self.resolve(bg);
-                    self.fill_rect(x, y, cell_w, cell_h, color);
+                let foreground = self.resolve(cell.style.fg);
+                let background = cell
+                    .style
+                    .bg
+                    .map(|bg| self.resolve(bg))
+                    .unwrap_or(self.theme.background);
+                let (foreground, background) = if cell.style.inverse {
+                    (background, foreground)
+                } else {
+                    (foreground, background)
+                };
+                if cell.style.bg.is_some() || cell.style.inverse {
+                    self.fill_rect(x, y, cell_w, cell_h, background);
                 }
                 if selection.is_some_and(|selection| selection.contains(row, logical)) {
                     let color = self.theme.selection;
                     self.fill_rect(x, y, cell_w, cell_h, color);
                 }
+                if cell.style.hidden {
+                    continue;
+                }
                 if cell.width > 0 && !cell.text.is_empty() {
-                    let color = self.resolve(cell.style.fg);
-                    self.draw_text(x, y + ascent, &cell.text, color);
+                    self.draw_text(x, y + ascent, &cell.text, foreground);
+                }
+                let span = cell_w * cell.width.max(1) as f32;
+                if cell.style.underline {
+                    self.fill_rect(
+                        x,
+                        (y + ascent + 1.0).min(y + cell_h - 1.0),
+                        span,
+                        1.0,
+                        foreground,
+                    );
+                }
+                if cell.style.strikethrough {
+                    self.fill_rect(x, y + (cell_h / 2.0).round(), span, 1.0, foreground);
                 }
             }
         }
@@ -220,12 +258,48 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
 mod tests {
     use super::*;
     use crate::config::ThemeConfig;
+    use crate::term::{Affinity, Cell, CursorState, RowSnapshot, Style};
+    use crate::theme::Rgb;
 
     fn default_renderer() -> Renderer {
         let fonts = FontSet::load("Consolas", 14.0, 1.2)
             .or_else(|_| FontSet::load("DejaVu Sans Mono", 14.0, 1.2))
             .expect("a monospace font must exist");
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
+            .expect("renderer must be constructible")
+    }
+
+    fn packed(color: Rgb) -> u32 {
+        ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32
+    }
+
+    fn single_cell_snapshot(cell: Cell) -> GridSnapshot {
+        GridSnapshot {
+            cols: 1,
+            rows: 1,
+            lines: vec![RowSnapshot {
+                cells: vec![cell],
+                wrapped: false,
+            }],
+            cursor: CursorState {
+                row: 1,
+                logical: 0,
+                affinity: Affinity::Before,
+            },
+            display_offset: 0,
+        }
+    }
+
+    fn painted_rows(renderer: &Renderer) -> Vec<usize> {
+        let background = packed(renderer.theme.background);
+        let width = renderer.pixmap.width() as usize;
+        renderer
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| **pixel != background)
+            .map(|(index, _)| index / width)
+            .collect()
     }
 
     /// Sorted, deduplicated pixel columns that differ from the background.
@@ -256,9 +330,9 @@ mod tests {
     #[test]
     fn zero_sized_resize_keeps_previous_pixels() {
         let mut renderer = default_renderer();
-        renderer.resize(4, 3);
+        assert!(renderer.resize(4, 3));
         let expected_len = renderer.pixels().len();
-        renderer.resize(0, 0);
+        assert!(!renderer.resize(0, 0));
         assert_eq!(renderer.pixels().len(), expected_len);
     }
 
@@ -307,5 +381,102 @@ mod tests {
         let columns = painted_columns(&renderer);
         assert!(!columns.is_empty(), "the base glyph must be painted");
         assert!(*columns.last().unwrap() < cell_w);
+    }
+
+    #[test]
+    fn inverse_cells_swap_background_and_foreground() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let style = Style {
+            inverse: true,
+            ..Style::default()
+        };
+        let cell = Cell {
+            text: " ".into(),
+            width: 1,
+            style,
+        };
+        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let padding = renderer.padding() as usize;
+        let index = padding * renderer.pixmap.width() as usize + padding;
+        assert_eq!(
+            renderer.pixels()[index],
+            packed(renderer.theme.foreground),
+            "an inverse blank cell paints the foreground color"
+        );
+    }
+
+    #[test]
+    fn hidden_cells_paint_no_glyph() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let style = Style {
+            hidden: true,
+            ..Style::default()
+        };
+        let cell = Cell {
+            text: "M".into(),
+            width: 1,
+            style,
+        };
+        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.sync();
+        assert!(painted_rows(&renderer).is_empty());
+    }
+
+    #[test]
+    fn underline_is_a_single_line_below_the_baseline() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let style = Style {
+            underline: true,
+            ..Style::default()
+        };
+        let cell = Cell {
+            text: " ".into(),
+            width: 1,
+            style,
+        };
+        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let rows = painted_rows(&renderer);
+        assert!(!rows.is_empty());
+        let first = rows[0];
+        assert!(rows.iter().all(|row| *row == first), "one-pixel rule");
+        let baseline = renderer.padding() as f32 + renderer.fonts.ascent;
+        let expected = (baseline + 1.0).min(renderer.padding() as f32 + cell_h as f32 - 1.0);
+        assert_eq!(first, expected.round() as usize);
+    }
+
+    #[test]
+    fn strikethrough_is_a_single_line_across_the_cell() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let style = Style {
+            strikethrough: true,
+            ..Style::default()
+        };
+        let cell = Cell {
+            text: " ".into(),
+            width: 1,
+            style,
+        };
+        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let rows = painted_rows(&renderer);
+        assert!(!rows.is_empty());
+        let first = rows[0];
+        assert!(rows.iter().all(|row| *row == first), "one-pixel rule");
+        let expected = renderer.padding() as f32 + (cell_h as f32 / 2.0).round();
+        assert_eq!(first, expected as usize);
     }
 }

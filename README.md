@@ -45,8 +45,9 @@ Status matches the recorded acceptance run
 (`docs/phase-1-acceptance.md`).
 
 - [x] One window, one shell session
-- [x] PowerShell prompt renders at the left margin (bash/zsh not verified on
-      this Windows host)
+- [x] PowerShell prompt renders at the left margin
+- [ ] bash/zsh prompt renders at the left margin — not verified on this Windows
+      host
 - [x] `echo`, `dir`, and ANSI colors
 - [ ] `vim`/`nano` open, type, redraw, and exit — not verified on this Windows
       host (no editor installed)
@@ -69,6 +70,9 @@ Status matches the recorded acceptance run
   80 MB budget.
 - **Scrollback is wheel-only.** Phase 1 has no scrollbar UI; the mouse wheel is
   the only way to move through history.
+- **Bracketed paste strips its own delimiters.** Clipboard text containing the
+  `ESC[200~`/`ESC[201~` markers has them removed before insertion, so a copied
+  payload cannot terminate the paste and deliver the rest as typed input.
 - **Resize after scrolling.** Before scrollback exists, narrowing reflows into
   a trimmed viewport and restores cleanly. Once output has scrolled, narrowing
   falls back to the terminal engine's bottom-anchored reflow, so the top line of

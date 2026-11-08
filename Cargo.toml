@@ -14,9 +14,7 @@ alacritty_terminal = "0.26"
 vte = "0.15"
 portable-pty = "0.8"
 unicode-width = "0.2"
-unicode-segmentation = "1"
 fontdb = "0.23"
-ttf-parser = "0.25"
 ab_glyph = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -26,10 +24,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rfd = "0.15"
 arboard = "3"
-
-[dev-dependencies]
-insta = "1"
-image = "0.25"
 
 [profile.release]
 lto = "thin"

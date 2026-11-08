@@ -68,8 +68,9 @@ impl PtySession {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => on_output(buffer[..n].to_vec()),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(err) => {
-                        tracing::debug!(%err, "pty reader ended");
+                        tracing::warn!(%err, "pty reader ended");
                         break;
                     }
                 }

@@ -15,7 +15,7 @@ throwaway scripts were kept outside the repository (see the end of this file).
 
 ## Interactive matrix
 
-Shell config used for the matrix (`matrix.toml`):
+Shell config used for the matrix (a local `task12-accept.toml`, not committed):
 
 ```toml
 [shell]
@@ -23,7 +23,7 @@ program = "powershell.exe"
 args = ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Clear-Host"]
 ```
 
-Launch: `target\release\termyx.exe --config matrix.toml`
+Launch: `target\release\termyx.exe --config task12-accept.toml`
 
 | Check | Result | Command / action | Evidence |
 |---|---|---|---|
