@@ -38,8 +38,14 @@ impl VisualMap {
         }
     }
 
-    // Wired into the frame in Task 3; tests are the only callers until then.
-    #[allow(dead_code)]
+    pub fn for_row(row: &RowSnapshot, bidi: &crate::config::BidiConfig) -> Self {
+        if bidi.enabled {
+            Self::from_bidi(row, bidi.base_direction)
+        } else {
+            Self::identity(row.cells.len())
+        }
+    }
+
     pub fn from_bidi(row: &RowSnapshot, base: BaseDirection) -> Self {
         let analysis = bidi::analyze(row, base);
         Self::build(row, analysis.levels, analysis.runs)
@@ -243,5 +249,58 @@ mod tests {
         let map = VisualMap::identity(0);
         assert_eq!(map.cols(), 0);
         assert!(map.runs().is_empty());
+    }
+
+    use crate::config::BidiConfig;
+
+    fn bidi(base_direction: BaseDirection) -> BidiConfig {
+        BidiConfig {
+            enabled: true,
+            base_direction,
+        }
+    }
+
+    #[test]
+    fn ltr_base_keeps_the_prompt_on_the_left() {
+        let line = row(&["a", "b", " ", "م", "ر"]);
+        let map = VisualMap::for_row(&line, &bidi(BaseDirection::Ltr));
+        assert_eq!(map.visual_of(0), 0);
+        assert_eq!(map.visual_of(2), 2);
+        assert_eq!(map.visual_of(3), 4);
+        assert_eq!(map.visual_of(4), 3);
+    }
+
+    #[test]
+    fn rtl_base_right_anchors_latin_text() {
+        let line = row(&["a", "b", "c", " ", " ", " ", " ", " ", " ", " "]);
+        let map = VisualMap::for_row(&line, &bidi(BaseDirection::Rtl));
+        assert_eq!(map.visual_of(0), 7);
+        assert_eq!(map.visual_of(2), 9);
+    }
+
+    #[test]
+    fn auto_base_follows_the_first_strong_character() {
+        let rtl_first = row(&["م", "ر", "ح", " ", " ", " ", " "]);
+        let map = VisualMap::for_row(&rtl_first, &bidi(BaseDirection::Auto));
+        assert_eq!(map.visual_of(0), 6);
+
+        let ltr_first = row(&["a", "b", "c", " ", " ", " ", " "]);
+        let map = VisualMap::for_row(&ltr_first, &bidi(BaseDirection::Auto));
+        assert_eq!(map.visual_of(0), 0);
+    }
+
+    #[test]
+    fn disabled_bidi_falls_back_to_identity() {
+        let line = row(&["م", "ر", "ح"]);
+        let map = VisualMap::for_row(
+            &line,
+            &BidiConfig {
+                enabled: false,
+                base_direction: BaseDirection::Ltr,
+            },
+        );
+        assert_eq!(map.visual_of(0), 0);
+        assert_eq!(map.visual_of(2), 2);
+        assert!(map.levels().iter().all(|level| *level == 0));
     }
 }

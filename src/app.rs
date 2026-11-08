@@ -180,7 +180,11 @@ impl App {
             return;
         };
         let snapshot = terminal.snapshot();
-        let maps = vec![VisualMap::identity(snapshot.cols); snapshot.rows];
+        let maps: Vec<VisualMap> = snapshot
+            .lines
+            .iter()
+            .map(|line| VisualMap::for_row(line, &self.config.bidi))
+            .collect();
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         renderer.sync();
 
