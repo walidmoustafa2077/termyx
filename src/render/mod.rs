@@ -467,6 +467,26 @@ mod tests {
         snapshot
     }
 
+    /// Draws a single `"M"` cell with the cursor at the cell origin and copies
+    /// the resulting pixels out.
+    fn render_m_with_cursor(
+        renderer: &mut Renderer,
+        shape: CursorShape,
+        visible: bool,
+    ) -> Vec<u32> {
+        let mut snapshot = single_cell_snapshot(Cell {
+            text: "M".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        snapshot.cursor.row = 0;
+        snapshot.cursor.shape = shape;
+        snapshot.cursor.visible = visible;
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        renderer.pixels().to_vec()
+    }
+
     fn row_snapshot(cells: Vec<Cell>) -> GridSnapshot {
         let cols = cells.len();
         GridSnapshot {
@@ -765,9 +785,17 @@ mod tests {
             renderer.pixels()[row + padding],
             packed(renderer.theme.cursor)
         );
+        let beam_width = (cell_w as f32 / 8.0).max(1.0) as usize;
+        let mid = padding + cell_h as usize / 2;
         assert_eq!(
-            renderer.pixels()[row + padding + cell_w as usize - 2],
-            packed(renderer.theme.background)
+            renderer.pixels()[mid * width + padding + beam_width - 1],
+            packed(renderer.theme.cursor),
+            "the beam must be exactly beam_width pixels wide"
+        );
+        assert_ne!(
+            renderer.pixels()[mid * width + padding + beam_width],
+            packed(renderer.theme.cursor),
+            "nothing may paint beyond the beam width"
         );
     }
 
@@ -786,6 +814,16 @@ mod tests {
         assert_eq!(
             renderer.pixels()[bottom * width + padding + 2],
             packed(renderer.theme.cursor)
+        );
+        assert_eq!(
+            renderer.pixels()[(bottom - 1) * width + padding + 2],
+            packed(renderer.theme.cursor),
+            "the underline must be two pixels thick"
+        );
+        assert_eq!(
+            renderer.pixels()[(bottom - 2) * width + padding + 2],
+            packed(renderer.theme.background),
+            "the third row from the bottom stays background"
         );
         assert_eq!(
             renderer.pixels()[padding * width + padding + 2],
@@ -816,6 +854,39 @@ mod tests {
         );
         let center = (padding + cell_h as usize / 2) * width + padding + cell_w as usize / 2;
         assert_eq!(renderer.pixels()[center], packed(renderer.theme.background));
+    }
+
+    #[test]
+    fn only_block_cursor_inverts_the_glyph() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let foreground = packed(renderer.theme.foreground);
+        let background = packed(renderer.theme.background);
+
+        // Record where the glyph paints solid foreground ink with the cursor
+        // hidden, then require those same pixels to change only for a block.
+        let hidden = render_m_with_cursor(&mut renderer, CursorShape::Block, false);
+        let glyph: Vec<usize> = hidden
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| **pixel == foreground)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!glyph.is_empty(), "the M cell must paint foreground ink");
+
+        let block = render_m_with_cursor(&mut renderer, CursorShape::Block, true);
+        assert!(
+            glyph.iter().any(|index| block[*index] == background),
+            "a block cursor must invert the glyph to the background color"
+        );
+
+        let beam = render_m_with_cursor(&mut renderer, CursorShape::Beam, true);
+        assert!(
+            glyph.iter().any(|index| beam[*index] == foreground),
+            "a beam cursor must leave the glyph in the foreground color"
+        );
     }
 
     #[test]

@@ -511,7 +511,9 @@ mod tests {
         assert_eq!(term.snapshot().cursor.shape, CursorShape::Beam);
 
         term.feed(b"\x1b[?25l");
-        assert!(!term.snapshot().cursor.visible);
+        let hidden = term.snapshot().cursor;
+        assert!(!hidden.visible);
+        assert_eq!(hidden.shape, CursorShape::Block);
 
         term.feed(b"\x1b[?25h");
         assert!(term.snapshot().cursor.visible);
