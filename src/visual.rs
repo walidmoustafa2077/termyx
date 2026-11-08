@@ -132,21 +132,55 @@ impl VisualMap {
             .unwrap_or_else(|| self.cols.saturating_sub(1))
     }
 
+    /// Whether a logical cell has an odd (right-to-left) embedding level.
+    pub fn is_rtl(&self, logical: usize) -> bool {
+        self.levels()
+            .get(logical)
+            .is_some_and(|level| level % 2 == 1)
+    }
+
+    /// Visual boundary on the logical-before side of a cell.
+    fn cell_edge_before(&self, cell: usize) -> usize {
+        let visual = self.visual_of(cell);
+        if self.is_rtl(cell) {
+            (visual + 1).min(self.cols)
+        } else {
+            visual
+        }
+    }
+
+    /// Visual boundary on the logical-after side of a cell.
+    fn cell_edge_after(&self, cell: usize) -> usize {
+        let visual = self.visual_of(cell);
+        if self.is_rtl(cell) {
+            visual
+        } else {
+            (visual + 1).min(self.cols)
+        }
+    }
+
     /// Visual position of the cursor boundary (0..=cols).
+    ///
+    /// A boundary between two cells inside an RTL run has the same visual
+    /// position from either side; only a run boundary makes affinity pick a
+    /// different side, so the cell's own level decides which edge it owns.
     pub fn cursor_visual(&self, cursor: &CursorState) -> usize {
+        if self.cols == 0 {
+            return 0;
+        }
         match cursor.affinity {
             Affinity::Before => {
-                if cursor.logical >= self.cols {
-                    self.cols
+                if cursor.logical < self.cols {
+                    self.cell_edge_before(cursor.logical)
                 } else {
-                    self.visual_of(cursor.logical)
+                    self.cell_edge_after(self.cols - 1)
                 }
             }
             Affinity::After => {
                 if cursor.logical == 0 {
-                    0
+                    self.cell_edge_before(0)
                 } else {
-                    (self.visual_of(cursor.logical) + 1).min(self.cols)
+                    self.cell_edge_after((cursor.logical - 1).min(self.cols - 1))
                 }
             }
         }
@@ -208,18 +242,39 @@ mod tests {
     }
 
     #[test]
-    fn cursor_before_a_cell_sits_on_its_left_edge() {
+    fn cursor_uses_cell_edges_in_an_ltr_row() {
         let map = VisualMap::identity(10);
         assert_eq!(map.cursor_visual(&cursor(3, Affinity::Before)), 3);
+        assert_eq!(map.cursor_visual(&cursor(3, Affinity::After)), 3);
         assert_eq!(map.cursor_visual(&cursor(10, Affinity::Before)), 10);
+        assert_eq!(map.cursor_visual(&cursor(10, Affinity::After)), 10);
+        assert_eq!(map.cursor_visual(&cursor(0, Affinity::After)), 0);
     }
 
     #[test]
-    fn cursor_after_a_cell_sits_on_its_right_edge() {
-        let map = VisualMap::identity(10);
-        assert_eq!(map.cursor_visual(&cursor(3, Affinity::After)), 4);
-        assert_eq!(map.cursor_visual(&cursor(10, Affinity::After)), 10);
-        assert_eq!(map.cursor_visual(&cursor(0, Affinity::After)), 0);
+    fn affinity_selects_a_side_at_a_bidi_run_boundary() {
+        let map = VisualMap::from_bidi(&row(&["a", "b", "c", "م", "ر", "ح"]), BaseDirection::Ltr);
+        assert_eq!(map.cursor_visual(&cursor(3, Affinity::After)), 3);
+        assert_eq!(map.cursor_visual(&cursor(3, Affinity::Before)), 6);
+        assert_eq!(map.cursor_visual(&cursor(6, Affinity::After)), 3);
+        assert_eq!(map.cursor_visual(&cursor(6, Affinity::Before)), 3);
+    }
+
+    #[test]
+    fn adjacent_cells_inside_a_run_share_one_gap() {
+        let map = VisualMap::from_bidi(&row(&["a", "b", "c", "م", "ر", "ح"]), BaseDirection::Ltr);
+        assert_eq!(map.cursor_visual(&cursor(1, Affinity::Before)), 1);
+        assert_eq!(map.cursor_visual(&cursor(1, Affinity::After)), 1);
+        assert_eq!(map.cursor_visual(&cursor(4, Affinity::Before)), 5);
+        assert_eq!(map.cursor_visual(&cursor(4, Affinity::After)), 5);
+    }
+
+    #[test]
+    fn pure_rtl_start_and_end_are_mirrored() {
+        let map = VisualMap::from_bidi(&row(&["م", "ر", "ح"]), BaseDirection::Ltr);
+        assert_eq!(map.cursor_visual(&cursor(0, Affinity::Before)), 3);
+        assert_eq!(map.cursor_visual(&cursor(3, Affinity::Before)), 0);
+        assert_eq!(map.cursor_visual(&cursor(3, Affinity::After)), 0);
     }
 
     #[test]
