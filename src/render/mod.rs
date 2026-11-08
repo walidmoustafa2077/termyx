@@ -204,8 +204,6 @@ impl Renderer {
         let baseline = padding + row as f32 * cell_h + self.fonts.ascent;
         let units = run.units_per_em.max(1) as f32;
         let scale = self.fonts.size_px / units;
-        let font_id = u8::from(run.arabic);
-        let (font, _, _) = self.fonts.font_for(run.arabic);
 
         for cluster in &run.clusters {
             let Some(first) = line.cells.get(cluster.cells.start) else {
@@ -241,8 +239,18 @@ impl Renderer {
             let mut pen = padding + slot_start as f32 * cell_w + offset;
 
             for glyph in &cluster.glyphs {
+                let mut font_id = u8::from(run.arabic);
+                let (mut font, _, _) = self.fonts.font_for(run.arabic);
                 // ab_glyph ids are u16; an out-of-range id becomes .notdef.
-                let id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
+                let mut id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
+                if glyph.glyph_id == 0 {
+                    if let Some((symbol_face, symbol_glyph)) = self.fonts.symbol_for(&cluster.text)
+                    {
+                        font_id = symbol_face;
+                        (font, _, _) = self.fonts.font_for_id(symbol_face);
+                        id = symbol_glyph;
+                    }
+                }
                 if let Some(slot) = self.cache.get(font_id, font, id, self.fonts.size_px) {
                     let x = pen + glyph.x_offset as f32 * scale * scale_x;
                     let y = baseline - glyph.y_offset as f32 * scale;

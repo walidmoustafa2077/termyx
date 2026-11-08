@@ -26,6 +26,24 @@ const ARABIC_FALLBACKS: &[&str] = &[
     "Segoe UI",
 ];
 
+/// Families tried, in order, to cover glyphs the primary face lacks (icons and
+/// symbols such as `✕` and `❯`). A face is only used if it maps one of
+/// [`SYMBOL_PROBES`], so text-only faces are skipped.
+const SYMBOL_FALLBACKS: &[&str] = &[
+    "Segoe UI Symbol",
+    "Segoe UI Emoji",
+    "Segoe UI",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "MS Gothic",
+    "DejaVu Sans",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "Symbola",
+];
+
+const SYMBOL_PROBES: &[char] = &['✕', '●', '❯', '\u{E0B0}', '\u{E000}'];
+
 pub struct FontFace {
     pub font: FontVec,
     pub data: Vec<u8>,
@@ -45,6 +63,7 @@ pub struct FontSet {
     #[allow(dead_code)]
     pub descent: f32,
     pub arabic: Option<FontFace>,
+    pub symbols: Vec<FontFace>,
 }
 
 impl FontSet {
@@ -71,6 +90,12 @@ impl FontSet {
         let cell_w = advance.ceil().max(1.0) as u32;
         let cell_h = ((ascent - descent) * line_height).ceil().max(1.0) as u32;
 
+        let arabic = load_arabic(&database, arabic_family);
+        let symbols = load_symbols(
+            &database,
+            family,
+            arabic.as_ref().map(|face| face.family.as_str()),
+        );
         Ok(Self {
             font,
             data,
@@ -80,7 +105,8 @@ impl FontSet {
             cell_h,
             ascent,
             descent,
-            arabic: load_arabic(&database, arabic_family),
+            arabic,
+            symbols,
         })
     }
 
@@ -88,13 +114,36 @@ impl FontSet {
         self.arabic.is_some()
     }
 
-    /// Font data for a shaped run. Falls back to the primary face when the
-    /// Arabic face or the requested slot is unavailable.
-    pub fn font_for(&self, arabic: bool) -> (&FontVec, &[u8], u32) {
-        match (arabic, &self.arabic) {
-            (true, Some(face)) => (&face.font, &face.data, face.index),
-            _ => (&self.font, &self.data, self.index),
+    /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces.
+    /// Unknown ids fall back to the primary face.
+    pub fn font_for_id(&self, id: u8) -> (&FontVec, &[u8], u32) {
+        match id {
+            0 => (&self.font, &self.data, self.index),
+            1 => self
+                .arabic
+                .as_ref()
+                .map(|face| (&face.font, face.data.as_slice(), face.index))
+                .unwrap_or((&self.font, &self.data, self.index)),
+            id => self
+                .symbols
+                .get(usize::from(id - 2))
+                .map(|face| (&face.font, face.data.as_slice(), face.index))
+                .unwrap_or((&self.font, &self.data, self.index)),
         }
+    }
+
+    pub fn font_for(&self, arabic: bool) -> (&FontVec, &[u8], u32) {
+        self.font_for_id(u8::from(arabic))
+    }
+
+    /// The first symbol face that maps the first character of `text`, with the
+    /// face id (`2..`) and the resolved glyph.
+    pub fn symbol_for(&self, text: &str) -> Option<(u8, ab_glyph::GlyphId)> {
+        let ch = text.chars().next()?;
+        self.symbols.iter().enumerate().find_map(|(index, face)| {
+            let glyph = face.font.glyph_id(ch);
+            (glyph.0 != 0).then_some(((index + 2) as u8, glyph))
+        })
     }
 }
 
@@ -118,6 +167,50 @@ fn load_primary(database: &Database, family: &str) -> Result<(Vec<u8>, u32), Fon
     database
         .with_face_data(id, |data, index| (data.to_vec(), index))
         .ok_or(FontError::NoFont)
+}
+
+fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec<FontFace> {
+    let mut symbols = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for family in SYMBOL_FALLBACKS {
+        if primary.eq_ignore_ascii_case(family)
+            || arabic.is_some_and(|name| name.eq_ignore_ascii_case(family))
+            || seen.iter().any(|name| name.eq_ignore_ascii_case(family))
+        {
+            continue;
+        }
+        seen.push((*family).to_string());
+        let query = Query {
+            families: &[Family::Name(family)],
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        };
+        let Some(id) = database.query(&query) else {
+            continue;
+        };
+        let Some((data, index)) = database.with_face_data(id, |data, index| (data.to_vec(), index))
+        else {
+            continue;
+        };
+        let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
+            continue;
+        };
+        if !SYMBOL_PROBES.iter().any(|ch| font.glyph_id(*ch).0 != 0) {
+            continue;
+        }
+        tracing::debug!(family = *family, "loaded symbol fallback face");
+        symbols.push(FontFace {
+            font,
+            data,
+            index,
+            family: (*family).to_string(),
+        });
+        if symbols.len() == 6 {
+            break;
+        }
+    }
+    symbols
 }
 
 fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
@@ -240,6 +333,30 @@ mod tests {
         assert!(face.font.glyph_id('ا').0 != 0);
         assert!(!face.family.is_empty());
         assert!(font.has_arabic());
+    }
+
+    #[test]
+    fn symbol_fallback_covers_a_missing_glyph() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        if fonts.symbols.is_empty() {
+            eprintln!("skipping: no symbol fallback font installed");
+            return;
+        }
+        let (face, glyph) = fonts
+            .symbol_for("✕")
+            .expect("symbol fallback should cover U+2715");
+        assert!(face >= 2, "symbol faces start at index 2, got {face}");
+        assert_ne!(glyph.0, 0, "fallback must resolve a real glyph");
+    }
+
+    #[test]
+    fn symbol_for_returns_none_for_an_uncovered_character() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        assert!(fonts.symbol_for("\u{10FFFF}").is_none());
     }
 
     #[test]

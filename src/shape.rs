@@ -22,6 +22,9 @@ pub struct Cluster {
     pub cells: Range<usize>,
     pub slots: Range<usize>,
     pub glyphs: Vec<Glyph>,
+    /// The source text this cluster covers, used to pick a fallback face when
+    /// the primary face has no glyph for it.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +282,7 @@ pub fn shape_row(
                     cells,
                     slots,
                     glyphs,
+                    text: row.text[cluster..next.min(row.text.len())].to_string(),
                 });
             }
             clusters.sort_by_key(|cluster| cluster.slots.start);
@@ -595,6 +599,22 @@ mod tests {
             runs[1].units_per_em,
             faces.arabic.as_ref().expect("arabic face").units_per_em()
         );
+    }
+
+    #[test]
+    fn clusters_carry_their_source_text() {
+        let line = row(&["A", "✕"]);
+        let text = RowText::flatten(&line);
+        let map = VisualMap::from_bidi(&line, BaseDirection::Ltr);
+        let Some((data, index)) = find_arabic_font() else {
+            return;
+        };
+        let Some(face) = Face::from_slice(&data, index) else {
+            return;
+        };
+        let runs = shape(&text, &map, &Faces::new(face, None));
+        assert_eq!(runs[0].clusters[0].text, "A");
+        assert_eq!(runs[0].clusters[1].text, "✕");
     }
 
     #[test]
