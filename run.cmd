@@ -4,8 +4,6 @@ cd /d "%~dp0"
 
 set "EXE=target\release\termyx.exe"
 
-if exist "%EXE%" goto run
-
 where cargo >nul 2>nul
 if errorlevel 1 goto cargo_home
 set "CARGO=cargo"
