@@ -90,12 +90,15 @@ impl App {
     }
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
+        let monitor = event_loop.primary_monitor().map(|monitor| {
+            let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
+            (size.width.round() as u32, size.height.round() as u32)
+        });
+        let (width, height) =
+            initial_window_size(self.config.window.width, self.config.window.height, monitor);
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_TITLE)
-            .with_inner_size(LogicalSize::new(
-                self.config.window.width,
-                self.config.window.height,
-            ));
+            .with_inner_size(LogicalSize::new(width, height));
         let window = Arc::new(event_loop.create_window(attributes)?);
         // winit starts with IME disabled on Windows; committed composition text
         // arrives as `WindowEvent::Ime` and is forwarded to the PTY.
@@ -700,6 +703,16 @@ fn grid_size(width: u32, height: u32, cell_w: u32, cell_h: u32, padding: u32) ->
     (cols, rows)
 }
 
+/// Caps the configured startup size so the window fits the primary monitor.
+fn initial_window_size(width: u32, height: u32, monitor: Option<(u32, u32)>) -> (u32, u32) {
+    let Some((monitor_w, monitor_h)) = monitor else {
+        return (width, height);
+    };
+    let max_w = monitor_w.saturating_mul(9) / 10;
+    let max_h = monitor_h.saturating_mul(85) / 100;
+    (width.min(max_w), height.min(max_h))
+}
+
 fn map_key(key: &Key) -> Option<KeyInput> {
     match key {
         Key::Character(text) => text.chars().next().map(KeyInput::Char),
@@ -842,6 +855,27 @@ mod tests {
     fn grid_size_uses_padding_and_minimums() {
         assert_eq!(grid_size(1200, 800, 10, 20, 4), (119, 39));
         assert_eq!(grid_size(100, 100, 10, 20, 4), (20, 5));
+    }
+
+    #[test]
+    fn initial_window_size_fits_the_primary_monitor() {
+        assert_eq!(
+            initial_window_size(1440, 800, Some((1600, 900))),
+            (1440, 765)
+        );
+    }
+
+    #[test]
+    fn initial_window_size_keeps_config_without_a_monitor() {
+        assert_eq!(initial_window_size(1200, 800, None), (1200, 800));
+    }
+
+    #[test]
+    fn initial_window_size_fits_a_small_monitor() {
+        assert_eq!(
+            initial_window_size(1440, 800, Some((1024, 768))),
+            (921, 652)
+        );
     }
 
     #[test]

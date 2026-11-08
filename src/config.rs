@@ -85,7 +85,7 @@ pub struct WindowConfig {
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            width: 1200,
+            width: 1440,
             height: 800,
             padding: 4,
         }
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(c.font.line_height, 1.05);
         assert!(c.bidi.enabled);
         assert_eq!(c.bidi.base_direction, BaseDirection::Ltr);
-        assert_eq!(c.window.width, 1200);
+        assert_eq!(c.window.width, 1440);
         assert_eq!(c.window.height, 800);
         assert_eq!(c.window.padding, 4);
         assert_eq!(c.scrollback.lines, 10_000);
