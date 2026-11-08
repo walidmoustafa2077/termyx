@@ -9,6 +9,7 @@ mod input;
 mod pty;
 mod render;
 mod selection;
+mod shape;
 mod term;
 mod theme;
 mod visual;
