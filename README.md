@@ -19,13 +19,15 @@ Windows requires the MSVC build tools. Linux requires `libxkbcommon`,
 
 ## Run
 
-Double-click `run.cmd`, or run it from PowerShell:
+Double-click `run.vbs` for a silent launch: it rebuilds the release binary
+in a hidden console and then opens the window. Use `run.cmd` from PowerShell
+when you want to watch the build output:
 
 ```powershell
 .\run.cmd
 ```
 
-The script rebuilds the release binary (incremental) and launches it.
+Both scripts rebuild the release binary (incremental) and launch it.
 The executable itself is:
 
 ```
@@ -52,7 +54,7 @@ A missing default file is fine; built-in defaults are used.
 
 ```toml
 [font]
-family = "Consolas"
+family = "Cascadia Mono"
 size = 17.0
 arabic_family = "Kawkab Mono"
 
@@ -83,7 +85,10 @@ bracketed paste, and DEC modes.
 - **Application mouse reporting**: 1000 click, 1002 button-drag, 1003 any
   motion, UTF-8 coordinates (1005), and SGR (1006); 1007 alternate scroll turns
   the wheel into arrow keys in the alternate screen. Hold **Shift** to force
-  local text selection; otherwise the wheel and clicks go to the application.
+  local text selection; otherwise single clicks and the wheel go to the
+  application. Double-click word and triple-click line selection stay local
+  even while an application reports the mouse, so they also work inside TUIs
+  such as OpenCode.
 - **Keys**: Shift+Tab/backtab, F1–F12, modified arrows/Home/End/navigation, and
   application cursor mode. Ctrl+Alt characters are prefixed with `ESC`.
 - **Cursor**: block, beam, and underline shapes (DECSCUSR), and visibility

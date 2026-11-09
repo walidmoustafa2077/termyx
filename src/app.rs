@@ -127,7 +127,7 @@ impl App {
         let fonts = FontSet::load(
             &self.config.font.family,
             &self.config.font.arabic_family,
-            self.config.font.size,
+            scaled_font_size(self.config.font.size, window.scale_factor()),
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
@@ -447,6 +447,48 @@ impl App {
                 return;
             }
 
+            // Double and triple clicks stay local even when the application
+            // reports the mouse. That is what makes word/line selection work
+            // inside TUIs such as OpenCode while single clicks still reach the
+            // application (tab switching, buttons, and so on).
+            let click_position = if button == MouseButton::Left {
+                self.pos_at(self.cursor_pos.0, self.cursor_pos.1)
+            } else {
+                None
+            };
+            if let Some(position) = click_position {
+                let now = Instant::now();
+                self.click_count = next_click_count(
+                    self.last_click,
+                    self.click_count,
+                    now,
+                    self.cursor_pos.0,
+                    self.cursor_pos.1,
+                );
+                self.last_click = Some((now, self.cursor_pos.0, self.cursor_pos.1));
+                if self.click_count >= 2 {
+                    self.app_mouse_button = None;
+                    self.mouse_down = false;
+                    let whole_line = self.click_count == 3;
+                    let Some((start, end)) = self.bounds_at(position, whole_line) else {
+                        return;
+                    };
+                    let mut selection = Selection::new(LogicalPos {
+                        row: position.row,
+                        col: start,
+                    });
+                    selection.update(LogicalPos {
+                        row: position.row,
+                        col: end,
+                    });
+                    self.selection = Some(selection);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+            }
+
             if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
@@ -467,37 +509,11 @@ impl App {
                 return;
             }
 
-            let (x, y) = self.cursor_pos;
-            let Some(position) = self.pos_at(x, y) else {
+            let Some(position) = click_position else {
                 return;
             };
-            let now = Instant::now();
-            self.click_count = next_click_count(self.last_click, self.click_count, now, x, y);
-            self.last_click = Some((now, x, y));
-
-            match self.click_count {
-                1 => {
-                    self.selection = Some(Selection::new(position));
-                    self.mouse_down = true;
-                }
-                2 | 3 => {
-                    let whole_line = self.click_count == 3;
-                    let Some((start, end)) = self.bounds_at(position, whole_line) else {
-                        return;
-                    };
-                    let mut selection = Selection::new(LogicalPos {
-                        row: position.row,
-                        col: start,
-                    });
-                    selection.update(LogicalPos {
-                        row: position.row,
-                        col: end,
-                    });
-                    self.selection = Some(selection);
-                    self.mouse_down = false;
-                }
-                _ => return,
-            }
+            self.selection = Some(Selection::new(position));
+            self.mouse_down = true;
         } else if self.scrollbar_drag {
             self.scrollbar_drag = false;
             return;
@@ -814,6 +830,13 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Converts the configured font size from logical pixels to the physical
+/// pixels the renderer draws with. Without this the text is too small on
+/// high-DPI displays, because winit reports window sizes in physical pixels.
+fn scaled_font_size(size: f32, scale_factor: f64) -> f32 {
+    (size as f64 * scale_factor) as f32
+}
+
 fn grid_size(width: u32, height: u32, cell_w: u32, cell_h: u32, padding: u32) -> (usize, usize) {
     let usable_w = width.saturating_sub(padding.saturating_mul(2));
     let usable_h = height.saturating_sub(padding.saturating_mul(2));
@@ -981,6 +1004,13 @@ mod tests {
     fn grid_size_uses_padding_and_minimums() {
         assert_eq!(grid_size(1200, 800, 10, 20, 4), (119, 39));
         assert_eq!(grid_size(100, 100, 10, 20, 4), (20, 5));
+    }
+
+    #[test]
+    fn font_size_tracks_display_scale_factor() {
+        assert_eq!(scaled_font_size(17.0, 1.0), 17.0);
+        assert_eq!(scaled_font_size(17.0, 1.25), 21.25);
+        assert_eq!(scaled_font_size(17.0, 1.5), 25.5);
     }
 
     #[test]
