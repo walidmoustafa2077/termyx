@@ -20,7 +20,7 @@ use crate::input::{self, KeyInput, Mods};
 use crate::platform;
 use crate::pty::PtySession;
 use crate::render::Renderer;
-use crate::scrollbar::{self, ScrollbarGeometry};
+use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
@@ -276,6 +276,27 @@ impl App {
                 }
             }
         }
+        // Shift+PageUp/PageDown scroll the local viewport when there is
+        // scrollback. Without history they fall through as modified keys so
+        // full-screen applications still receive them.
+        if self.modifiers.shift_key() {
+            let page = self.page_lines();
+            let lines = match event.logical_key {
+                Key::Named(NamedKey::PageUp) => Some(page),
+                Key::Named(NamedKey::PageDown) => Some(-page),
+                _ => None,
+            };
+            if let Some(lines) = lines {
+                let has_history = self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.history_size() > 0);
+                if has_history {
+                    self.scroll_local(lines);
+                    return;
+                }
+            }
+        }
         // Shift+Tab is backtab; `map_key` cannot tell them apart because Tab is
         // a named key.
         let key = if self.modifiers.shift_key()
@@ -402,20 +423,7 @@ impl App {
             return;
         }
 
-        let Some(terminal) = &mut self.terminal else {
-            return;
-        };
-        let before = terminal.display_offset();
-        terminal.scroll_display(lines);
-        if terminal.display_offset() == before {
-            return;
-        }
-        // Selection positions are logical viewport offsets; scrolling makes them stale.
-        self.selection = None;
-        self.mouse_down = false;
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.scroll_local(lines);
     }
 
     fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
@@ -424,15 +432,37 @@ impl App {
         };
 
         if state == ElementState::Pressed {
+            if self.scrollbar_drag && button != MouseButton::Left {
+                // The pointer belongs to the drag; a stray button must not
+                // paste or reach the application mid-gesture.
+                return;
+            }
+
             if button == MouseButton::Left {
-                if let Some((_geom, grab)) =
-                    self.scrollbar_hit(self.cursor_pos.0, self.cursor_pos.1)
+                if let Some((geom, hit)) = self.scrollbar_hit(self.cursor_pos.0, self.cursor_pos.1)
                 {
-                    self.scrollbar_drag = true;
-                    self.scrollbar_grab = grab;
-                    self.app_mouse_button = None;
+                    // Release any button forwarded before the drag takes over
+                    // the pointer, so the application is not left stuck down.
+                    if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+                        self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+                    }
                     self.mouse_down = false;
-                    self.scroll_to_thumb(self.cursor_pos.1 as f32 - grab);
+                    match hit {
+                        ScrollbarHit::Thumb(grab) => {
+                            self.scrollbar_drag = true;
+                            self.scrollbar_grab = grab;
+                            self.scroll_to_thumb(self.cursor_pos.1 as f32 - grab);
+                        }
+                        ScrollbarHit::Track => {
+                            let page = self.page_lines();
+                            let lines = if (self.cursor_pos.1 as f32) < geom.thumb_y {
+                                page
+                            } else {
+                                -page
+                            };
+                            self.scroll_local(lines);
+                        }
+                    }
                     return;
                 }
             }
@@ -533,7 +563,7 @@ impl App {
             };
             self.selection = Some(Selection::new(position));
             self.mouse_down = true;
-        } else if self.scrollbar_drag {
+        } else if self.scrollbar_drag && button == MouseButton::Left {
             self.scrollbar_drag = false;
             let (x, y) = self.cursor_pos;
             self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
@@ -596,9 +626,9 @@ impl App {
         )
     }
 
-    fn scrollbar_hit(&self, x: f64, y: f64) -> Option<(ScrollbarGeometry, f32)> {
+    fn scrollbar_hit(&self, x: f64, y: f64) -> Option<(ScrollbarGeometry, ScrollbarHit)> {
         // Hit-test the expanded width so the pointer stays on the thumb while
-        // it is hovered, and so clicks just left of the resting thumb work.
+        // it is hovered. The reserved gutter keeps this strip clear of text.
         let geom = self.scrollbar_geometry(true)?;
         let x = x as f32;
         let y = y as f32;
@@ -608,12 +638,12 @@ impl App {
         if y < geom.track_y || y > geom.track_y + geom.track_h {
             return None;
         }
-        let grab = if y >= geom.thumb_y && y <= geom.thumb_y + geom.thumb_h {
-            y - geom.thumb_y
+        let hit = if y >= geom.thumb_y && y <= geom.thumb_y + geom.thumb_h {
+            ScrollbarHit::Thumb(y - geom.thumb_y)
         } else {
-            geom.thumb_h / 2.0
+            ScrollbarHit::Track
         };
-        Some((geom, grab))
+        Some((geom, hit))
     }
 
     /// Expands the scrollbar while the pointer is over it. Redraws only when
@@ -632,21 +662,48 @@ impl App {
         let Some(geom) = self.scrollbar_geometry(true) else {
             return;
         };
-        let Some(terminal) = self.terminal.as_mut() else {
+        let Some(history) = self.terminal.as_ref().map(Terminal::history_size) else {
             return;
         };
-        let history = terminal.history_size();
+        let current = self
+            .terminal
+            .as_ref()
+            .map(Terminal::display_offset)
+            .unwrap_or(0);
         let target = scrollbar::offset_for_thumb_top(thumb_top, &geom, history);
-        let current = terminal.display_offset();
-        if target == current {
-            return;
+        self.scroll_local(target as i32 - current as i32);
+    }
+
+    /// Scrolls the viewport locally by `lines` (positive scrolls back into
+    /// history). Returns whether the offset changed.
+    fn scroll_local(&mut self, lines: i32) -> bool {
+        let Some(terminal) = self.terminal.as_mut() else {
+            return false;
+        };
+        if lines == 0 || terminal.history_size() == 0 {
+            return false;
         }
-        terminal.scroll_display(target as i32 - current as i32);
+        let before = terminal.display_offset();
+        terminal.scroll_display(lines);
+        if terminal.display_offset() == before {
+            return false;
+        }
+        // Selection positions are logical viewport offsets; scrolling makes them stale.
         self.selection = None;
         self.mouse_down = false;
+        // The wheel or a key may bring the scrollbar under a parked pointer.
+        let (x, y) = self.cursor_pos;
+        let hover = self.scrollbar_drag || self.scrollbar_hit(x, y).is_some();
+        self.set_scrollbar_hover(hover);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        true
+    }
+
+    /// Rows moved by a page key or a track click.
+    fn page_lines(&self) -> i32 {
+        self.rows.saturating_sub(1).max(1) as i32
     }
 
     fn send_mouse(&mut self, kind: input::MouseEventKind, button: Option<input::MouseButton>) {
@@ -880,7 +937,10 @@ fn scaled_font_size(size: f32, scale_factor: f64) -> f32 {
 }
 
 fn grid_size(width: u32, height: u32, cell_w: u32, cell_h: u32, padding: u32) -> (usize, usize) {
-    let usable_w = width.saturating_sub(padding.saturating_mul(2));
+    // The scrollbar lives in a reserved gutter so its hovered width never
+    // covers the last text column.
+    let gutter = scrollbar::GUTTER.ceil() as u32;
+    let usable_w = width.saturating_sub(padding.saturating_mul(2).saturating_add(gutter));
     let usable_h = height.saturating_sub(padding.saturating_mul(2));
     let cols = (usable_w / cell_w.max(1)).max(20) as usize;
     let rows = (usable_h / cell_h.max(1)).max(5) as usize;
@@ -1044,8 +1104,17 @@ mod tests {
 
     #[test]
     fn grid_size_uses_padding_and_minimums() {
-        assert_eq!(grid_size(1200, 800, 10, 20, 4), (119, 39));
+        assert_eq!(grid_size(1200, 800, 10, 20, 4), (117, 39));
         assert_eq!(grid_size(100, 100, 10, 20, 4), (20, 5));
+    }
+
+    #[test]
+    fn grid_size_reserves_the_scrollbar_gutter() {
+        let usable = 1200 - 4 * 2;
+        assert_eq!(
+            grid_size(1200, 800, 1, 20, 4).0,
+            usable - scrollbar::GUTTER.ceil() as usize
+        );
     }
 
     #[test]

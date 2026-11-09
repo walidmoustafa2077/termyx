@@ -4,6 +4,9 @@
 pub const WIDTH: f32 = 6.0;
 /// Width of the scrollbar thumb in pixels while hovered or dragged.
 pub const HOVER_WIDTH: f32 = 12.0;
+/// Space reserved at the right edge of the grid for the scrollbar. The layout
+/// always leaves this much room so text never sits under the hovered thumb.
+pub const GUTTER: f32 = HOVER_WIDTH + EDGE_GAP;
 const MIN_THUMB_H: f32 = 12.0;
 const EDGE_GAP: f32 = 2.0;
 
@@ -17,10 +20,19 @@ pub struct ScrollbarGeometry {
     pub thumb_h: f32,
 }
 
+/// Which part of the scrollbar the pointer is over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrollbarHit {
+    /// The pointer is on the thumb, at this vertical offset inside it.
+    Thumb(f32),
+    /// The pointer is on the track above or below the thumb.
+    Track,
+}
+
 /// Thumb geometry for the given viewport and scrollback state.
-/// Returns `None` when there is no history, the view is live at the bottom,
-/// or the viewport is too narrow. `hovered` widens the thumb leftward so its
-/// right edge stays pinned to the window edge.
+/// Returns `None` when there is no history or the viewport is too narrow.
+/// `hovered` widens the thumb leftward so its right edge stays pinned to the
+/// window edge. At the live bottom the thumb rests at the bottom of the track.
 pub fn geometry(
     viewport_width: u32,
     padding: u32,
@@ -30,7 +42,7 @@ pub fn geometry(
     offset: usize,
     hovered: bool,
 ) -> Option<ScrollbarGeometry> {
-    if history == 0 || offset == 0 || rows == 0 || cell_h == 0 {
+    if history == 0 || rows == 0 || cell_h == 0 {
         return None;
     }
 
@@ -76,8 +88,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_scrollbar_at_live_bottom() {
-        assert!(geometry(1000, 4, 20, 10, 20, 0, false).is_none());
+    fn thumb_sits_at_bottom_at_live_bottom() {
+        let geom = geometry(1000, 4, 20, 10, 20, 0, false).expect("scrollbar at the live bottom");
+        assert_eq!(geom.thumb_y + geom.thumb_h, geom.track_y + geom.track_h);
     }
 
     #[test]
