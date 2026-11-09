@@ -6,12 +6,16 @@
 
 use ab_glyph::{Font, ScaleFont};
 
-use crate::fonts::UI_FONT_ID;
+use crate::fonts::{em_px_scale, UI_FONT_ID};
 use crate::render::Renderer;
 use crate::theme::Rgb;
 
 /// Draws `text` at `(x, y)` — the top-left corner, not the baseline — and
 /// returns the width consumed, clipped to `max_width`.
+///
+/// `px` is an em size, the same unit the glyph cache rasterizes at. Measuring
+/// with a raw [`ab_glyph::PxScale`] instead would make the advances about a
+/// quarter too tight and overlap the glyph ink.
 pub fn draw_text(
     renderer: &mut Renderer,
     text: &str,
@@ -29,7 +33,7 @@ pub fn draw_text(
         let Some((font, _index)) = renderer.fonts_face(UI_FONT_ID) else {
             return 0.0;
         };
-        let scaled = font.as_scaled(px);
+        let scaled = font.as_scaled(em_px_scale(font, px));
         for ch in text.chars() {
             let id = font.glyph_id(ch);
             let advance = scaled.h_advance(id);
@@ -73,6 +77,38 @@ mod tests {
             40.0,
         );
         assert!(width <= 40.0, "the reported width never exceeds the limit");
+    }
+
+    #[test]
+    fn clipped_text_paints_nothing_past_the_available_width() {
+        let mut renderer = crate::render::tests::default_renderer();
+        renderer.resize(200, 60);
+        let color = renderer.theme.foreground;
+        let limit = 40.0;
+        draw_text(
+            &mut renderer,
+            "a very long tab title",
+            2.0,
+            2.0,
+            UI_SIZE_PX,
+            color,
+            limit,
+        );
+        renderer.sync();
+        let width = renderer.pixmap.width() as usize;
+        let background = crate::render::tests::packed(renderer.theme.background);
+        let rightmost = renderer
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| **pixel != background)
+            .map(|(index, _)| index % width)
+            .max()
+            .expect("the text must paint");
+        assert!(
+            rightmost < (2.0 + limit) as usize,
+            "ink must stay inside the clip width (rightmost column {rightmost})"
+        );
     }
 
     #[test]

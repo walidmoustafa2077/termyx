@@ -2,8 +2,8 @@
 
 mod atlas;
 mod glyph_cache;
-// Chrome text has no non-test consumer until Task 7 paints the tab strip, so
-// it compiles for the tests only.
+// Chrome text has no non-test consumer until Task 8 paints the tab strip
+// (Task 11 adds the dropdown menu), so it compiles for the tests only.
 #[cfg(test)]
 mod ui_text;
 
@@ -446,7 +446,8 @@ impl Renderer {
 
     /// Font data for a glyph-cache face id.
     // These three shims serve `ui_text`, which has no non-test consumer until
-    // Task 7 paints the tab strip, so they compile for the tests only.
+    // Task 8 paints the tab strip (Task 11 adds the dropdown menu), so they
+    // compile for the tests only.
     #[cfg(test)]
     pub(crate) fn fonts_face(&self, id: u8) -> Option<(&ab_glyph::FontVec, u32)> {
         Some(self.fonts.font_for_id(id))
