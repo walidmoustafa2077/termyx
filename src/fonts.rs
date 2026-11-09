@@ -59,6 +59,18 @@ const SYMBOL_FALLBACKS: &[&str] = &[
 
 const SYMBOL_PROBES: &[char] = &['✕', '●', '❯', '\u{E0B0}', '\u{E000}'];
 
+/// Converts an em size in pixels into the pixel-height scale `ab_glyph`
+/// expects. `PxScale` measures the font's ascent-to-descent height, not its
+/// em square, while terminals (and the shaper used here) size text by the em
+/// square. Skipping this conversion makes every glyph about 15% too small and
+/// leaves the cell grid narrower than the glyph advances.
+pub(crate) fn em_px_scale(font: &FontVec, em_px: f32) -> PxScale {
+    let units = font
+        .units_per_em()
+        .unwrap_or_else(|| font.height_unscaled());
+    PxScale::from(em_px * font.height_unscaled() / units)
+}
+
 pub struct FontFace {
     pub font: FontVec,
     pub data: Vec<u8>,
@@ -97,7 +109,7 @@ impl FontSet {
         let font = FontVec::try_from_vec_and_index(data.clone(), index)
             .map_err(|_| FontError::InvalidFont)?;
 
-        let scale = PxScale::from(size_px);
+        let scale = em_px_scale(&font, size_px);
         let scaled = font.as_scaled(scale);
         let ascent = scaled.ascent();
         let descent = scaled.descent();
@@ -137,7 +149,7 @@ impl FontSet {
     pub fn line_ascent(&self) -> f32 {
         let arabic = self.arabic.as_ref().map_or(0.0, |face| {
             face.font
-                .as_scaled(PxScale::from(self.size_px * face.scale))
+                .as_scaled(em_px_scale(&face.font, self.size_px * face.scale))
                 .ascent()
         });
         self.ascent.max(arabic)
@@ -276,7 +288,7 @@ fn load_arabic(
         let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
             continue;
         };
-        let scaled = font.as_scaled(PxScale::from(size_px));
+        let scaled = font.as_scaled(em_px_scale(&font, size_px));
         let total: f32 = ARABIC_PROBES
             .iter()
             .map(|&c| {
@@ -414,6 +426,24 @@ mod tests {
     }
 
     #[test]
+    fn font_size_is_the_em_size() {
+        let font = FontSet::load("Cascadia Mono", "Arial", 16.0, 1.0)
+            .or_else(|_| FontSet::load("Consolas", "Arial", 16.0, 1.0))
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.0))
+            .expect("a monospace font must exist");
+        let face = ttf_parser::Face::parse(&font.data, font.index).expect("valid face");
+        let units = f32::from(face.units_per_em());
+        let advance = face
+            .glyph_hor_advance(face.glyph_index('M').expect("primary face maps M"))
+            .expect("M has an advance");
+        let expected_w = (16.0 * f32::from(advance) / units).round() as u32;
+        let expected_h = (16.0 * (f32::from(face.ascender()) - f32::from(face.descender())) / units)
+            .ceil() as u32;
+        assert_eq!(font.cell_w, expected_w, "cell width must use the em scale");
+        assert_eq!(font.cell_h, expected_h, "cell height must use the em scale");
+    }
+
+    #[test]
     fn missing_configured_arabic_family_still_loads() {
         let font = load("Consolas").expect("a monospace font must exist");
         assert_eq!(font.font_for(false).2, font.index);
@@ -453,7 +483,7 @@ mod tests {
         );
         let scaled = face
             .font
-            .as_scaled(PxScale::from(font.size_px * face.scale));
+            .as_scaled(em_px_scale(&face.font, font.size_px * face.scale));
         let total: f32 = ARABIC_PROBES
             .iter()
             .map(|&c| {

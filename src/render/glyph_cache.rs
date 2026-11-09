@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use ab_glyph::{Font, FontVec, GlyphId, PxScale};
 
+use crate::fonts::em_px_scale;
+
 use super::atlas::{Atlas, Rect};
 
 /// Glyph masks are rasterized at this resolution multiplier and projected onto
@@ -65,7 +67,8 @@ impl GlyphCache {
         // 1. Rasterize the outline at a 4x resolution so each sub-pixel column
         //    has enough samples to approximate the coverage integral.
         let big = RASTER_SUPERSAMPLE as f32;
-        let outlined = font.outline_glyph(glyph.with_scale(PxScale::from(size_px * big)))?;
+        let outlined = font
+            .outline_glyph(glyph.with_scale(PxScale::from(em_px_scale(font, size_px).y * big)))?;
         let bounds = outlined.px_bounds();
         let cols = bounds.width().ceil().max(1.0) as u32;
         let rows = bounds.height().ceil().max(1.0) as u32;
