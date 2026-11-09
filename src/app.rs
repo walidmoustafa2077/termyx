@@ -49,6 +49,9 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
+    /// Id of the one session this build owns. Task 7 replaces it with the
+    /// active tab's id from `TabSet`.
+    session_id: u64,
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     renderer: Option<Renderer>,
@@ -80,6 +83,7 @@ impl App {
         Self {
             config,
             proxy,
+            session_id: 1,
             window: None,
             surface: None,
             renderer: None,
@@ -166,13 +170,14 @@ impl App {
             cols,
             rows,
             self.config.scrollback.lines,
-            Some(self.proxy.clone()),
+            Some((self.proxy.clone(), self.session_id)),
         );
         let pty = PtySession::spawn(
             &self.config.shell,
             cols as u16,
             rows as u16,
             self.proxy.clone(),
+            self.session_id,
         )?;
 
         if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
@@ -233,6 +238,23 @@ impl App {
         self.cols = cols;
         self.rows = rows;
         true
+    }
+
+    /// Applies a session title to the window, keeping the `dynamic_title`
+    /// opt-in. A blank title restores the default.
+    fn apply_title(&self, title: &str) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        if !self.config.window.dynamic_title {
+            return;
+        }
+        let title = title.trim();
+        window.set_title(if title.is_empty() {
+            DEFAULT_TITLE
+        } else {
+            title
+        });
     }
 
     fn render(&mut self) {
@@ -912,36 +934,30 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::PtyOutput(bytes) => {
-                if let Some(terminal) = self.terminal.as_mut() {
+            UserEvent::PtyOutput { session, bytes } => {
+                let Some(terminal) = self.terminal.as_mut() else {
+                    return;
+                };
+                if session == self.session_id {
                     if terminal.feed(&bytes) {
                         // Rows moved, so row-anchored selection positions are
                         // stale. An in-place repaint keeps the selection.
                         self.selection = None;
                         self.mouse_down = false;
                     }
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            UserEvent::Title(title) => {
-                if !self.config.window.dynamic_title {
-                    return;
-                }
-                if let Some(window) = &self.window {
-                    if title.is_empty() {
-                        // `OSC 0;` / `OSC 2;` with no payload restores the
-                        // default title rather than blanking the window.
-                        window.set_title(DEFAULT_TITLE);
-                    } else {
-                        window.set_title(&title);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
             }
-            UserEvent::ResetTitle => {
-                if let Some(window) = &self.window {
-                    window.set_title(DEFAULT_TITLE);
+            UserEvent::Title { session, title } => {
+                if session == self.session_id {
+                    self.apply_title(&title);
+                }
+            }
+            UserEvent::ResetTitle { session } => {
+                if session == self.session_id {
+                    self.apply_title("");
                 }
             }
             UserEvent::ClipboardStore(text) => {

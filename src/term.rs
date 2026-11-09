@@ -114,14 +114,17 @@ impl Dimensions for TermSize {
 
 #[derive(Clone)]
 struct EventProxy {
-    proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+    /// The UI event loop and the session this parser belongs to. `None` in
+    /// tests, which have no event loop to notify.
+    events: Option<(EventLoopProxy<crate::event::UserEvent>, u64)>,
 }
 
-/// Map the terminal events Termyx observes onto UI-thread events.
-fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
+/// Map the terminal events Termyx observes onto UI-thread events, tagged with the
+/// session whose parser raised them.
+fn user_event_for(session: u64, event: Event) -> Option<crate::event::UserEvent> {
     match event {
-        Event::Title(title) => Some(crate::event::UserEvent::Title(title)),
-        Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle),
+        Event::Title(title) => Some(crate::event::UserEvent::Title { session, title }),
+        Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle { session }),
         Event::ClipboardStore(_, text) => Some(crate::event::UserEvent::ClipboardStore(text)),
         _ => None,
     }
@@ -129,7 +132,10 @@ fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let (Some(proxy), Some(event)) = (&self.proxy, user_event_for(event)) {
+        let Some((proxy, session)) = &self.events else {
+            return;
+        };
+        if let Some(event) = user_event_for(*session, event) {
             let _ = proxy.send_event(event);
         }
     }
@@ -153,7 +159,7 @@ impl Terminal {
         cols: usize,
         rows: usize,
         scrollback: usize,
-        proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+        events: Option<(EventLoopProxy<crate::event::UserEvent>, u64)>,
     ) -> Self {
         let size = TermSize {
             cols,
@@ -171,7 +177,7 @@ impl Terminal {
             },
             ..TermConfig::default()
         };
-        let term = Term::new(config, &size, EventProxy { proxy });
+        let term = Term::new(config, &size, EventProxy { events });
         Self {
             term,
             processor: Processor::new(),
@@ -733,24 +739,37 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_are_bridged_to_user_events() {
-        match user_event_for(alacritty_terminal::event::Event::Title("build".into())) {
-            Some(crate::event::UserEvent::Title(title)) => assert_eq!(title, "build"),
-            other => panic!("expected title event, got {other:?}"),
+    fn title_events_carry_the_session_id() {
+        match user_event_for(7, alacritty_terminal::event::Event::Title("build".into())) {
+            Some(crate::event::UserEvent::Title { session, title }) => {
+                assert_eq!(session, 7);
+                assert_eq!(title, "build");
+            }
+            _ => panic!("expected a Title event"),
         }
+    }
 
-        assert!(matches!(
-            user_event_for(alacritty_terminal::event::Event::ResetTitle),
-            Some(crate::event::UserEvent::ResetTitle)
-        ));
-        match user_event_for(alacritty_terminal::event::Event::ClipboardStore(
-            alacritty_terminal::term::ClipboardType::Clipboard,
-            "copied".into(),
-        )) {
-            Some(crate::event::UserEvent::ClipboardStore(text)) => assert_eq!(text, "copied"),
-            other => panic!("expected clipboard event, got {other:?}"),
+    #[test]
+    fn reset_title_and_clipboard_events_carry_the_session_id() {
+        match user_event_for(3, alacritty_terminal::event::Event::ResetTitle) {
+            Some(crate::event::UserEvent::ResetTitle { session }) => assert_eq!(session, 3),
+            _ => panic!("expected a ResetTitle event"),
         }
-        assert!(user_event_for(alacritty_terminal::event::Event::Bell).is_none());
+        match user_event_for(
+            4,
+            alacritty_terminal::event::Event::ClipboardStore(
+                alacritty_terminal::term::ClipboardType::Clipboard,
+                "copied".into(),
+            ),
+        ) {
+            Some(crate::event::UserEvent::ClipboardStore(text)) => assert_eq!(text, "copied"),
+            _ => panic!("expected a ClipboardStore event"),
+        }
+    }
+
+    #[test]
+    fn unrelated_terminal_events_are_not_bridged() {
+        assert!(user_event_for(1, alacritty_terminal::event::Event::Bell).is_none());
     }
 
     #[test]

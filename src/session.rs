@@ -210,8 +210,8 @@ impl IndexMut<usize> for TabSet {
 
 /// Spawns the shell for a new session and builds its parser.
 ///
-/// The session id reaches the parser and the PTY reader thread in Task 4, so
-/// for now this uses the current signatures and only stores the id in the tab.
+/// The id tags both ends of the session: the parser's event proxy and the PTY
+/// reader thread.
 pub fn spawn_session(
     id: SessionId,
     shell: &ShellConfig,
@@ -220,8 +220,8 @@ pub fn spawn_session(
     scrollback: usize,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<Session> {
-    let terminal = Terminal::new_with_events(cols, rows, scrollback, Some(proxy.clone()));
-    let pty = PtySession::spawn(shell, cols as u16, rows as u16, proxy)?;
+    let terminal = Terminal::new_with_events(cols, rows, scrollback, Some((proxy.clone(), id)));
+    let pty = PtySession::spawn(shell, cols as u16, rows as u16, proxy, id)?;
     Ok(Session::new(id, terminal, pty))
 }
 

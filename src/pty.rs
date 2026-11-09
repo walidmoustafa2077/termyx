@@ -22,15 +22,17 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// Spawns the configured shell and forwards its output through `proxy`.
+    /// Spawns the configured shell and forwards its output, tagged with
+    /// `session`, through `proxy`.
     pub fn spawn(
         config: &ShellConfig,
         cols: u16,
         rows: u16,
         proxy: EventLoopProxy<UserEvent>,
+        session: u64,
     ) -> Result<Self> {
         Self::spawn_with(config, cols, rows, move |bytes| {
-            let _ = proxy.send_event(UserEvent::PtyOutput(bytes));
+            let _ = proxy.send_event(UserEvent::PtyOutput { session, bytes });
         })
     }
 
