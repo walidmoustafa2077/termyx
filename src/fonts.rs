@@ -17,9 +17,9 @@ pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabM
 
 /// Families tried, in order, when the configured Arabic family is unavailable.
 ///
-/// Arial is the default Arabic face. Kawkab Mono is last on purpose: its
-/// narrow metrics render disconnected at 16 px, so it is a last-resort
-/// fallback rather than an auto-selected default. Faces that fail the
+/// When `arabic_family` is empty, the auto path ranks these by how close a
+/// measured probe advance is to the primary cell, so shaped runs fill the
+/// grid instead of leaving slack around Arabic blocks. Faces that fail the
 /// lam-alef check are skipped anyway.
 const ARABIC_FALLBACKS: &[&str] = &[
     "Arial",
@@ -31,6 +31,15 @@ const ARABIC_FALLBACKS: &[&str] = &[
     "Segoe UI",
     "Kawkab Mono",
 ];
+
+/// Unshaped letters spanning the common Arabic advance range. Their mean
+/// approximates the per-cell width a shaped run needs.
+const ARABIC_PROBES: &[char] = &['ا', 'م', 'س', 'ب', 'د', 'ر', 'ث', 'ج'];
+
+/// Scale bounds keep the Arabic ink near Latin size: below `0.85` letters get
+/// lost next to Latin caps, above `1.10` they crowd the shared baseline.
+const ARABIC_SCALE_MIN: f32 = 0.85;
+const ARABIC_SCALE_MAX: f32 = 1.10;
 
 /// Families tried, in order, to cover glyphs the primary face lacks (icons and
 /// symbols such as `✕` and `❯`). A face is only used if it maps one of
@@ -237,11 +246,16 @@ fn load_arabic(
     size_px: f32,
     cell_w: u32,
 ) -> Option<FontFace> {
-    let candidates = std::iter::once(configured).chain(ARABIC_FALLBACKS.iter().copied());
+    let candidates: Vec<&str> = if configured.is_empty() {
+        ARABIC_FALLBACKS.to_vec()
+    } else {
+        std::iter::once(configured)
+            .chain(ARABIC_FALLBACKS.iter().copied())
+            .collect()
+    };
+    let mut loaded: Vec<(String, FontVec, Vec<u8>, u32, f32)> = Vec::new();
+    let mut saw_configured_face = false;
     for family in candidates {
-        if family.is_empty() {
-            continue;
-        }
         let families = [Family::Name(family)];
         let query = Query {
             families: &families,
@@ -262,40 +276,69 @@ fn load_arabic(
         let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
             continue;
         };
-        let advance = font
-            .as_scaled(PxScale::from(size_px))
-            .h_advance(font.glyph_id('م'));
-        if advance > cell_w as f32 * 1.05 {
-            tracing::debug!(
-                family,
-                advance,
-                cell_w,
-                "Arabic face is wider than the primary cell; skipping"
-            );
-            continue;
+        let scaled = font.as_scaled(PxScale::from(size_px));
+        let total: f32 = ARABIC_PROBES
+            .iter()
+            .map(|&c| {
+                let glyph = font.glyph_id(c);
+                if glyph.0 == 0 {
+                    0.0
+                } else {
+                    scaled.h_advance(glyph)
+                }
+            })
+            .sum();
+        let mean = total / ARABIC_PROBES.len() as f32;
+        if family == configured {
+            saw_configured_face = true;
         }
-        if family != configured {
-            tracing::warn!(
-                requested = configured,
-                using = family,
-                "configured Arabic font unavailable; using a system fallback"
-            );
+        loaded.push((family.to_string(), font, data, index, mean));
+        if !configured.is_empty() && saw_configured_face {
+            break;
         }
-        let face = FontFace {
-            font,
-            data,
-            index,
-            family: family.to_string(),
-            scale: 1.0,
-        };
-        tracing::debug!(family = %face.family, "Arabic face loaded");
-        return Some(face);
     }
-    tracing::warn!(
-        requested = configured,
-        "no Arabic-capable system font found; Arabic text uses the primary face"
-    );
-    None
+    if loaded.is_empty() {
+        tracing::warn!(
+            requested = configured,
+            "no Arabic-capable system font found; Arabic text uses the primary face"
+        );
+        return None;
+    }
+    let cell = cell_w as f32;
+    let pick = if configured.is_empty() {
+        let (mut best_index, mut best_penalty) = (0usize, f32::INFINITY);
+        for (i, candidate) in loaded.iter().enumerate() {
+            let penalty = (candidate.4 - cell).abs();
+            if penalty < best_penalty {
+                best_penalty = penalty;
+                best_index = i;
+            }
+        }
+        loaded.into_iter().nth(best_index)
+    } else {
+        loaded.into_iter().next()
+    };
+    let (family, font, data, index, mean) = pick?;
+    let scale = (cell / mean).clamp(ARABIC_SCALE_MIN, ARABIC_SCALE_MAX);
+    if configured.is_empty() || family == configured {
+        tracing::debug!(family = %family, mean, scale, cell_w, "Arabic face loaded");
+    } else {
+        tracing::warn!(
+            requested = configured,
+            using = %family,
+            mean,
+            scale,
+            cell_w,
+            "configured Arabic font unavailable; using a system fallback"
+        );
+    }
+    Some(FontFace {
+        font,
+        data,
+        index,
+        family,
+        scale,
+    })
 }
 
 /// Whether a face can render connected Arabic text: it must map the letters
@@ -395,21 +438,56 @@ mod tests {
     }
 
     #[test]
-    fn default_arabic_face_fits_primary_cell() {
-        let font = FontSet::load("Consolas", "Arial", 16.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.2))
+    fn auto_arabic_face_advances_fill_the_primary_cell() {
+        let font = FontSet::load("Consolas", "", 16.0, 1.0)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "", 16.0, 1.0))
             .expect("a monospace font must exist");
         let Some(face) = font.arabic.as_ref() else {
             eprintln!("skipping: no Arabic-capable system font installed");
             return;
         };
-        let scaled = face.font.as_scaled(PxScale::from(font.size_px));
-        let advance = scaled.h_advance(face.font.glyph_id('م'));
         assert!(
-            advance <= font.cell_w as f32 * 1.05,
-            "{} advance {advance} must fit cell {}",
+            face.scale >= 0.85 && face.scale <= 1.10,
+            "scale {}",
+            face.scale
+        );
+        let scaled = face
+            .font
+            .as_scaled(PxScale::from(font.size_px * face.scale));
+        let total: f32 = ARABIC_PROBES
+            .iter()
+            .map(|&c| {
+                let id = face.font.glyph_id(c);
+                if id.0 == 0 {
+                    0.0
+                } else {
+                    scaled.h_advance(id)
+                }
+            })
+            .sum();
+        let mean = total / ARABIC_PROBES.len() as f32;
+        assert!(
+            (mean - font.cell_w as f32).abs() <= font.cell_w as f32 * 0.25,
+            "{} scaled mean advance {mean} must fill cell {}",
             face.family,
             font.cell_w
+        );
+    }
+
+    #[test]
+    fn configured_arabic_family_is_still_respected() {
+        let font = FontSet::load("Consolas", "Arial", 16.0, 1.0)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.0))
+            .expect("a monospace font must exist");
+        let Some(face) = font.arabic.as_ref() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        assert_eq!(face.family, "Arial");
+        assert!(
+            face.scale >= 0.85 && face.scale <= 1.10,
+            "scale {}",
+            face.scale
         );
     }
 

@@ -19,6 +19,8 @@ pub struct Config {
 #[serde(default)]
 pub struct FontConfig {
     pub family: String,
+    /// Empty means auto: pick the Arabic face whose advance fills the
+    /// primary cell; set a name to force one face.
     pub arabic_family: String,
     pub size: f32,
     pub line_height: f32,
@@ -28,7 +30,7 @@ impl Default for FontConfig {
     fn default() -> Self {
         Self {
             family: "Cascadia Mono".into(),
-            arabic_family: "Arial".into(),
+            arabic_family: String::new(),
             size: 16.0,
             line_height: 1.0,
         }
@@ -333,7 +335,7 @@ mod tests {
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.font.family, "Cascadia Mono");
-        assert_eq!(c.font.arabic_family, "Arial");
+        assert_eq!(c.font.arabic_family, "");
         assert_eq!(c.font.size, 16.0);
         assert_eq!(c.font.line_height, 1.0);
         assert!(c.bidi.enabled);
