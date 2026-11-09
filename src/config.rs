@@ -28,7 +28,7 @@ impl Default for FontConfig {
     fn default() -> Self {
         Self {
             family: "Cascadia Mono".into(),
-            arabic_family: "Kawkab Mono".into(),
+            arabic_family: "Arial".into(),
             size: 16.0,
             line_height: 1.0,
         }
@@ -333,7 +333,7 @@ mod tests {
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.font.family, "Cascadia Mono");
-        assert_eq!(c.font.arabic_family, "Kawkab Mono");
+        assert_eq!(c.font.arabic_family, "Arial");
         assert_eq!(c.font.size, 16.0);
         assert_eq!(c.font.line_height, 1.0);
         assert!(c.bidi.enabled);

@@ -1,4 +1,4 @@
-//! Shell session creation and byte transport.
+﻿//! Shell session creation and byte transport.
 
 use std::io::{Read, Write};
 use std::thread;

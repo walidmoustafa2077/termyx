@@ -8,17 +8,21 @@ License 1.1. The full license text is `OFL.txt` in this directory.
 - `OFL.txt` — license shipped with that release.
 
 `src/fonts.rs` embeds the font with `include_bytes!` and registers it with
-`fontdb` **before** loading system fonts, so it is always available. It is the
-default Arabic face.
+`fontdb` **before** loading system fonts, so it is always available. It is an
+opt-in Arabic face: the default is Arial because Kawkab's narrow metrics render
+disconnected at 16 px with the current rasterizer. Set
+`[font] arabic_family = "Kawkab Mono"` to use it.
 
 Kawkab's advance is narrower than the primary monospace cell (about 5.7 px vs
 8.8 px at 16 px). Snapping each shaped cluster to its own cell left side-bearing
 gaps and broke cursive joins, so the renderer positions an Arabic run
 continuously from the shaper's advances and centers the whole run inside its
-slot span. That keeps adjacent letters connected.
+slot span. That keeps adjacent letters connected when the face's ink is wide
+enough for the font size.
 
-The fallback chain is Kawkab Mono, Arial, Tahoma, Noto Naskh Arabic, Noto Sans
-Arabic, DejaVu Sans, FreeSerif, Segoe UI. A candidate is accepted only when it:
+The default fallback chain is Arial, Tahoma, Noto Naskh Arabic, Noto Sans
+Arabic, DejaVu Sans, FreeSerif, Segoe UI, Kawkab Mono. A candidate is accepted
+only when it:
 
 1. covers Arabic letters,
 2. shapes `لا` as a single lam-alef ligature,

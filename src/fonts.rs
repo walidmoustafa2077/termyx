@@ -21,7 +21,6 @@ pub enum FontError {
 pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabMono-Regular.ttf");
 
 const ARABIC_FALLBACKS: &[&str] = &[
-    "Kawkab Mono",
     "Arial",
     "Tahoma",
     "Noto Naskh Arabic",
@@ -29,6 +28,7 @@ const ARABIC_FALLBACKS: &[&str] = &[
     "DejaVu Sans",
     "FreeSerif",
     "Segoe UI",
+    "Kawkab Mono",
 ];
 
 /// Families tried, in order, to cover glyphs the primary face lacks (icons and
