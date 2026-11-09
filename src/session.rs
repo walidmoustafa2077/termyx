@@ -94,25 +94,19 @@ impl TabSlots {
     }
 }
 
-/// One shell session: its parser, its child, and its title.
+/// One shell session: its parser and its child.
 ///
-/// The title is mirrored in [`TabSlots`], which the tab strip reads. Set it
-/// through [`TabSet::set_title`] so the two never disagree.
+/// Its title is not stored here: [`TabSlots`] is the single store, and the tab
+/// strip reads it through [`TabSet::titles`].
 pub struct Session {
     pub id: SessionId,
     pub terminal: Terminal,
     pub pty: PtySession,
-    pub title: Option<String>,
 }
 
 impl Session {
     pub fn new(id: SessionId, terminal: Terminal, pty: PtySession) -> Self {
-        Self {
-            id,
-            terminal,
-            pty,
-            title: None,
-        }
+        Self { id, terminal, pty }
     }
 }
 
@@ -196,10 +190,6 @@ impl TabSet {
     }
 
     pub fn set_title(&mut self, id: SessionId, title: &str) {
-        let Some(session) = self.session_mut(id) else {
-            return;
-        };
-        session.title = clean_title(title);
         self.slots.set_title(id, title);
     }
 }
@@ -347,12 +337,13 @@ mod tests {
         );
 
         set.set_title(second, "build");
-        assert_eq!(set[1].title.as_deref(), Some("build"));
         assert_eq!(set.titles(), vec!["Termyx", "build"]);
+        assert_eq!(set.active_mut().map(|session| session.id), Some(second));
 
         set.select(0);
         let removed = set.remove_active().expect("an active session");
         assert_eq!(removed.id, first);
+        assert_eq!(set.titles(), vec!["build"]);
         assert_eq!(set.active_index(), Some(0));
         assert_eq!(
             set.session_mut(second).map(|session| session.id),
@@ -369,7 +360,7 @@ mod tests {
 
     #[test]
     fn spawn_session_has_the_signature_the_app_calls() {
-        // Fails to compile if Task 4 changes either constructor underneath it.
+        // Pins the public signature until the app has a call site to break.
         let _ = spawn_session
             as fn(
                 SessionId,
