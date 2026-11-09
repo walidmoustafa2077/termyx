@@ -281,6 +281,21 @@ impl Renderer {
                 padding + slot_start as f32 * cell_w + offset
             };
 
+            // A half block is a cell-sized tile, not ordinary text. The console
+            // host snaps it to the cell; drawing the font outline leaves a
+            // one-pixel seam against the neighbouring background because the
+            // em square starts below the line box.
+            if !run.arabic && cluster.text == "\u{2580}" {
+                self.fill_rect(
+                    padding + slot_start as f32 * cell_w,
+                    padding + row as f32 * cell_h,
+                    slot_w,
+                    cell_h / 2.0,
+                    color,
+                );
+                continue;
+            }
+
             for (glyph_index, glyph) in cluster.glyphs.iter().enumerate() {
                 let mut font_id = u8::from(run.arabic);
                 let (mut font, _, _) = self.fonts.font_for(run.arabic);
@@ -569,6 +584,39 @@ mod tests {
         }
         assert!(painted > 0, "the glyph must paint some pixels");
         assert_eq!(tinted, 0, "glyph edges must be neutral gray, not tinted");
+    }
+
+    #[test]
+    fn upper_half_block_fills_the_top_half_of_the_cell() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h as usize;
+        let padding = renderer.padding() as usize;
+        renderer.resize(cell_w * 2, cell_h as u32 * 2);
+        let snapshot = single_cell_snapshot(Cell {
+            text: "\u{2580}".into(),
+            width: 1,
+            style: Style {
+                fg: Color::Rgb(30, 30, 30),
+                ..Style::default()
+            },
+        });
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let width = renderer.pixmap.width() as usize;
+        let background = packed(renderer.theme.background);
+        let at = |y: usize| renderer.pixels()[y * width + padding];
+        assert_ne!(
+            at(padding),
+            background,
+            "the block must reach the cell's top edge"
+        );
+        assert_ne!(at(padding + cell_h / 2 - 1), background);
+        assert_eq!(
+            at(padding + cell_h - 1),
+            background,
+            "the cell's lower half must stay empty"
+        );
     }
 
     fn default_renderer() -> Renderer {
