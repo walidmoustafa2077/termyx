@@ -248,10 +248,10 @@ pub fn shape_row(
             // even (for example inside an explicit LTR embedding). Other
             // segments trust the bidi level, and identity maps fall back to
             // their first strong character.
-            let rtl = if map.is_bidi_analyzed() {
-                run.level % 2 == 1
-            } else if has_arabic {
+            let rtl = if has_arabic {
                 true
+            } else if map.is_bidi_analyzed() {
+                run.level % 2 == 1
             } else {
                 first_strong_is_rtl(text)
             };
@@ -657,10 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn analyzed_even_levels_shape_left_to_right() {
+    fn analyzed_even_levels_still_shape_arabic_rtl() {
         let Some(result) = with_arabic_font(|data, index| {
-            // An LTR override keeps the Arabic letters at level 0: the text's
-            // script must not flip an analyzed even level to RTL.
+            // An LTR override keeps the Arabic letters at an even level, but
+            // Arabic always shapes right-to-left so its joining forms stay
+            // connected.
             let line = row(&["\u{202D}", "م", "ر", "ح", "\u{202C}"]);
             let text = RowText::flatten(&line);
             let map = VisualMap::from_bidi(&line, BaseDirection::Ltr);
@@ -678,11 +679,12 @@ mod tests {
             let face = Face::from_slice(data, index).expect("face");
             let mut buffer = UnicodeBuffer::new();
             buffer.push_str("مرح");
-            buffer.set_direction(Direction::LeftToRight);
+            buffer.set_direction(Direction::RightToLeft);
             let expected: Vec<u32> = rustybuzz::shape(&face, &[], buffer)
                 .glyph_infos()
                 .iter()
                 .map(|info| info.glyph_id)
+                .rev() // rustybuzz emits visual order for RTL; reverse to logical
                 .collect();
             (levels, actual, expected)
         }) else {
@@ -694,6 +696,9 @@ mod tests {
             "the LTR override must force even levels: {:?}",
             result.0
         );
-        assert_eq!(result.1, result.2, "an even level must shape left to right");
+        assert_eq!(
+            result.1, result.2,
+            "Arabic at an even level must still shape right to left"
+        );
     }
 }
