@@ -17,29 +17,21 @@ pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabM
 
 /// Families tried, in order, when the configured Arabic family is unavailable.
 ///
-/// When `arabic_family` is empty, the auto path ranks these by how close a
-/// measured probe advance is to the primary cell, so shaped runs fill the
-/// grid instead of leaving slack around Arabic blocks. Faces that fail the
-/// lam-alef check are skipped anyway.
+/// The first face that renders connected Arabic wins. Segoe UI leads because
+/// it is the face PowerShell uses for Arabic and its connected forms are much
+/// closer to the primary cell than Arial's. Faces that fail the joining check
+/// are skipped. Kawkab Mono stays last: it is bundled and always available
+/// when requested, but its narrow ink does not suit the default grid.
 const ARABIC_FALLBACKS: &[&str] = &[
-    "Arial",
+    "Segoe UI",
     "Tahoma",
+    "Arial",
     "Noto Naskh Arabic",
     "Noto Sans Arabic",
     "DejaVu Sans",
     "FreeSerif",
-    "Segoe UI",
     "Kawkab Mono",
 ];
-
-/// Unshaped letters spanning the common Arabic advance range. Their mean
-/// approximates the per-cell width a shaped run needs.
-const ARABIC_PROBES: &[char] = &['ا', 'م', 'س', 'ب', 'د', 'ر', 'ث', 'ج'];
-
-/// Scale bounds keep the Arabic ink near Latin size: below `0.85` letters get
-/// lost next to Latin caps, above `1.10` they crowd the shared baseline.
-const ARABIC_SCALE_MIN: f32 = 0.85;
-const ARABIC_SCALE_MAX: f32 = 1.10;
 
 /// Families tried, in order, to cover glyphs the primary face lacks (icons and
 /// symbols such as `✕` and `❯`). A face is only used if it maps one of
@@ -120,7 +112,7 @@ impl FontSet {
         let cell_w = advance.round().max(1.0) as u32;
         let cell_h = ((ascent - descent) * line_height).ceil().max(1.0) as u32;
 
-        let arabic = load_arabic(&database, arabic_family, size_px, cell_w);
+        let arabic = load_arabic(&database, arabic_family);
         let symbols = load_symbols(
             &database,
             family,
@@ -252,12 +244,7 @@ fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec
     symbols
 }
 
-fn load_arabic(
-    database: &Database,
-    configured: &str,
-    size_px: f32,
-    cell_w: u32,
-) -> Option<FontFace> {
+fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
     let candidates: Vec<&str> = if configured.is_empty() {
         ARABIC_FALLBACKS.to_vec()
     } else {
@@ -265,8 +252,6 @@ fn load_arabic(
             .chain(ARABIC_FALLBACKS.iter().copied())
             .collect()
     };
-    let mut loaded: Vec<(String, FontVec, Vec<u8>, u32, f32)> = Vec::new();
-    let mut saw_configured_face = false;
     for family in candidates {
         let families = [Family::Name(family)];
         let query = Query {
@@ -288,75 +273,32 @@ fn load_arabic(
         let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
             continue;
         };
-        let scaled = font.as_scaled(em_px_scale(&font, size_px));
-        let total: f32 = ARABIC_PROBES
-            .iter()
-            .map(|&c| {
-                let glyph = font.glyph_id(c);
-                if glyph.0 == 0 {
-                    0.0
-                } else {
-                    scaled.h_advance(glyph)
-                }
-            })
-            .sum();
-        let mean = total / ARABIC_PROBES.len() as f32;
-        if family == configured {
-            saw_configured_face = true;
+        if configured.is_empty() || family == configured {
+            tracing::debug!(family, "Arabic face loaded");
+        } else {
+            tracing::warn!(
+                requested = configured,
+                using = family,
+                "configured Arabic font unavailable; using a system fallback"
+            );
         }
-        loaded.push((family.to_string(), font, data, index, mean));
-        if !configured.is_empty() && saw_configured_face {
-            break;
-        }
+        return Some(FontFace {
+            font,
+            data,
+            index,
+            family: family.to_string(),
+            scale: 1.0,
+        });
     }
-    if loaded.is_empty() {
-        tracing::warn!(
-            requested = configured,
-            "no Arabic-capable system font found; Arabic text uses the primary face"
-        );
-        return None;
-    }
-    let cell = cell_w as f32;
-    let pick = if configured.is_empty() {
-        let (mut best_index, mut best_penalty) = (0usize, f32::INFINITY);
-        for (i, candidate) in loaded.iter().enumerate() {
-            let penalty = (candidate.4 - cell).abs();
-            if penalty < best_penalty {
-                best_penalty = penalty;
-                best_index = i;
-            }
-        }
-        loaded.into_iter().nth(best_index)
-    } else {
-        loaded.into_iter().next()
-    };
-    let (family, font, data, index, mean) = pick?;
-    let scale = (cell / mean).clamp(ARABIC_SCALE_MIN, ARABIC_SCALE_MAX);
-    if configured.is_empty() || family == configured {
-        tracing::debug!(family = %family, mean, scale, cell_w, "Arabic face loaded");
-    } else {
-        tracing::warn!(
-            requested = configured,
-            using = %family,
-            mean,
-            scale,
-            cell_w,
-            "configured Arabic font unavailable; using a system fallback"
-        );
-    }
-    Some(FontFace {
-        font,
-        data,
-        index,
-        family,
-        scale,
-    })
+    tracing::warn!(
+        requested = configured,
+        "no Arabic-capable system font found; Arabic text uses the primary face"
+    );
+    None
 }
 
 /// Whether a face can render connected Arabic text: it must map the letters
-/// and shape `لا` into a single lam-alef ligature. The ligature check keeps
-/// faces such as `Segoe UI` that cover the letters but render lam-alef as two
-/// disconnected glyphs.
+/// and connect lam-alef, either as one ligature or as contextual forms.
 fn can_render_arabic(data: &[u8], index: u32) -> bool {
     has_arabic_coverage(data, index) && ligates_lam_alef(data, index) && joins_arabic(data, index)
 }
@@ -393,14 +335,29 @@ fn has_arabic_coverage(data: &[u8], index: u32) -> bool {
         .all(|ch| face.glyph_index(*ch).is_some())
 }
 
+/// Some faces, including Segoe UI, connect lam-alef with two contextual
+/// glyphs instead of a single ligature. Accept those as long as the shaped
+/// glyphs differ from the isolated letters; a face that simply drops both
+/// isolated letters side by side is still rejected.
 fn ligates_lam_alef(data: &[u8], index: u32) -> bool {
     let Some(face) = rustybuzz::Face::from_slice(data, index) else {
+        return false;
+    };
+    let Some(lam) = face.glyph_index('ل') else {
+        return false;
+    };
+    let Some(alef) = face.glyph_index('ا') else {
         return false;
     };
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str("لا");
     buffer.guess_segment_properties();
-    rustybuzz::shape(&face, &[], buffer).len() == 1
+    let shaped = rustybuzz::shape(&face, &[], buffer);
+    shaped.len() == 1
+        || shaped
+            .glyph_infos()
+            .iter()
+            .any(|info| info.glyph_id != u32::from(lam.0) && info.glyph_id != u32::from(alef.0))
 }
 
 #[cfg(test)]
@@ -468,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_arabic_face_advances_fill_the_primary_cell() {
+    fn auto_arabic_face_uses_natural_advances() {
         let font = FontSet::load("Consolas", "", 16.0, 1.0)
             .or_else(|_| FontSet::load("DejaVu Sans Mono", "", 16.0, 1.0))
             .expect("a monospace font must exist");
@@ -476,31 +433,10 @@ mod tests {
             eprintln!("skipping: no Arabic-capable system font installed");
             return;
         };
-        assert!(
-            face.scale >= 0.85 && face.scale <= 1.10,
-            "scale {}",
-            face.scale
-        );
-        let scaled = face
-            .font
-            .as_scaled(em_px_scale(&face.font, font.size_px * face.scale));
-        let total: f32 = ARABIC_PROBES
-            .iter()
-            .map(|&c| {
-                let id = face.font.glyph_id(c);
-                if id.0 == 0 {
-                    0.0
-                } else {
-                    scaled.h_advance(id)
-                }
-            })
-            .sum();
-        let mean = total / ARABIC_PROBES.len() as f32;
-        assert!(
-            (mean - font.cell_w as f32).abs() <= font.cell_w as f32 * 0.25,
-            "{} scaled mean advance {mean} must fill cell {}",
-            face.family,
-            font.cell_w
+        assert_eq!(
+            face.scale, 1.0,
+            "{} must render at its natural em size",
+            face.family
         );
     }
 
@@ -514,10 +450,18 @@ mod tests {
             return;
         };
         assert_eq!(face.family, "Arial");
+        assert_eq!(face.scale, 1.0);
+    }
+
+    #[test]
+    fn segoe_ui_connects_arabic_without_a_single_lam_alef_ligature() {
+        let Ok(data) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") else {
+            eprintln!("skipping: Segoe UI is not installed");
+            return;
+        };
         assert!(
-            face.scale >= 0.85 && face.scale <= 1.10,
-            "scale {}",
-            face.scale
+            can_render_arabic(&data, 0),
+            "Segoe UI must be accepted for its contextual Arabic glyphs"
         );
     }
 

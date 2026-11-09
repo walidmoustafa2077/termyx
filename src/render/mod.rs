@@ -228,12 +228,13 @@ impl Renderer {
             .flat_map(|cluster| cluster.glyphs.iter())
             .map(|glyph| glyph.x_advance as f32 * scale)
             .sum();
-        // Connected Arabic forms are narrower than the isolated forms the
-        // face was calibrated against, so the run rarely fills its cells.
-        // Stretch it to exactly span them: anchoring it at either edge would
-        // leave a gap that grows with the length of the Arabic text.
+        // Connected Arabic forms are usually narrower than their cells, so
+        // let the run keep its natural advances and start at the run's first
+        // visual slot. That keeps the Arabic next to the preceding Latin text
+        // without stretching the letterforms; the unused cells stay at the
+        // visual end of the run. Only shrink a run that would overflow.
         let arabic_span = (run.slots.end - run.slots.start) as f32 * cell_w;
-        let arabic_scale_x = if arabic_natural > 0.0 {
+        let arabic_scale_x = if arabic_natural > arabic_span && arabic_natural > 0.0 {
             arabic_span / arabic_natural
         } else {
             1.0
@@ -978,6 +979,41 @@ mod tests {
                 .iter()
                 .any(|column| (arabic_start..arabic_start + 2 * cell_w).contains(column)),
             "Arabic must begin within two cells of the Latin text: {columns:?}"
+        );
+    }
+
+    #[test]
+    fn arabic_run_keeps_its_natural_width_instead_of_filling_its_slots() {
+        let Some(mut renderer) = arabic_renderer() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        let arabic = "السلامةبليبتين";
+        let cells: Vec<Cell> = arabic
+            .chars()
+            .map(|ch| Cell {
+                text: ch.to_string(),
+                width: 1,
+                style: Style::default(),
+            })
+            .collect();
+        let cols = cells.len() as u32;
+        renderer.resize(cell_w * (cols + 2), cell_h * 2);
+        let snapshot = row_snapshot(cells);
+        let map = VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr);
+        let run = &map.runs()[0];
+        let run_end = renderer.padding() + run.slots.end as u32 * cell_w;
+        renderer.draw(&snapshot, &[map], None);
+        renderer.sync();
+
+        let columns = painted_columns(&renderer);
+        let rightmost = *columns.last().expect("Arabic must paint");
+        assert!(
+            rightmost + cell_w < run_end,
+            "Arabic must keep natural advances and leave at least a cell unused \
+             at the run end (rightmost {rightmost}, run end {run_end}): {columns:?}"
         );
     }
 
