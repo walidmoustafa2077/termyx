@@ -561,7 +561,7 @@ impl App {
             let Some(position) = click_position else {
                 return;
             };
-            self.selection = Some(Selection::new(position));
+            self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
         } else if self.scrollbar_drag && button == MouseButton::Left {
             self.scrollbar_drag = false;
@@ -769,15 +769,22 @@ impl App {
             return;
         };
         let snapshot = terminal.snapshot();
-        let text = if selection.mode == SelectionMode::Block {
-            let maps: Vec<VisualMap> = snapshot
-                .lines
-                .iter()
-                .map(|line| VisualMap::for_row(line, &self.config.bidi))
-                .collect();
-            selection.to_text_block(&snapshot, &maps, self.config.selection.trim_trailing)
-        } else {
-            selection.to_text(&snapshot, self.config.selection.trim_trailing)
+        let text = match selection.mode {
+            SelectionMode::Simple => {
+                selection.to_text(&snapshot, self.config.selection.trim_trailing)
+            }
+            SelectionMode::Visual | SelectionMode::Block => {
+                let maps: Vec<VisualMap> = snapshot
+                    .lines
+                    .iter()
+                    .map(|line| VisualMap::for_row(line, &self.config.bidi))
+                    .collect();
+                if selection.mode == SelectionMode::Block {
+                    selection.to_text_block(&snapshot, &maps, self.config.selection.trim_trailing)
+                } else {
+                    selection.to_text_visual(&snapshot, &maps, self.config.selection.trim_trailing)
+                }
+            }
         };
         let Some(clipboard) = self.clipboard() else {
             return;

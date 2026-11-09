@@ -77,14 +77,18 @@ fn next_base(cells: &[Cell], from: usize) -> Option<usize> {
     (from + 1..cells.len()).find(|&index| cells[index].width > 0)
 }
 
-/// Whether a selection follows logical text or a visual rectangle.
+/// How a selection maps its endpoints to the cells it covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionMode {
+    /// Logical text range, used by word and line selection.
     Simple,
+    /// Visual span between the drag endpoints.
+    Visual,
     Block,
 }
 
-/// A logical-order text selection. Visual order never enters this type.
+/// A selection stored in logical coordinates. Copying always emits logical
+/// order; the mode decides which cells the endpoints cover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub mode: SelectionMode,
@@ -96,6 +100,16 @@ impl Selection {
     pub fn new(anchor: LogicalPos) -> Self {
         Self {
             mode: SelectionMode::Simple,
+            anchor,
+            focus: anchor,
+        }
+    }
+
+    /// A pointer drag. The covered cells follow the visual span between the
+    /// endpoints, which is what the user sees while dragging across bidi text.
+    pub fn visual(anchor: LogicalPos) -> Self {
+        Self {
+            mode: SelectionMode::Visual,
             anchor,
             focus: anchor,
         }
@@ -151,6 +165,29 @@ impl Selection {
         ))
     }
 
+    /// Visual columns covered on one row of a pointer drag. Rows between the
+    /// endpoints are covered from edge to edge; an endpoint row runs from the
+    /// endpoint to the right edge of the line.
+    fn visual_range(&self, row: usize, maps: &[VisualMap]) -> Option<(usize, usize)> {
+        let (start, end) = self.ordered();
+        if row < start.row || row > end.row {
+            return None;
+        }
+        let map = maps.get(row)?;
+        let last = map.cols().saturating_sub(1);
+        if start.row == end.row {
+            let a = map.visual_of(start.col);
+            let b = map.visual_of(end.col);
+            Some((a.min(b), a.max(b)))
+        } else if row == start.row {
+            Some((map.visual_of(start.col), last))
+        } else if row == end.row {
+            Some((0, map.visual_of(end.col)))
+        } else {
+            Some((0, last))
+        }
+    }
+
     /// True when the cell is inside this selection. Block mode compares
     /// visual columns; the maps carry each row's bidi layout.
     pub fn is_selected(
@@ -160,13 +197,18 @@ impl Selection {
         visual: usize,
         maps: &[VisualMap],
     ) -> bool {
-        if self.mode == SelectionMode::Simple {
-            return self.contains(row, logical);
+        match self.mode {
+            SelectionMode::Simple => self.contains(row, logical),
+            SelectionMode::Visual => self
+                .visual_range(row, maps)
+                .is_some_and(|(left, right)| (left..=right).contains(&visual)),
+            SelectionMode::Block => {
+                let Some((first, last, left, right)) = self.visual_bounds(maps) else {
+                    return false;
+                };
+                row >= first && row <= last && visual >= left && visual <= right
+            }
         }
-        let Some((first, last, left, right)) = self.visual_bounds(maps) else {
-            return false;
-        };
-        row >= first && row <= last && visual >= left && visual <= right
     }
 
     /// Copy a visual rectangle row by row, skipping continuation cells.
@@ -222,6 +264,52 @@ impl Selection {
 
             let mut text = String::new();
             for col in first..=last {
+                if let Some(cell) = line.cells.get(col) {
+                    if cell.width > 0 {
+                        text.push_str(&cell.text);
+                    }
+                }
+            }
+            if trim_trailing {
+                text = text.trim_end_matches(' ').to_string();
+            }
+            if row > start.row && !snapshot.lines.get(row - 1).is_some_and(|line| line.wrapped) {
+                out.push('\n');
+            }
+            out.push_str(&text);
+        }
+
+        out
+    }
+
+    /// Copy the cells covered by a pointer drag in logical order.
+    pub fn to_text_visual(
+        &self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        trim_trailing: bool,
+    ) -> String {
+        let (start, end) = self.ordered();
+        let mut out = String::new();
+
+        for row in start.row..=end.row {
+            let (Some(line), Some(map)) = (snapshot.lines.get(row), maps.get(row)) else {
+                continue;
+            };
+            let Some((left, right)) = self.visual_range(row, maps) else {
+                continue;
+            };
+
+            // The dragged cells are visual, but the copied text walks their
+            // logical columns so it matches the original line.
+            let mut columns: Vec<usize> = (left..=right)
+                .map(|visual| map.logical_of(visual))
+                .collect();
+            columns.sort_unstable();
+            columns.dedup();
+
+            let mut text = String::new();
+            for col in columns {
                 if let Some(cell) = line.cells.get(col) {
                     if cell.width > 0 {
                         text.push_str(&cell.text);
@@ -371,6 +459,25 @@ mod tests {
         let mut selection = Selection::new(position(0, 0));
         selection.update(position(0, 5));
         assert_eq!(selection.to_text(&arabic_snapshot(), true), "abcمرح");
+    }
+
+    #[test]
+    fn drag_selection_highlights_the_visual_span_in_a_mixed_row() {
+        let snapshot = arabic_snapshot();
+        let maps = vec![VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        // Visual order is `a b c ح ر م`; drag across `b c ح ر`.
+        let mut selection = Selection::visual(position(0, maps[0].logical_of(1)));
+        selection.update(position(0, maps[0].logical_of(4)));
+
+        for visual in 1..=4 {
+            let logical = maps[0].logical_of(visual);
+            assert!(selection.is_selected(0, logical, visual, &maps));
+        }
+        for visual in [0, 5] {
+            let logical = maps[0].logical_of(visual);
+            assert!(!selection.is_selected(0, logical, visual, &maps));
+        }
+        assert_eq!(selection.to_text_visual(&snapshot, &maps, true), "bcرح");
     }
 
     #[test]
