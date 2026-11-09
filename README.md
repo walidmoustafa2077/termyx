@@ -108,6 +108,25 @@ bracketed paste, and DEC modes.
   Local `Ctrl+Shift+V` paste works.
 - **IME**: committed text is sent to the shell; there is no preedit overlay.
 
+## Experimental: scrollbar
+
+The scrollbar is an experiment, not a shipped feature. The MVP spec defers it
+to a later phase, and it has not been accepted or soak-tested.
+
+- A thumb is drawn whenever scrollback exists, including at the live bottom.
+  Hovering expands it from 6 px to 12 px inside a reserved 14 px right gutter,
+  so it never covers the last text column.
+- Drag the thumb to move `display_offset`; click the track to page by
+  `rows - 1` lines; the wheel moves 3 lines per notch.
+- When scrollback exists, `Shift+PageUp`/`Shift+PageDown` scroll locally.
+  Without history those keys still reach the shell or TUI as modified keys.
+- Scrolling clears the current selection; selection does not yet stay anchored
+  to scrollback content.
+
+Open questions: the thumb mapping and page size are provisional, blank history
+rows can stop the thumb before the top, and track clicks do not repeat while
+the button is held.
+
 ## Phase 2 acceptance
 
 Run on Windows 10/11 x64 with PowerShell:
