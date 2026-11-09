@@ -6,7 +6,10 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use unicode_width::UnicodeWidthStr;
-use vte::ansi::{Color as AnsiColor, CursorShape as AnsiCursorShape, NamedColor, Processor};
+use vte::ansi::{
+    Color as AnsiColor, CursorShape as AnsiCursorShape, CursorStyle as AnsiCursorStyle, NamedColor,
+    Processor,
+};
 use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,6 +156,12 @@ impl Terminal {
         };
         let config = TermConfig {
             scrolling_history: scrollback,
+            // Windows Terminal's default is a non-blinking bar; applications can
+            // still override it with DECSCUSR (which sets `cursor_style`).
+            default_cursor_style: AnsiCursorStyle {
+                shape: AnsiCursorShape::Beam,
+                blinking: false,
+            },
             ..TermConfig::default()
         };
         let term = Term::new(config, &size, EventProxy { proxy });
@@ -551,6 +560,7 @@ mod tests {
     #[test]
     fn cursor_shape_and_visibility_are_captured() {
         let mut term = Terminal::new(20, 5, 1_000);
+        assert_eq!(term.snapshot().cursor.shape, CursorShape::Beam);
 
         term.feed(b"\x1b[4 q");
         let cursor = term.snapshot().cursor;

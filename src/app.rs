@@ -489,6 +489,16 @@ impl App {
                 }
             }
 
+            // A single click starts a new interaction. Drop any previous
+            // selection even when the click is forwarded to an application;
+            // otherwise a stale highlight survives clicks outside it.
+            if button == MouseButton::Left && self.selection.is_some() {
+                self.selection = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+
             if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;

@@ -55,7 +55,7 @@ A missing default file is fine; built-in defaults are used.
 ```toml
 [font]
 family = "Cascadia Mono"
-size = 17.0
+size = 16.0
 arabic_family = "Kawkab Mono"
 
 [bidi]

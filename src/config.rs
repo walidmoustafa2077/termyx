@@ -29,7 +29,7 @@ impl Default for FontConfig {
         Self {
             family: "Cascadia Mono".into(),
             arabic_family: "Kawkab Mono".into(),
-            size: 17.0,
+            size: 16.0,
             line_height: 1.0,
         }
     }
@@ -249,7 +249,7 @@ impl Config {
     /// metrics with their defaults.
     pub fn validate(mut self) -> Self {
         if !self.font.size.is_finite() {
-            self.font.size = 17.0;
+            self.font.size = 16.0;
         }
         self.font.size = self.font.size.clamp(6.0, 48.0);
         if !self.font.line_height.is_finite() || self.font.line_height < 0.8 {
@@ -330,7 +330,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.font.family, "Cascadia Mono");
         assert_eq!(c.font.arabic_family, "Kawkab Mono");
-        assert_eq!(c.font.size, 17.0);
+        assert_eq!(c.font.size, 16.0);
         assert_eq!(c.font.line_height, 1.0);
         assert!(c.bidi.enabled);
         assert_eq!(c.bidi.base_direction, BaseDirection::Ltr);
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn nan_font_size_falls_back_to_default() {
         let c = Config::from_toml_str("[font]\nsize = nan\n").unwrap();
-        assert_eq!(c.font.size, 17.0);
+        assert_eq!(c.font.size, 16.0);
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn unknown_keys_are_ignored() {
         let c = Config::from_toml_str("[font]\nwat = 1\n").unwrap();
-        assert_eq!(c.font.size, 17.0);
+        assert_eq!(c.font.size, 16.0);
     }
 
     #[test]

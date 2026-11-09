@@ -265,7 +265,10 @@ impl Renderer {
                         slot,
                         x,
                         y,
-                        color,
+                        Ink {
+                            color,
+                            bold: self.fonts.bold,
+                        },
                         scale_x,
                     );
                 }
@@ -393,13 +396,18 @@ fn fit_cluster(natural: f32, slot_w: f32) -> (f32, f32) {
     }
 }
 
+struct Ink {
+    color: Rgb,
+    bold: bool,
+}
+
 fn blit_scaled(
     pixmap: &mut Pixmap,
     atlas: &Atlas,
     slot: GlyphSlot,
     pen_x: f32,
     baseline: f32,
-    color: Rgb,
+    ink: Ink,
     scale_x: f32,
 ) {
     let width = pixmap.width() as i32;
@@ -421,14 +429,22 @@ fn blit_scaled(
             let mask_x = slot.rect.x + src_col;
             let mask_y = slot.rect.y as i32 + row;
             let coverage = atlas.data()[(mask_y as u32 * atlas_width + mask_x) as usize];
+            let coverage = if ink.bold && mask_x > slot.rect.x {
+                // Synthetic bold: borrow coverage from the left neighbour so
+                // stems thicken without needing a separate bold face.
+                let left = atlas.data()[(mask_y as u32 * atlas_width + mask_x - 1) as usize];
+                coverage.max(left)
+            } else {
+                coverage
+            };
             if coverage == 0 {
                 continue;
             }
             let alpha = coverage as f32 / 255.0;
             let index = y as usize * stride + x as usize * 4;
-            data[index] = blend(data[index], color.r, alpha);
-            data[index + 1] = blend(data[index + 1], color.g, alpha);
-            data[index + 2] = blend(data[index + 2], color.b, alpha);
+            data[index] = blend(data[index], ink.color.r, alpha);
+            data[index + 1] = blend(data[index + 1], ink.color.g, alpha);
+            data[index + 2] = blend(data[index + 2], ink.color.b, alpha);
         }
     }
 }
@@ -485,6 +501,52 @@ mod tests {
             display_offset: 0,
             history: 0,
         }
+    }
+
+    #[test]
+    fn synthetic_bold_thickens_stems() {
+        let mut atlas = Atlas::new(4, 4);
+        let rect = atlas.alloc(2, 2).expect("atlas space");
+        atlas.upload(rect, &[255, 0, 255, 0]);
+        let slot = GlyphSlot {
+            rect,
+            bearing_x: 0,
+            bearing_y: 0,
+        };
+        let color = Rgb::new(255, 255, 255);
+
+        let mut plain = Pixmap::new(8, 8).expect("pixmap");
+        plain.fill(tiny_skia::Color::BLACK);
+        blit_scaled(
+            &mut plain,
+            &atlas,
+            slot,
+            1.0,
+            3.0,
+            Ink { color, bold: false },
+            1.0,
+        );
+
+        let mut bold = Pixmap::new(8, 8).expect("pixmap");
+        bold.fill(tiny_skia::Color::BLACK);
+        blit_scaled(
+            &mut bold,
+            &atlas,
+            slot,
+            1.0,
+            3.0,
+            Ink { color, bold: true },
+            1.0,
+        );
+
+        let ink = |pixmap: &Pixmap| {
+            pixmap
+                .data()
+                .chunks_exact(4)
+                .filter(|pixel| pixel[0] > 0)
+                .count()
+        };
+        assert!(ink(&bold) > ink(&plain), "bold must add stem coverage");
     }
 
     fn cursor_snapshot(shape: CursorShape, visible: bool) -> GridSnapshot {
