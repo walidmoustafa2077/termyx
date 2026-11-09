@@ -58,6 +58,20 @@ const SYMBOL_FALLBACKS: &[&str] = &[
 
 const SYMBOL_PROBES: &[char] = &['✕', '●', '❯', '\u{E0B0}', '\u{E000}'];
 
+/// Proportional family used for window chrome (tab titles, menu items).
+const UI_FAMILY: &str = "Segoe UI";
+
+/// Reserved glyph-cache face id for the proportional UI face.
+///
+/// Symbol faces start at `2`, so the top of the range stays unambiguous.
+pub const UI_FONT_ID: u8 = u8::MAX;
+
+/// Chrome text size in logical pixels.
+// `UI_SIZE_PX` has no non-test consumer until Task 7 draws the tab strip, so
+// it compiles for the tests only.
+#[cfg(test)]
+pub(crate) const UI_SIZE_PX: f32 = 12.0;
+
 /// Converts an em size in pixels into the pixel-height scale `ab_glyph`
 /// expects. `PxScale` measures the font's ascent-to-descent height, not its
 /// em square, while terminals (and the shaper used here) size text by the em
@@ -89,6 +103,9 @@ pub struct FontSet {
     #[allow(dead_code)]
     pub descent: f32,
     pub arabic: Option<FontFace>,
+    /// Proportional face for window chrome; absent on systems without it, in
+    /// which case chrome text falls back to the primary monospace face.
+    pub ui: Option<FontFace>,
     pub symbols: Vec<FontFace>,
 }
 
@@ -120,6 +137,7 @@ impl FontSet {
         let cell_h = ((ascent - descent) * line_height).ceil().max(1.0) as u32;
 
         let arabic = load_arabic(&database, arabic_family);
+        let ui = load_ui(&database);
         let symbols = load_symbols(
             &database,
             family,
@@ -134,6 +152,7 @@ impl FontSet {
             ascent,
             descent,
             arabic,
+            ui,
             symbols,
         })
     }
@@ -153,13 +172,19 @@ impl FontSet {
         self.ascent.max(arabic)
     }
 
-    /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces.
-    /// Unknown ids fall back to the primary face.
+    /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces,
+    /// [`UI_FONT_ID`] the proportional chrome face. Unknown ids and absent
+    /// faces fall back to the primary face.
     pub fn font_for_id(&self, id: u8) -> (&FontVec, u32) {
         match id {
             0 => (&self.font, self.index),
             1 => self
                 .arabic
+                .as_ref()
+                .map(|face| (&face.font, face.index))
+                .unwrap_or((&self.font, self.index)),
+            UI_FONT_ID => self
+                .ui
                 .as_ref()
                 .map(|face| (&face.font, face.index))
                 .unwrap_or((&self.font, self.index)),
@@ -173,6 +198,21 @@ impl FontSet {
 
     pub fn font_for(&self, arabic: bool) -> (&FontVec, u32) {
         self.font_for_id(u8::from(arabic))
+    }
+
+    /// Width of `text` in the UI face at `px`, falling back to the cell width
+    /// per character when the face is missing.
+    // `ui_width` has no non-test consumer until Task 7 lays out the tab strip,
+    // so it compiles for the tests only.
+    #[cfg(test)]
+    pub fn ui_width(&self, text: &str, px: f32) -> f32 {
+        let Some(face) = &self.ui else {
+            return text.chars().count() as f32 * self.cell_w as f32;
+        };
+        let scaled = face.font.as_scaled(px);
+        text.chars()
+            .map(|ch| scaled.h_advance(face.font.glyph_id(ch)))
+            .sum()
     }
 
     /// The first symbol face that maps the first character of `text`, with the
@@ -206,6 +246,28 @@ fn load_primary(database: &Database, family: &str) -> Result<(Vec<u8>, u32), Fon
     database
         .with_face_data(id, |data, index| (data.to_vec(), index))
         .ok_or(FontError::NoFont)
+}
+
+/// Loads the proportional window-chrome face, or `None` when the family is not
+/// installed so chrome text falls back to the primary monospace face.
+fn load_ui(database: &Database) -> Option<FontFace> {
+    let families = [Family::Name(UI_FAMILY)];
+    let query = Query {
+        families: &families,
+        weight: Weight::NORMAL,
+        stretch: Stretch::Normal,
+        style: Style::Normal,
+    };
+    let id = database.query(&query)?;
+    let (data, index) = database.with_face_data(id, |data, index| (data.to_vec(), index))?;
+    let font = FontVec::try_from_vec_and_index(data, index).ok()?;
+    tracing::debug!(family = UI_FAMILY, "proportional UI face loaded");
+    Some(FontFace {
+        font,
+        index,
+        family: UI_FAMILY.to_string(),
+        scale: 1.0,
+    })
 }
 
 fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec<FontFace> {
@@ -519,6 +581,46 @@ mod tests {
             std::ptr::eq(fonts.font_for_id(unknown).0, &fonts.font),
             "an unknown id must fall back to the primary face"
         );
+
+        match &fonts.ui {
+            Some(ui) => {
+                let (font, index) = fonts.font_for_id(UI_FONT_ID);
+                assert!(
+                    std::ptr::eq(font, &ui.font),
+                    "the UI id must be the proportional face"
+                );
+                assert_eq!(index, ui.index);
+            }
+            None => assert!(
+                std::ptr::eq(fonts.font_for_id(UI_FONT_ID).0, &fonts.font),
+                "the UI id must fall back to the primary face when the face is absent"
+            ),
+        }
+    }
+
+    #[test]
+    fn ui_width_measures_with_the_proportional_face() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        if fonts.ui.is_none() {
+            eprintln!("skipping: no proportional UI face installed");
+            return;
+        }
+        assert_eq!(fonts.ui_width("", UI_SIZE_PX), 0.0);
+        assert!(
+            fonts.ui_width("M", UI_SIZE_PX) > fonts.ui_width("i", UI_SIZE_PX),
+            "a proportional face gives narrow letters narrower advances"
+        );
+    }
+
+    #[test]
+    fn ui_width_falls_back_to_the_cell_width() {
+        let Some(mut fonts) = load("Consolas") else {
+            return;
+        };
+        fonts.ui = None;
+        assert_eq!(fonts.ui_width("abc", UI_SIZE_PX), 3.0 * fonts.cell_w as f32);
     }
 
     #[test]

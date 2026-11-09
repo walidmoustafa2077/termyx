@@ -2,6 +2,10 @@
 
 mod atlas;
 mod glyph_cache;
+// Chrome text has no non-test consumer until Task 7 paints the tab strip, so
+// it compiles for the tests only.
+#[cfg(test)]
+mod ui_text;
 
 use ab_glyph::GlyphId;
 use tiny_skia::Pixmap;
@@ -440,6 +444,33 @@ impl Renderer {
         &self.fonts
     }
 
+    /// Font data for a glyph-cache face id.
+    // These three shims serve `ui_text`, which has no non-test consumer until
+    // Task 7 paints the tab strip, so they compile for the tests only.
+    #[cfg(test)]
+    pub(crate) fn fonts_face(&self, id: u8) -> Option<(&ab_glyph::FontVec, u32)> {
+        Some(self.fonts.font_for_id(id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_get(&mut self, font: u8, id: GlyphId, size_px: u32) -> Option<GlyphSlot> {
+        let (face, _index) = self.fonts.font_for_id(font);
+        self.cache.get(font, face, id, size_px as f32)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blit(&mut self, slot: GlyphSlot, x: f32, y: f32, color: Rgb) {
+        blit_scaled(
+            &mut self.pixmap,
+            &self.cache.atlas,
+            slot,
+            x,
+            y,
+            Ink { color, bold: false },
+            1.0,
+        );
+    }
+
     /// Copies the pixmap into the CPU pixel buffer. Must run after drawing and
     /// before [`Renderer::pixels`] is read.
     pub fn sync(&mut self) {
@@ -698,7 +729,7 @@ mod tests {
         );
     }
 
-    fn default_renderer() -> Renderer {
+    pub(crate) fn default_renderer() -> Renderer {
         let fonts = FontSet::load("Consolas", "Arial", 14.0, 1.2)
             .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 14.0, 1.2))
             .expect("a monospace font must exist");
@@ -716,7 +747,7 @@ mod tests {
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4).ok()
     }
 
-    fn packed(color: Rgb) -> u32 {
+    pub(crate) fn packed(color: Rgb) -> u32 {
         ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32
     }
 
