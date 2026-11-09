@@ -36,9 +36,16 @@ const ARABIC_FALLBACKS: &[&str] = &[
 /// Families tried, in order, to cover glyphs the primary face lacks (icons and
 /// symbols such as `✕` and `❯`). A face is only used if it maps one of
 /// [`SYMBOL_PROBES`], so text-only faces are skipped.
+///
+/// The first few matches are enough in practice, and every loaded face keeps
+/// its whole font file in memory (`MS Gothic` alone is about 9 MB), so the
+/// search stops early instead of collecting everything that matches.
+const SYMBOL_FACE_LIMIT: usize = 2;
 const SYMBOL_FALLBACKS: &[&str] = &[
+    // Color emoji faces are deliberately absent: they are about 13 MB each and
+    // the renderer masks glyphs in grayscale, so their color layers cannot be
+    // used anyway.
     "Segoe UI Symbol",
-    "Segoe UI Emoji",
     "Segoe UI",
     "Cascadia Mono",
     "Cascadia Code",
@@ -65,7 +72,6 @@ pub(crate) fn em_px_scale(font: &FontVec, em_px: f32) -> PxScale {
 
 pub struct FontFace {
     pub font: FontVec,
-    pub data: Vec<u8>,
     pub index: u32,
     pub family: String,
     /// Extra scale applied to this face so its ink matches the primary face.
@@ -74,7 +80,6 @@ pub struct FontFace {
 
 pub struct FontSet {
     pub font: FontVec,
-    pub data: Vec<u8>,
     pub index: u32,
     pub size_px: f32,
     pub cell_w: u32,
@@ -98,8 +103,10 @@ impl FontSet {
         database.load_font_data(BUNDLED_ARABIC.to_vec());
         database.load_system_fonts();
         let (data, index) = load_primary(&database, family)?;
-        let font = FontVec::try_from_vec_and_index(data.clone(), index)
-            .map_err(|_| FontError::InvalidFont)?;
+        // `FontVec` owns the bytes, so no second copy is kept: every face is a
+        // multi-megabyte font file and the process budget is tight.
+        let font =
+            FontVec::try_from_vec_and_index(data, index).map_err(|_| FontError::InvalidFont)?;
 
         let scale = em_px_scale(&font, size_px);
         let scaled = font.as_scaled(scale);
@@ -120,7 +127,6 @@ impl FontSet {
         );
         Ok(Self {
             font,
-            data,
             index,
             size_px,
             cell_w,
@@ -149,23 +155,23 @@ impl FontSet {
 
     /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces.
     /// Unknown ids fall back to the primary face.
-    pub fn font_for_id(&self, id: u8) -> (&FontVec, &[u8], u32) {
+    pub fn font_for_id(&self, id: u8) -> (&FontVec, u32) {
         match id {
-            0 => (&self.font, &self.data, self.index),
+            0 => (&self.font, self.index),
             1 => self
                 .arabic
                 .as_ref()
-                .map(|face| (&face.font, face.data.as_slice(), face.index))
-                .unwrap_or((&self.font, &self.data, self.index)),
+                .map(|face| (&face.font, face.index))
+                .unwrap_or((&self.font, self.index)),
             id => self
                 .symbols
                 .get(usize::from(id - 2))
-                .map(|face| (&face.font, face.data.as_slice(), face.index))
-                .unwrap_or((&self.font, &self.data, self.index)),
+                .map(|face| (&face.font, face.index))
+                .unwrap_or((&self.font, self.index)),
         }
     }
 
-    pub fn font_for(&self, arabic: bool) -> (&FontVec, &[u8], u32) {
+    pub fn font_for(&self, arabic: bool) -> (&FontVec, u32) {
         self.font_for_id(u8::from(arabic))
     }
 
@@ -223,7 +229,7 @@ fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec
         else {
             continue;
         };
-        let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
+        let Ok(font) = FontVec::try_from_vec_and_index(data, index) else {
             continue;
         };
         if !SYMBOL_PROBES.iter().any(|ch| font.glyph_id(*ch).0 != 0) {
@@ -232,12 +238,11 @@ fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec
         tracing::debug!(family = *family, "loaded symbol fallback face");
         symbols.push(FontFace {
             font,
-            data,
             index,
             family: (*family).to_string(),
             scale: 1.0,
         });
-        if symbols.len() == 6 {
+        if symbols.len() == SYMBOL_FACE_LIMIT {
             break;
         }
     }
@@ -270,7 +275,7 @@ fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
         if !can_render_arabic(&data, index) {
             continue;
         }
-        let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
+        let Ok(font) = FontVec::try_from_vec_and_index(data, index) else {
             continue;
         };
         if configured.is_empty() || family == configured {
@@ -284,7 +289,6 @@ fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
         }
         return Some(FontFace {
             font,
-            data,
             index,
             family: family.to_string(),
             scale: 1.0,
@@ -388,7 +392,7 @@ mod tests {
             .or_else(|_| FontSet::load("Consolas", "Arial", 16.0, 1.0))
             .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.0))
             .expect("a monospace font must exist");
-        let face = ttf_parser::Face::parse(&font.data, font.index).expect("valid face");
+        let face = ttf_parser::Face::parse(font.font.as_slice(), font.index).expect("valid face");
         let units = f32::from(face.units_per_em());
         let advance = face
             .glyph_hor_advance(face.glyph_index('M').expect("primary face maps M"))
@@ -403,7 +407,7 @@ mod tests {
     #[test]
     fn missing_configured_arabic_family_still_loads() {
         let font = load("Consolas").expect("a monospace font must exist");
-        assert_eq!(font.font_for(false).2, font.index);
+        assert_eq!(font.font_for(false).1, font.index);
         assert!(font.size_px > 0.0);
     }
 
@@ -483,11 +487,11 @@ mod tests {
             std::ptr::eq(fonts.font_for_id(0).0, &fonts.font),
             "id 0 must be the primary face"
         );
-        assert_eq!(fonts.font_for_id(0).2, fonts.index);
+        assert_eq!(fonts.font_for_id(0).1, fonts.index);
 
         match &fonts.arabic {
             Some(arabic) => {
-                let (font, _, index) = fonts.font_for_id(1);
+                let (font, index) = fonts.font_for_id(1);
                 assert!(
                     std::ptr::eq(font, &arabic.font),
                     "id 1 must be the Arabic face"
@@ -502,7 +506,7 @@ mod tests {
 
         for (offset, face) in fonts.symbols.iter().enumerate() {
             let id = u8::try_from(offset + 2).expect("symbol face id");
-            let (font, _, index) = fonts.font_for_id(id);
+            let (font, index) = fonts.font_for_id(id);
             assert!(
                 std::ptr::eq(font, &face.font),
                 "id {id} must be a symbol face"

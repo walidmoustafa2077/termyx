@@ -38,7 +38,7 @@ pub struct GlyphCache {
 impl GlyphCache {
     pub fn new() -> Self {
         Self {
-            atlas: Atlas::new(4096, 4096),
+            atlas: Atlas::new(2048, 2048),
             slots: HashMap::new(),
         }
     }

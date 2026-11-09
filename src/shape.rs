@@ -50,12 +50,12 @@ impl<'a> Faces<'a> {
     ///
     /// [`FontSet`]: crate::fonts::FontSet
     pub fn from_fonts(fonts: &'a crate::fonts::FontSet) -> Option<Self> {
-        let primary = Face::from_slice(&fonts.data, fonts.index)?;
+        let primary = Face::from_slice(fonts.font.as_slice(), fonts.index)?;
         let arabic = if fonts.has_arabic() {
             fonts
                 .arabic
                 .as_ref()
-                .and_then(|face| Face::from_slice(&face.data, face.index))
+                .and_then(|face| Face::from_slice(face.font.as_slice(), face.index))
         } else {
             None
         };

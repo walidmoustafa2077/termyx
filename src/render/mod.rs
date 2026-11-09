@@ -306,7 +306,7 @@ impl Renderer {
 
             for (glyph_index, glyph) in cluster.glyphs.iter().enumerate() {
                 let mut font_id = u8::from(run.arabic);
-                let (mut font, _, _) = self.fonts.font_for(run.arabic);
+                let (mut font, _) = self.fonts.font_for(run.arabic);
                 // ab_glyph ids are u16; an out-of-range id becomes .notdef.
                 let mut id = GlyphId(u16::try_from(glyph.glyph_id).unwrap_or(0));
                 // Only the cluster's first glyph may switch faces: later glyphs
@@ -316,7 +316,7 @@ impl Renderer {
                     if let Some((symbol_face, symbol_glyph)) = self.fonts.symbol_for(&cluster.text)
                     {
                         font_id = symbol_face;
-                        (font, _, _) = self.fonts.font_for_id(symbol_face);
+                        (font, _) = self.fonts.font_for_id(symbol_face);
                         id = symbol_glyph;
                     }
                 }
