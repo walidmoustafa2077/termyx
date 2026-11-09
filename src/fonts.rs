@@ -96,7 +96,7 @@ impl FontSet {
         if advance <= 0.0 {
             advance = scaled.h_advance(font.glyph_id('0'));
         }
-        let cell_w = advance.ceil().max(1.0) as u32;
+        let cell_w = advance.round().max(1.0) as u32;
         let cell_h = ((ascent - descent) * line_height).ceil().max(1.0) as u32;
 
         let arabic = load_arabic(&database, arabic_family, size_px, cell_w);
