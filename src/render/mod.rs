@@ -210,9 +210,9 @@ impl Renderer {
         cursor: Option<(usize, usize, CursorShape)>,
     ) {
         let padding = self.padding as f32;
-        // The cell grid comes from the primary face; a system Arabic fallback
-        // with a taller ascent may paint a pixel or two above the cell top.
-        let baseline = padding + row as f32 * cell_h + self.fonts.ascent;
+        // Share one baseline across the primary and Arabic faces so Arabic
+        // sits on the same line as Latin instead of floating above it.
+        let baseline = padding + row as f32 * cell_h + self.fonts.line_ascent();
         let units = run.units_per_em.max(1) as f32;
         let face_scale = if run.arabic {
             self.fonts.arabic.as_ref().map_or(1.0, |face| face.scale)
@@ -222,16 +222,15 @@ impl Renderer {
         let scale = self.fonts.size_px * face_scale / units;
         // Shape the whole Arabic run continuously. Snapping each cluster to
         // its own cell leaves side-bearing gaps that break cursive joins.
-        let arabic_span = (run.slots.end - run.slots.start) as f32 * cell_w;
         let arabic_natural: f32 = run
             .clusters
             .iter()
             .flat_map(|cluster| cluster.glyphs.iter())
             .map(|glyph| glyph.x_advance as f32 * scale)
             .sum();
-        let mut arabic_pen = padding
-            + run.slots.start as f32 * cell_w
-            + ((arabic_span - arabic_natural) * 0.5).max(0.0);
+        // Right-align the Arabic run to its slot span so any excess width sits
+        // before the Arabic block (next to the Latin text), not split around it.
+        let mut arabic_pen = padding + run.slots.end as f32 * cell_w - arabic_natural;
 
         for cluster in &run.clusters {
             let Some(first) = line.cells.get(cluster.cells.start) else {

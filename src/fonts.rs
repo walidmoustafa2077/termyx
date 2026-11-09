@@ -123,6 +123,17 @@ impl FontSet {
         self.arabic.is_some()
     }
 
+    /// The ascent used to place the shared text baseline. Uses the taller of
+    /// the primary and Arabic faces so Arabic and Latin sit on the same line.
+    pub fn line_ascent(&self) -> f32 {
+        let arabic = self.arabic.as_ref().map_or(0.0, |face| {
+            face.font
+                .as_scaled(PxScale::from(self.size_px * face.scale))
+                .ascent()
+        });
+        self.ascent.max(arabic)
+    }
+
     /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces.
     /// Unknown ids fall back to the primary face.
     pub fn font_for_id(&self, id: u8) -> (&FontVec, &[u8], u32) {
