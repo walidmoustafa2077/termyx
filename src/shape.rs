@@ -282,10 +282,11 @@ pub fn shape_row(
 
             let mut clusters = Vec::with_capacity(groups.len());
             for (cluster, glyphs) in groups {
+                // The successor in the sorted cluster starts, found without a
+                // linear scan: long rows make the naive search quadratic.
                 let next = starts
-                    .iter()
+                    .get(starts.partition_point(|candidate| *candidate <= cluster))
                     .copied()
-                    .find(|candidate| *candidate > cluster)
                     .unwrap_or(end);
                 let first = row.cell_of_byte(cluster);
                 let mut last = row.cell_of_byte(next.saturating_sub(1).max(cluster));

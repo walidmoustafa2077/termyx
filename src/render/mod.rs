@@ -383,10 +383,9 @@ impl Renderer {
     }
 
     fn draw_background(&mut self) {
-        let width = self.pixmap.width() as f32;
-        let height = self.pixmap.height() as f32;
-        let color = self.theme.background;
-        self.fill_rect(0.0, 0.0, width, height, color);
+        // The background covers the whole pixmap, so a bulk fill is cheaper
+        // than walking it as a rectangle, and a measurable slice of the frame.
+        self.pixmap.fill(self.theme.background.to_tiny());
     }
 
     fn resolve(&self, color: Color) -> Rgb {
@@ -489,46 +488,54 @@ fn blit_scaled(
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let stride = width as usize * 4;
-    let dst_w = ((slot.rect.w / SUBPIXELS) as f32 * scale_x)
-        .round()
-        .max(1.0) as i32;
+    let src_w = slot.rect.w / SUBPIXELS;
+    let dst_w = (src_w as f32 * scale_x).round().max(1.0) as i32;
     let dst_x = pen_x.round() as i32 + (slot.bearing_x as f32 * scale_x).round() as i32;
     let dst_y = baseline.round() as i32 + slot.bearing_y;
-    let atlas_width = atlas.width();
+    let atlas_width = atlas.width() as usize;
+    let atlas_data = atlas.data();
+    let gamma = gamma_table();
+    let color = ink.color;
+    // Nearly every glyph is one cell wide, so its columns map straight through
+    // and the per-pixel float division can be skipped.
+    let unscaled = (scale_x - 1.0).abs() < f32::EPSILON;
     let data = pixmap.data_mut();
     for row in 0..slot.rect.h as i32 {
+        let y = dst_y + row;
+        if y < 0 || y >= height {
+            continue;
+        }
+        let mask_row = (slot.rect.y as i32 + row) as usize * atlas_width;
         for col in 0..dst_w {
             let x = dst_x + col;
-            let y = dst_y + row;
-            if x < 0 || y < 0 || x >= width || y >= height {
+            if x < 0 || x >= width {
                 continue;
             }
-            let src_col = (col as f32 / scale_x)
-                .floor()
-                .min(slot.rect.w.saturating_div(SUBPIXELS).saturating_sub(1) as f32)
-                as u32;
-            let base = slot.rect.x + src_col * SUBPIXELS;
-            let mask_y = slot.rect.y as i32 + row;
-            let mut subs = [0u8; 3];
-            for (sub, value) in subs.iter_mut().enumerate() {
-                let index = mask_y as u32 * atlas_width + base + sub as u32;
-                let mut coverage = atlas.data()[index as usize];
-                if ink.bold && base > slot.rect.x {
-                    // Synthetic bold: borrow coverage from the logical left
-                    // neighbour so stems thicken without a separate bold face.
-                    let left = atlas.data()[(index - SUBPIXELS) as usize];
-                    coverage = coverage.max(left);
-                }
-                *value = coverage;
+            let src_col = if unscaled {
+                col as u32
+            } else {
+                (col as f32 / scale_x).floor().min((src_w - 1) as f32) as u32
+            };
+            let mask = mask_row + slot.rect.x as usize + src_col as usize * SUBPIXELS as usize;
+            let mut c0 = atlas_data[mask];
+            let mut c1 = atlas_data[mask + 1];
+            let mut c2 = atlas_data[mask + 2];
+            if ink.bold && src_col > 0 {
+                // Synthetic bold: borrow coverage from the logical left
+                // neighbour so stems thicken without a separate bold face.
+                c0 = c0.max(atlas_data[mask - 3]);
+                c1 = c1.max(atlas_data[mask - 2]);
+                c2 = c2.max(atlas_data[mask - 1]);
             }
-            if subs.iter().all(|value| *value == 0) {
+            let sum = usize::from(c0) + usize::from(c1) + usize::from(c2);
+            if sum == 0 {
                 continue;
             }
-            let alpha = gamma_correct(subs);
+            let alpha = u32::from(gamma[sum]);
             let index = y as usize * stride + x as usize * 4;
-            data[index] = blend(data[index], ink.color.r, alpha);
-            data[index + 1] = blend(data[index + 1], ink.color.g, alpha);
-            data[index + 2] = blend(data[index + 2], ink.color.b, alpha);
+            data[index] = blend_u8(data[index], color.r, alpha);
+            data[index + 1] = blend_u8(data[index + 1], color.g, alpha);
+            data[index + 2] = blend_u8(data[index + 2], color.b, alpha);
         }
     }
 }
@@ -541,15 +548,30 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)).round() as u8
 }
 
+/// Integer counterpart of [`blend`] for the glyph path, where a per-pixel
+/// floating-point multiply shows up in the full-frame budget.
+#[inline]
+fn blend_u8(dst: u8, src: u8, alpha: u32) -> u8 {
+    ((u32::from(src) * alpha + u32::from(dst) * (255 - alpha) + 127) / 255) as u8
+}
+
 /// Horizontal sub-pixel coverages average into one grayscale alpha. Windows
 /// Terminal renders small text with grayscale antialiasing, so deriving a
 /// separate red/green/blue alpha from each sub-pixel column would tint every
 /// edge with red and blue fringes the user does not see in the console host.
 /// The gamma keeps thin stems visible on a dark background.
-fn gamma_correct(coverage: [u8; 3]) -> f32 {
+fn gamma_table() -> &'static [u8; 766] {
     const GAMMA: f32 = 1.2;
-    let mean = coverage.iter().map(|value| f32::from(*value)).sum::<f32>() / (3.0 * 255.0);
-    mean.powf(GAMMA)
+    // `powf` dominates a full-frame redraw, and the mean only has 766
+    // reachable values, so evaluate it once per sum instead of per pixel.
+    static LUT: std::sync::OnceLock<[u8; 766]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut table = [0; 766];
+        for (sum, alpha) in table.iter_mut().enumerate() {
+            *alpha = ((sum as f32 / 765.0).powf(GAMMA) * 255.0).round() as u8;
+        }
+        table
+    })
 }
 
 #[cfg(test)]
@@ -1700,6 +1722,85 @@ mod tests {
         assert!(
             !painted_columns(&with).is_empty(),
             "the base glyph must still paint"
+        );
+    }
+
+    /// M5 performance gate (spec §11): a full 200x50 redraw must stay under
+    /// 8 ms. Ignored by default because it measures rather than asserts
+    /// behavior; run it in release:
+    ///
+    /// `cargo test --release full_frame_redraw -- --ignored --nocapture`
+    #[test]
+    #[ignore = "performance measurement; run with --release --ignored --nocapture"]
+    fn full_frame_redraw_at_200x50_stays_within_budget() {
+        use std::time::{Duration, Instant};
+
+        let mut renderer = default_renderer();
+        let cols = 200usize;
+        let rows = 50usize;
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        let padding = renderer.padding();
+        assert!(renderer.resize(
+            cols as u32 * cell_w + 2 * padding,
+            rows as u32 * cell_h + 2 * padding
+        ));
+
+        let text = "The quick brown fox jumps over the lazy dog. 0123456789 ";
+        let line = RowSnapshot {
+            cells: text
+                .chars()
+                .cycle()
+                .take(cols)
+                .map(|ch| Cell {
+                    text: ch.to_string(),
+                    width: 1,
+                    style: Style::default(),
+                })
+                .collect(),
+            wrapped: false,
+        };
+        let snapshot = GridSnapshot {
+            cols,
+            rows,
+            lines: vec![line; rows],
+            cursor: CursorState {
+                row: rows - 1,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+                blinking: false,
+            },
+            display_offset: 0,
+            history: 0,
+        };
+        let maps = vec![VisualMap::identity(cols); rows];
+
+        // Warm the glyph atlas so the measurement covers drawing, not discovery.
+        renderer.draw(&snapshot, &maps, None);
+
+        const FRAMES: usize = 40;
+        let mut samples = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            let start = Instant::now();
+            renderer.draw(&snapshot, &maps, None);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        let median = samples[FRAMES / 2];
+        let fastest = samples[0];
+        let slowest = samples[FRAMES - 1];
+        println!("full frame 200x50: median {median:?}, fastest {fastest:?}, slowest {slowest:?}");
+        // A shared CI box has scheduling spikes, so the fastest frame is the
+        // honest measure of the renderer's own cost; the median has to hold too.
+        assert!(
+            fastest < Duration::from_millis(8),
+            "a 200x50 redraw took {fastest:?} at best, the budget is 8 ms"
+        );
+        assert!(
+            median < Duration::from_millis(8),
+            "a 200x50 redraw took {median:?} at the median, the budget is 8 ms"
         );
     }
 }
