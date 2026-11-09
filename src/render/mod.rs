@@ -150,8 +150,8 @@ impl Renderer {
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
-            self.pixmap.height(),
             self.padding,
+            self.fonts.cell_h,
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
@@ -1323,8 +1323,8 @@ mod tests {
 
         let geom = crate::scrollbar::geometry(
             renderer.pixmap.width(),
-            renderer.pixmap.height(),
             renderer.padding,
+            renderer.fonts.cell_h,
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
@@ -1354,8 +1354,8 @@ mod tests {
 
         let rest = crate::scrollbar::geometry(
             renderer.pixmap.width(),
-            renderer.pixmap.height(),
             renderer.padding,
+            renderer.fonts.cell_h,
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
@@ -1364,8 +1364,8 @@ mod tests {
         .expect("history should show a scrollbar");
         let hovered = crate::scrollbar::geometry(
             renderer.pixmap.width(),
-            renderer.pixmap.height(),
             renderer.padding,
+            renderer.fonts.cell_h,
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
