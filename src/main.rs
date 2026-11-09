@@ -15,6 +15,11 @@ mod selection;
 mod shape;
 mod term;
 mod theme;
+// Geometry only until the app builds a layout (`App::rebuild_layout`) and the
+// renderer paints it; the test build carries it so the product stays free of
+// unreferenced code.
+#[cfg(test)]
+mod ui;
 mod visual;
 
 use std::path::PathBuf;
