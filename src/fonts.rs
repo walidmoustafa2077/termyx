@@ -62,9 +62,6 @@ pub struct FontSet {
     // Published metric (Phase 0 plan, Task 5); the renderer only needs ascent.
     #[allow(dead_code)]
     pub descent: f32,
-    /// Synthetic bold: thicken glyph coverage so the UI matches Windows
-    /// Terminal's heavier default stem weight with the installed faces.
-    pub bold: bool,
     pub arabic: Option<FontFace>,
     pub symbols: Vec<FontFace>,
 }
@@ -108,7 +105,6 @@ impl FontSet {
             cell_h,
             ascent,
             descent,
-            bold: true,
             arabic,
             symbols,
         })

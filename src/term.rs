@@ -24,6 +24,7 @@ pub enum Color {
 pub struct Style {
     pub fg: Color,
     pub bg: Option<Color>,
+    pub bold: bool,
     pub inverse: bool,
     pub hidden: bool,
     pub underline: bool,
@@ -352,11 +353,12 @@ fn map_cursor_shape(shape: AnsiCursorShape) -> CursorShape {
 }
 
 fn convert_cell(cell: &TermCell) -> Cell {
-    // Bold, italic, and dim are deliberately deferred: the renderer has no
-    // bold/italic face or dim blending yet.
+    // Bold is synthesized from the coverage mask; italic and dim remain
+    // deferred because the renderer has no italic face or dim blending.
     let style = Style {
         fg: map_fg(cell.fg),
         bg: map_bg(cell.bg),
+        bold: cell.flags.contains(Flags::BOLD),
         inverse: cell.flags.contains(Flags::INVERSE),
         hidden: cell.flags.contains(Flags::HIDDEN),
         underline: cell.flags.contains(Flags::UNDERLINE),
@@ -451,6 +453,15 @@ mod tests {
         term.feed(b"\x1b[31mred");
         let snapshot = term.snapshot();
         assert_eq!(snapshot.lines[0].cells[0].style.fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn sgr_bold_is_captured_and_off_by_default() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"plain\x1b[1mbold");
+        let snapshot = term.snapshot();
+        assert!(!snapshot.lines[0].cells[0].style.bold);
+        assert!(snapshot.lines[0].cells[5].style.bold);
     }
 
     #[test]

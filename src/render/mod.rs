@@ -267,7 +267,7 @@ impl Renderer {
                         y,
                         Ink {
                             color,
-                            bold: self.fonts.bold,
+                            bold: first.style.bold,
                         },
                         scale_x,
                     );
