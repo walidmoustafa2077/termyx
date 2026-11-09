@@ -18,10 +18,11 @@ pub struct ScrollbarGeometry {
 }
 
 /// Thumb geometry for the given viewport and scrollback state.
-/// Returns `None` when there is no history or the viewport is too narrow.
-/// The track spans the viewport height so the thumb reaches both ends.
-/// `hovered` widens the thumb leftward so its right edge stays pinned to the
-/// window edge.
+/// Returns `None` when there is no history, the viewport is too narrow, or the
+/// view is live at the bottom and the pointer is away from the scrollbar. The
+/// track spans the viewport height so the thumb reaches both ends. `hovered`
+/// widens the thumb leftward so its right edge stays pinned to the window edge
+/// and reveals the scrollbar at the live bottom.
 pub fn geometry(
     viewport_width: u32,
     viewport_height: u32,
@@ -31,7 +32,7 @@ pub fn geometry(
     offset: usize,
     hovered: bool,
 ) -> Option<ScrollbarGeometry> {
-    if history == 0 || viewport_height == 0 || rows == 0 {
+    if history == 0 || viewport_height == 0 || rows == 0 || (offset == 0 && !hovered) {
         return None;
     }
 
@@ -77,8 +78,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumb_sits_at_bottom_at_live_view() {
-        let geom = geometry(1000, 600, 4, 10, 20, 0, false).expect("scrollbar");
+    fn no_scrollbar_at_live_view_without_hover() {
+        assert!(geometry(1000, 600, 4, 10, 20, 0, false).is_none());
+    }
+
+    #[test]
+    fn hovering_reveals_the_thumb_at_live_view() {
+        let geom = geometry(1000, 600, 4, 10, 20, 0, true).expect("scrollbar");
         assert_eq!(geom.thumb_y + geom.thumb_h, geom.track_y + geom.track_h);
     }
 
