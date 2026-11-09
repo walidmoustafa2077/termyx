@@ -496,6 +496,15 @@ mod tests {
     }
 
     #[test]
+    fn dragging_across_blank_cells_still_paints() {
+        let maps = identity_maps(1, 6);
+        let mut selection = Selection::visual(position(0, 1));
+        selection.update(position(0, 4));
+        assert!(selection.is_selected(0, 3, 3, &maps));
+        assert!(!selection.is_selected(0, 5, 5, &maps));
+    }
+
+    #[test]
     fn collapsed_word_selection_still_paints() {
         let maps = identity_maps(1, 4);
         let selection = Selection::new(position(0, 2));

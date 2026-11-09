@@ -162,11 +162,12 @@ impl Terminal {
         };
         let config = TermConfig {
             scrolling_history: scrollback,
-            // Windows Terminal's default is a non-blinking bar; applications can
-            // still override it with DECSCUSR (which sets `cursor_style`).
+            // A blinking bar matches what users see in Windows Terminal;
+            // applications can still override it with DECSCUSR (which sets
+            // `cursor_style`).
             default_cursor_style: AnsiCursorStyle {
                 shape: AnsiCursorShape::Beam,
-                blinking: false,
+                blinking: true,
             },
             ..TermConfig::default()
         };
@@ -671,7 +672,7 @@ mod tests {
     #[test]
     fn cursor_blinking_follows_decscusr() {
         let mut term = Terminal::new(20, 5, 1_000);
-        assert!(!term.snapshot().cursor.blinking, "default is a steady bar");
+        assert!(term.snapshot().cursor.blinking, "default is a blinking bar");
 
         term.feed(b"\x1b[1 q");
         let cursor = term.snapshot().cursor;
@@ -689,7 +690,7 @@ mod tests {
         term.feed(b"\x1b[0 q");
         let cursor = term.snapshot().cursor;
         assert_eq!(cursor.shape, CursorShape::Beam);
-        assert!(!cursor.blinking, "DECSCUSR 0 restores the default");
+        assert!(cursor.blinking, "DECSCUSR 0 restores the default");
     }
 
     #[test]
