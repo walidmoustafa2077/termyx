@@ -179,7 +179,14 @@ fn script_segments(row: &RowText, cells: Range<usize>) -> Vec<(Range<usize>, boo
         if row.widths.get(cell).copied().unwrap_or(0) == 0 && cell > start {
             continue;
         }
-        let arabic = contains_arabic(&row.text[row.cell_starts[cell]..row.cell_starts[cell + 1]]);
+        let text = &row.text[row.cell_starts[cell]..row.cell_starts[cell + 1]];
+        // A space carries no script of its own. Keep it inside the current
+        // segment so Arabic words are shaped and laid out as one run instead
+        // of two separately centered runs with a large gap between them.
+        if current.is_some() && text.chars().all(char::is_whitespace) {
+            continue;
+        }
+        let arabic = contains_arabic(text);
         match current {
             None => current = Some(arabic),
             Some(previous) if previous != arabic => {
@@ -610,6 +617,27 @@ mod tests {
             runs[1].units_per_em,
             faces.arabic.as_ref().expect("arabic face").units_per_em()
         );
+    }
+
+    #[test]
+    fn arabic_words_with_spaces_stay_in_one_segment() {
+        let fonts = crate::fonts::FontSet::load("Consolas", "Arial", 14.0, 1.2)
+            .or_else(|_| crate::fonts::FontSet::load("DejaVu Sans Mono", "Arial", 14.0, 1.2))
+            .expect("a monospace font must exist");
+        if !fonts.has_arabic() {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        }
+        let faces = Faces::from_fonts(&fonts).expect("the loaded faces must parse");
+        let cells = [
+            "م", "ر", "ح", "ب", "ا", " ", "ب", "ا", "ل", "ع", "ا", "ل", "م",
+        ];
+        let line = row(&cells);
+        let text = RowText::flatten(&line);
+        let map = VisualMap::identity(line.cells.len());
+        let runs = shape(&text, &map, &faces);
+        let arabic = runs.iter().find(|run| run.arabic).expect("Arabic segment");
+        assert_eq!(arabic.slots, 0..cells.len());
     }
 
     #[test]
