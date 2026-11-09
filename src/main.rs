@@ -8,6 +8,7 @@ mod fonts;
 mod icon;
 mod input;
 mod platform;
+mod profiles;
 mod pty;
 mod render;
 mod scrollbar;

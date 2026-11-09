@@ -3,7 +3,33 @@
 use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// One entry of the `+` and `⌄` menus: a name to show and the shell to start.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProfileConfig {
+    pub name: String,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl ProfileConfig {
+    fn windows_defaults() -> [Self; 2] {
+        [
+            Self {
+                name: "Windows PowerShell".to_string(),
+                program: "powershell.exe".to_string(),
+                args: Vec::new(),
+            },
+            Self {
+                name: "Command Prompt".to_string(),
+                program: "cmd.exe".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub font: FontConfig,
@@ -13,6 +39,26 @@ pub struct Config {
     pub selection: SelectionConfig,
     pub theme: ThemeConfig,
     pub shell: ShellConfig,
+    #[serde(default)]
+    pub profiles: Vec<ProfileConfig>,
+    #[serde(default)]
+    pub default_profile: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            font: FontConfig::default(),
+            bidi: BidiConfig::default(),
+            window: WindowConfig::default(),
+            scrollback: ScrollbackConfig::default(),
+            selection: SelectionConfig::default(),
+            theme: ThemeConfig::default(),
+            shell: ShellConfig::default(),
+            profiles: ProfileConfig::windows_defaults().to_vec(),
+            default_profile: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +224,7 @@ impl Default for ThemeConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ShellConfig {
     pub program: String,
@@ -219,6 +265,8 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
         ],
     ),
     ("shell", &["program", "args"]),
+    ("profiles", &["name", "program", "args"]),
+    ("default_profile", &[]),
 ];
 
 fn warn_unknown_keys(value: &toml::Value) {
@@ -231,12 +279,28 @@ fn warn_unknown_keys(value: &toml::Value) {
         }
     }
     for (section, keys) in KNOWN_KEYS {
-        let Some(fields) = table.get(*section).and_then(toml::Value::as_table) else {
+        let Some(entry) = table.get(*section) else {
             continue;
         };
-        for key in fields.keys() {
-            if !keys.contains(&key.as_str()) {
-                tracing::warn!("unknown key {section}.{key}; ignoring");
+        let value = match entry {
+            toml::Value::Array(items) => match items.first() {
+                Some(toml::Value::Table(_)) => Some(entry),
+                _ => None,
+            },
+            toml::Value::Table(_) => Some(entry),
+            _ => None,
+        };
+        let Some(value) = value else { continue };
+        let tables: Vec<&toml::Table> = match value {
+            toml::Value::Array(items) => items.iter().filter_map(toml::Value::as_table).collect(),
+            toml::Value::Table(table) => vec![table],
+            _ => continue,
+        };
+        for table in tables {
+            for key in table.keys() {
+                if !keys.contains(&key.as_str()) {
+                    tracing::warn!("unknown key {section}.{key}; ignoring");
+                }
             }
         }
     }
@@ -265,6 +329,12 @@ impl Config {
         self.window.width = self.window.width.clamp(200, 10_000);
         self.window.height = self.window.height.clamp(200, 10_000);
         self.window.padding = self.window.padding.clamp(0, 64);
+        if self.profiles.is_empty() {
+            self.profiles = ProfileConfig::windows_defaults().to_vec();
+        }
+        if self.default_profile >= self.profiles.len() {
+            self.default_profile = 0;
+        }
         self
     }
 
@@ -449,5 +519,45 @@ mod tests {
         let p = default_config_path();
         assert!(p.to_string_lossy().contains("termyx"));
         assert!(p.to_string_lossy().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn profiles_default_to_windows_power_shell_and_command_prompt() {
+        let config = Config::from_toml_str("").unwrap();
+        let names: Vec<&str> = config.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Windows PowerShell", "Command Prompt"]);
+        assert_eq!(config.profiles[0].program, "powershell.exe");
+        assert_eq!(config.profiles[1].program, "cmd.exe");
+        assert_eq!(config.default_profile, 0);
+    }
+
+    #[test]
+    fn profiles_are_read_from_the_config_file() {
+        let config = Config::from_toml_str(
+            r#"
+            default_profile = 1
+
+            [[profiles]]
+            name = "Build shell"
+            program = "pwsh.exe"
+            args = ["-NoLogo"]
+
+            [[profiles]]
+            name = "Admin"
+            program = "cmd.exe"
+            args = ["/K", "echo hi"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles.len(), 2);
+        assert_eq!(config.profiles[0].name, "Build shell");
+        assert_eq!(config.profiles[0].args, ["-NoLogo"]);
+        assert_eq!(config.default_profile, 1);
+    }
+
+    #[test]
+    fn default_profile_is_clamped_to_the_list() {
+        let config = Config::from_toml_str("default_profile = 9").unwrap();
+        assert_eq!(config.default_profile, 0);
     }
 }
