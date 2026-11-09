@@ -502,9 +502,11 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
 }
 
 /// Grayscale coverage on a dark background looks washed out compared with
-/// ClearType. A mild gamma lift restores contrast without changing metrics.
+/// the console host: blending alpha in encoded space underestimates edge
+/// darkness. Applying the reciprocal sRGB exponent (1/2.2 ≈ 0.45) puts the
+/// glyphs near ClearType stroke weight without touching metrics.
 fn gamma_correct(coverage: u8) -> u8 {
-    const TEXT_GAMMA: f32 = 0.85;
+    const TEXT_GAMMA: f32 = 0.45;
     ((coverage as f32 / 255.0).powf(TEXT_GAMMA) * 255.0).round() as u8
 }
 
@@ -513,6 +515,18 @@ mod tests {
     use super::*;
     use crate::config::{BaseDirection, ThemeConfig};
     use crate::term::{Affinity, Cell, CursorShape, CursorState, LogicalPos, RowSnapshot, Style};
+
+    #[test]
+    fn gamma_correct_darkens_antialiased_edges_like_the_console_host() {
+        assert_eq!(gamma_correct(0), 0);
+        assert_eq!(gamma_correct(255), 255);
+        // Mid-tone coverage (typical glyph edge) must read clearly darker,
+        // matching the console host's heavier stroke weight.
+        let mid = gamma_correct(128);
+        assert!(mid >= 180, "mid coverage should darken, got {mid}");
+        // And the curve must stay monotonic, never invert.
+        assert!(gamma_correct(96) < mid);
+    }
 
     fn default_renderer() -> Renderer {
         let fonts = FontSet::load("Consolas", "Arial", 14.0, 1.2)
