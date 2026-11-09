@@ -16,7 +16,8 @@ pub struct ScrollbarGeometry {
 }
 
 /// Thumb geometry for the given viewport and scrollback state.
-/// Returns `None` when there is no history or the viewport is too narrow.
+/// Returns `None` when there is no history, the view is live at the bottom,
+/// or the viewport is too narrow.
 pub fn geometry(
     viewport_width: u32,
     padding: u32,
@@ -25,7 +26,7 @@ pub fn geometry(
     history: usize,
     offset: usize,
 ) -> Option<ScrollbarGeometry> {
-    if history == 0 || rows == 0 || cell_h == 0 {
+    if history == 0 || offset == 0 || rows == 0 || cell_h == 0 {
         return None;
     }
 
@@ -70,9 +71,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumb_sits_at_bottom_when_live() {
-        let geom = geometry(1000, 4, 20, 10, 20, 0).expect("scrollbar");
-        assert_eq!(geom.track_y + geom.track_h, geom.thumb_y + geom.thumb_h);
+    fn no_scrollbar_at_live_bottom() {
+        assert!(geometry(1000, 4, 20, 10, 20, 0).is_none());
+    }
+
+    #[test]
+    fn thumb_sits_at_bottom_when_scrolled_one_row_above_live() {
+        let geom = geometry(1000, 4, 20, 10, 20, 1).expect("scrollbar");
+        assert!(geom.thumb_y > geom.track_y);
     }
 
     #[test]
@@ -83,7 +89,7 @@ mod tests {
 
     #[test]
     fn offset_round_trips_for_top_middle_and_bottom() {
-        let geom = geometry(1000, 4, 20, 10, 100, 0).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 100, 50).expect("scrollbar");
         assert_eq!(offset_for_thumb_top(geom.track_y, &geom, 100), 100);
         let middle = geom.track_y + (geom.track_h - geom.thumb_h) / 2.0;
         assert_eq!(offset_for_thumb_top(middle, &geom, 100), 50);
@@ -99,7 +105,7 @@ mod tests {
 
     #[test]
     fn thumb_has_a_minimum_height() {
-        let geom = geometry(1000, 4, 20, 10, 1000, 0).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 1000, 500).expect("scrollbar");
         assert_eq!(geom.thumb_h, 12.0);
     }
 }
