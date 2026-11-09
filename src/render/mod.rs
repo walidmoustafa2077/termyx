@@ -458,7 +458,9 @@ fn blit_scaled(
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let stride = width as usize * 4;
-    let dst_w = (slot.rect.w as f32 * scale_x).round().max(1.0) as i32;
+    let dst_w = ((slot.rect.w / SUBPIXELS) as f32 * scale_x)
+        .round()
+        .max(1.0) as i32;
     let dst_x = pen_x.round() as i32 + (slot.bearing_x as f32 * scale_x).round() as i32;
     let dst_y = baseline.round() as i32 + slot.bearing_y;
     let atlas_width = atlas.width();
@@ -470,30 +472,37 @@ fn blit_scaled(
             if x < 0 || y < 0 || x >= width || y >= height {
                 continue;
             }
-            let src_col = (col as f32 / scale_x).floor().min((slot.rect.w - 1) as f32) as u32;
-            let mask_x = slot.rect.x + src_col;
+            let src_col = (col as f32 / scale_x)
+                .floor()
+                .min(slot.rect.w.saturating_div(SUBPIXELS).saturating_sub(1) as f32)
+                as u32;
+            let base = slot.rect.x + src_col * SUBPIXELS;
             let mask_y = slot.rect.y as i32 + row;
-            let coverage = atlas.data()[(mask_y as u32 * atlas_width + mask_x) as usize];
-            let coverage = if ink.bold && mask_x > slot.rect.x {
-                // Synthetic bold: borrow coverage from the left neighbour so
-                // stems thicken without needing a separate bold face.
-                let left = atlas.data()[(mask_y as u32 * atlas_width + mask_x - 1) as usize];
-                coverage.max(left)
-            } else {
-                coverage
-            };
-            if coverage == 0 {
+            let mut subs = [0u8; 3];
+            for (sub, value) in subs.iter_mut().enumerate() {
+                let index = mask_y as u32 * atlas_width + base + sub as u32;
+                let mut coverage = atlas.data()[index as usize];
+                if ink.bold && base > slot.rect.x {
+                    // Synthetic bold: borrow coverage from the logical left
+                    // neighbour so stems thicken without a separate bold face.
+                    let left = atlas.data()[(index - SUBPIXELS) as usize];
+                    coverage = coverage.max(left);
+                }
+                *value = coverage;
+            }
+            if subs.iter().all(|value| *value == 0) {
                 continue;
             }
-            let coverage = gamma_correct(coverage);
-            let alpha = coverage as f32 / 255.0;
+            let alphas = gamma_correct(subs);
             let index = y as usize * stride + x as usize * 4;
-            data[index] = blend(data[index], ink.color.r, alpha);
-            data[index + 1] = blend(data[index + 1], ink.color.g, alpha);
-            data[index + 2] = blend(data[index + 2], ink.color.b, alpha);
+            data[index] = blend(data[index], ink.color.r, alphas[0]);
+            data[index + 1] = blend(data[index + 1], ink.color.g, alphas[1]);
+            data[index + 2] = blend(data[index + 2], ink.color.b, alphas[2]);
         }
     }
 }
+
+const SUBPIXELS: u32 = 3;
 
 // Pixels are premultiplied RGBA over an opaque background (alpha stays 255),
 // so blending only the colour channels is correct.
@@ -501,13 +510,18 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)).round() as u8
 }
 
-/// Grayscale coverage on a dark background looks washed out compared with
-/// the console host: blending alpha in encoded space underestimates edge
-/// darkness. Applying the reciprocal sRGB exponent (1/2.2 ≈ 0.45) puts the
-/// glyphs near ClearType stroke weight without touching metrics.
-fn gamma_correct(coverage: u8) -> u8 {
-    const TEXT_GAMMA: f32 = 0.45;
-    ((coverage as f32 / 255.0).powf(TEXT_GAMMA) * 255.0).round() as u8
+/// Sub-pixel coverages blend into a ClearType-style fringe: each colour channel
+/// samples the glyph at a slightly different horizontal offset (the atlas mask
+/// carries three columns per logical pixel), and each gets its own gamma lift
+/// so edges on a dark background keep the console host's stroke weight
+/// without touching metrics.
+fn gamma_correct(coverage: [u8; 3]) -> [f32; 3] {
+    const GAMMAS: [f32; 3] = [0.44, 0.45, 0.47];
+    let mut alphas = [0f32; 3];
+    for sub in 0..3 {
+        alphas[sub] = (f32::from(coverage[sub]) / 255.0).powf(GAMMAS[sub]);
+    }
+    alphas
 }
 
 #[cfg(test)]
@@ -517,15 +531,35 @@ mod tests {
     use crate::term::{Affinity, Cell, CursorShape, CursorState, LogicalPos, RowSnapshot, Style};
 
     #[test]
-    fn gamma_correct_darkens_antialiased_edges_like_the_console_host() {
-        assert_eq!(gamma_correct(0), 0);
-        assert_eq!(gamma_correct(255), 255);
-        // Mid-tone coverage (typical glyph edge) must read clearly darker,
-        // matching the console host's heavier stroke weight.
-        let mid = gamma_correct(128);
-        assert!(mid >= 180, "mid coverage should darken, got {mid}");
-        // And the curve must stay monotonic, never invert.
-        assert!(gamma_correct(96) < mid);
+    fn glyph_edges_carry_subpixel_channel_fringes() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 2, cell_h * 2);
+        let snapshot = single_cell_snapshot(Cell {
+            text: "M".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+        let width = renderer.pixmap.width() as usize;
+        let fringe = renderer
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(index, px)| {
+                let px = **px;
+                let r = ((px >> 16) & 0xFF) as i32;
+                let g = ((px >> 8) & 0xFF) as i32;
+                let b = (px & 0xFF) as i32;
+                index % width != 0 && ((r - g).abs() >= 6 || (g - b).abs() >= 6)
+            })
+            .count();
+        assert!(
+            fringe > 0,
+            "glyph edges must show red/blue subpixel coverage, not flat gray"
+        );
     }
 
     fn default_renderer() -> Renderer {
@@ -571,17 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn gamma_lifts_midtones_without_clipping() {
-        assert_eq!(gamma_correct(0), 0);
-        assert_eq!(gamma_correct(255), 255);
-        assert!(gamma_correct(128) > 128);
-    }
-
-    #[test]
     fn synthetic_bold_thickens_stems() {
-        let mut atlas = Atlas::new(4, 4);
-        let rect = atlas.alloc(2, 2).expect("atlas space");
-        atlas.upload(rect, &[255, 0, 255, 0]);
+        let mut atlas = Atlas::new(8, 4);
+        // Two logical pixels wide: the first carries a stem, the second is
+        // empty, so synthetic bold has a left neighbour to borrow from.
+        let rect = atlas.alloc(6, 2).expect("atlas space");
+        atlas.upload(rect, &[255, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let slot = GlyphSlot {
             rect,
             bearing_x: 0,

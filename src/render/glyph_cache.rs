@@ -6,6 +6,13 @@ use ab_glyph::{Font, FontVec, GlyphId, PxScale};
 
 use super::atlas::{Atlas, Rect};
 
+/// Glyph masks are rasterized at this resolution multiplier and projected onto
+/// the horizontal sub-pixel columns, reproducing the console host's ClearType
+/// style coverage instead of plain grayscale anti-aliasing.
+const RASTER_SUPERSAMPLE: u32 = 4;
+/// RGB sub-pixel columns per logical pixel in the atlas mask.
+const SUBPIXELS: u32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     /// 0 = primary face, 1 = Arabic fallback face, 2.. = symbol fallback faces.
@@ -29,7 +36,7 @@ pub struct GlyphCache {
 impl GlyphCache {
     pub fn new() -> Self {
         Self {
-            atlas: Atlas::new(2048, 2048),
+            atlas: Atlas::new(4096, 4096),
             slots: HashMap::new(),
         }
     }
@@ -55,26 +62,77 @@ impl GlyphCache {
     }
 
     fn rasterize(&mut self, font: &FontVec, glyph: GlyphId, size_px: f32) -> Option<GlyphSlot> {
-        let scale = PxScale::from(size_px);
-        let outlined = font.outline_glyph(glyph.with_scale(scale))?;
+        // 1. Rasterize the outline at a 4x resolution so each sub-pixel column
+        //    has enough samples to approximate the coverage integral.
+        let big = RASTER_SUPERSAMPLE as f32;
+        let outlined = font.outline_glyph(glyph.with_scale(PxScale::from(size_px * big)))?;
         let bounds = outlined.px_bounds();
-        let width = bounds.width().ceil() as u32;
-        let height = bounds.height().ceil() as u32;
-        if width == 0 || height == 0 {
+        let cols = bounds.width().ceil().max(1.0) as u32;
+        let rows = bounds.height().ceil().max(1.0) as u32;
+        let cells_w = cols.div_ceil(RASTER_SUPERSAMPLE);
+        let cells_h = rows.div_ceil(RASTER_SUPERSAMPLE);
+        if cells_w == 0 || cells_h == 0 {
             return None;
         }
-        let rect = self.atlas.alloc(width, height)?;
-        let mut mask = vec![0u8; (width * height) as usize];
+        let big_w = cells_w * RASTER_SUPERSAMPLE;
+        let big_h = cells_h * RASTER_SUPERSAMPLE;
+
+        let mut big_mask = vec![0u8; (big_w * big_h) as usize];
         outlined.draw(|x, y, coverage| {
-            if x < width && y < height {
-                mask[(y * width + x) as usize] = (coverage * 255.0).round() as u8;
+            if x < big_w && y < big_h {
+                big_mask[(y * big_w + x) as usize] = (coverage * 255.0).round() as u8;
             }
         });
-        self.atlas.upload(rect, &mask);
+
+        // 2. Project onto the three sub-pixel columns: channel i of the logical
+        //    pixel samples the horizontal coverage curve at its own offset.
+        //    Vertically a single centre row is taken, matching the console
+        //    host's grid-snapped rows instead of smearing over the band.
+        let mask_w = cells_w * SUBPIXELS;
+        let mask_h = cells_h;
+        let stride = mask_w as usize;
+        let mut mask = vec![0u8; stride * mask_h as usize];
+        for y in 0..cells_h {
+            for x in 0..cells_w {
+                for sub in 0..SUBPIXELS {
+                    // Sample the centre of channel i: (i + 0.5) / 3 of the cell.
+                    let sample = (x as f32 + (sub as f32 + 0.5) / SUBPIXELS as f32) * big;
+                    let base = (sample.floor() as u32).min(big_w - 1);
+                    let next = (base + 1).min(big_w - 1);
+                    let frac = sample - base as f32;
+                    let y0 = (y * RASTER_SUPERSAMPLE + RASTER_SUPERSAMPLE / 2) as usize;
+                    let lo = big_mask[y0 * big_w as usize + base as usize] as f32;
+                    let hi = big_mask[y0 * big_w as usize + next as usize] as f32;
+                    let coverage = lo + (hi - lo) * frac;
+                    let index = y as usize * stride + (x * SUBPIXELS + sub) as usize;
+                    mask[index] = (coverage * 255.0).round() as u8;
+                }
+            }
+        }
+
+        // 3. ClearType-style horizontal filter: each channel mixes itself with
+        //    its sub-pixel neighbours so edge energy spreads like on an LCD
+        //    instead of spiking in one channel.
+        let mut filtered = vec![0u8; mask.len()];
+        let taps = [0.25f32, 0.5, 0.25];
+        for y in 0..mask_h as usize {
+            for k in 0..stride {
+                let mut acc = 0f32;
+                for (t, weight) in taps.iter().enumerate() {
+                    let offset = t as i32 - 1;
+                    let column = (k as i32 + offset).clamp(0, stride as i32 - 1) as usize;
+                    acc += weight * f32::from(mask[y * stride + column]);
+                }
+                filtered[y * stride + k] = (acc / taps.iter().sum::<f32>()).round() as u8;
+            }
+        }
+
+        let rect = self.atlas.alloc(mask_w, mask_h)?;
+        self.atlas.upload(rect, &filtered);
         Some(GlyphSlot {
             rect,
-            bearing_x: bounds.min.x.round() as i32,
-            bearing_y: bounds.min.y.round() as i32,
+            bearing_x: (bounds.min.x / big).round() as i32,
+            bearing_y: (bounds.min.y / big).round() as i32,
         })
     }
 }
