@@ -330,7 +330,15 @@ impl Config {
         self.window.height = self.window.height.clamp(200, 10_000);
         self.window.padding = self.window.padding.clamp(0, 64);
         if self.profiles.is_empty() {
-            self.profiles = ProfileConfig::windows_defaults().to_vec();
+            self.profiles = if self.shell == ShellConfig::default() {
+                ProfileConfig::windows_defaults().to_vec()
+            } else {
+                vec![ProfileConfig {
+                    name: "Default".to_string(),
+                    program: self.shell.program.clone(),
+                    args: self.shell.args.clone(),
+                }]
+            };
         }
         if self.default_profile >= self.profiles.len() {
             self.default_profile = 0;
@@ -559,5 +567,32 @@ mod tests {
     fn default_profile_is_clamped_to_the_list() {
         let config = Config::from_toml_str("default_profile = 9").unwrap();
         assert_eq!(config.default_profile, 0);
+    }
+
+    #[test]
+    fn custom_shell_becomes_the_only_profile() {
+        let config = Config::from_toml_str("[shell]\nprogram = \"pwsh.exe\"\n").unwrap();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].name, "Default");
+        assert_eq!(config.profiles[0].program, "pwsh.exe");
+        assert_eq!(config.default_profile, 0);
+    }
+
+    #[test]
+    fn unknown_keys_inside_profile_entries_are_ignored() {
+        let config = Config::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "Build shell"
+            program = "pwsh.exe"
+            args = ["-NoLogo"]
+            junk = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].name, "Build shell");
+        assert_eq!(config.profiles[0].program, "pwsh.exe");
+        assert_eq!(config.profiles[0].args, ["-NoLogo"]);
     }
 }
