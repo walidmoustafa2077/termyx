@@ -6,6 +6,7 @@ mod config;
 mod event;
 mod fonts;
 mod input;
+mod platform;
 mod pty;
 mod render;
 mod scrollbar;

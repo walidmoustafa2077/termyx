@@ -17,6 +17,7 @@ use crate::config::{BidiConfig, Config};
 use crate::event::UserEvent;
 use crate::fonts::FontSet;
 use crate::input::{self, KeyInput, Mods};
+use crate::platform;
 use crate::pty::PtySession;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry};
@@ -133,6 +134,7 @@ impl App {
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
+        platform::apply_dark_frame(&window, theme.background);
         let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
 
         let size = window.inner_size();
