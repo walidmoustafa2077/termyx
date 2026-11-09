@@ -199,9 +199,15 @@ impl Selection {
     ) -> bool {
         match self.mode {
             SelectionMode::Simple => self.contains(row, logical),
-            SelectionMode::Visual => self
-                .visual_range(row, maps)
-                .is_some_and(|(left, right)| (left..=right).contains(&visual)),
+            SelectionMode::Visual => {
+                // A plain click parks a collapsed drag without selecting
+                // anything; painting it would leave one blue cell behind.
+                if self.anchor == self.focus {
+                    return false;
+                }
+                self.visual_range(row, maps)
+                    .is_some_and(|(left, right)| (left..=right).contains(&visual))
+            }
             SelectionMode::Block => {
                 let Some((first, last, left, right)) = self.visual_bounds(maps) else {
                     return false;
@@ -370,6 +376,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,
@@ -441,6 +448,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,
@@ -478,6 +486,20 @@ mod tests {
             assert!(!selection.is_selected(0, logical, visual, &maps));
         }
         assert_eq!(selection.to_text_visual(&snapshot, &maps, true), "bcرح");
+    }
+
+    #[test]
+    fn collapsed_drag_paints_nothing() {
+        let maps = identity_maps(1, 4);
+        let selection = Selection::visual(position(0, 2));
+        assert!(!selection.is_selected(0, 2, 2, &maps));
+    }
+
+    #[test]
+    fn collapsed_word_selection_still_paints() {
+        let maps = identity_maps(1, 4);
+        let selection = Selection::new(position(0, 2));
+        assert!(selection.is_selected(0, 2, 2, &maps));
     }
 
     #[test]
@@ -549,6 +571,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,
@@ -576,6 +599,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,
@@ -603,6 +627,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,
@@ -638,6 +663,7 @@ mod tests {
                 affinity: Affinity::Before,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             },
             display_offset: 0,
             history: 0,

@@ -69,6 +69,8 @@ pub struct CursorState {
     pub affinity: Affinity,
     pub shape: CursorShape,
     pub visible: bool,
+    /// DECSCUSR and private mode 12 ask for a blinking cursor.
+    pub blinking: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -327,6 +329,7 @@ impl Terminal {
         let shape = map_cursor_shape(content.cursor.shape);
         let visible = content.cursor.shape != AnsiCursorShape::Hidden
             && content.mode.contains(TermMode::SHOW_CURSOR);
+        let blinking = self.term.cursor_style().blinking;
 
         let cursor = if content.display_offset == 0 {
             let row = content.cursor.point.line.0.max(0) as usize;
@@ -336,6 +339,7 @@ impl Terminal {
                 affinity: Affinity::Before,
                 shape,
                 visible,
+                blinking,
             }
         } else {
             CursorState {
@@ -344,6 +348,7 @@ impl Terminal {
                 affinity: Affinity::Before,
                 shape,
                 visible,
+                blinking,
             }
         };
 
@@ -661,6 +666,30 @@ mod tests {
 
         term.feed(b"\x1b[?25h");
         assert!(term.snapshot().cursor.visible);
+    }
+
+    #[test]
+    fn cursor_blinking_follows_decscusr() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        assert!(!term.snapshot().cursor.blinking, "default is a steady bar");
+
+        term.feed(b"\x1b[1 q");
+        let cursor = term.snapshot().cursor;
+        assert_eq!(cursor.shape, CursorShape::Block);
+        assert!(cursor.blinking, "DECSCUSR 1 is a blinking block");
+
+        term.feed(b"\x1b[2 q");
+        assert!(!term.snapshot().cursor.blinking, "DECSCUSR 2 is steady");
+
+        term.feed(b"\x1b[5 q");
+        let cursor = term.snapshot().cursor;
+        assert_eq!(cursor.shape, CursorShape::Beam);
+        assert!(cursor.blinking, "DECSCUSR 5 is a blinking bar");
+
+        term.feed(b"\x1b[0 q");
+        let cursor = term.snapshot().cursor;
+        assert_eq!(cursor.shape, CursorShape::Beam);
+        assert!(!cursor.blinking, "DECSCUSR 0 restores the default");
     }
 
     #[test]

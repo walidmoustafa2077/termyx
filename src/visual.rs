@@ -233,6 +233,7 @@ mod tests {
             affinity,
             shape: CursorShape::Block,
             visible: true,
+            blinking: false,
         }
     }
 

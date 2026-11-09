@@ -9,7 +9,7 @@ use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -43,6 +43,9 @@ const CLICK_TIMEOUT: Duration = Duration::from_millis(400);
 /// Largest cursor movement between two clicks of one multi-click gesture.
 const CLICK_DISTANCE: f64 = 4.0;
 
+/// How long the cursor stays visible or hidden while blinking.
+const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
@@ -66,6 +69,7 @@ pub struct App {
     scrollbar_drag: bool,
     scrollbar_grab: f32,
     scrollbar_hover: bool,
+    blink: CursorBlink,
     cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
@@ -92,6 +96,7 @@ impl App {
             scrollbar_drag: false,
             scrollbar_grab: 0.0,
             scrollbar_hover: false,
+            blink: CursorBlink::idle(),
             cursor_pos: (0.0, 0.0),
             cols: 80,
             rows: 24,
@@ -237,7 +242,19 @@ impl App {
         else {
             return;
         };
-        let snapshot = terminal.snapshot();
+        let mut snapshot = terminal.snapshot();
+        // A blinking cursor is hidden on the off phase. Repainting the whole
+        // frame is acceptable while damage tracking is out of scope.
+        let blinking =
+            snapshot.cursor.blinking && snapshot.cursor.visible && snapshot.display_offset == 0;
+        if blinking {
+            self.blink.start(Instant::now());
+            if !self.blink.visible {
+                snapshot.cursor.visible = false;
+            }
+        } else {
+            self.blink.stop();
+        }
         let maps: Vec<VisualMap> = snapshot
             .lines
             .iter()
@@ -267,6 +284,9 @@ impl App {
     }
 
     fn on_key(&mut self, event: KeyEvent) {
+        // Typing always reveals the cursor, so a keystroke is never typed into
+        // a cursor that happens to be in its hidden phase.
+        self.blink.restart(Instant::now());
         if self.modifiers.control_key() && self.modifiers.shift_key() {
             if let Key::Character(text) = &event.logical_key {
                 match text.as_str() {
@@ -438,6 +458,7 @@ impl App {
         let Some(input_button) = map_mouse_button(button) else {
             return;
         };
+        self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
             if self.scrollbar_drag && button != MouseButton::Left {
@@ -824,6 +845,56 @@ impl App {
     }
 }
 
+/// Blink phase for a DECSCUSR blinking cursor. `deadline` is `None` while the
+/// cursor is steady, so the event loop can wait for input instead of a timer.
+#[derive(Debug, Clone, Copy)]
+struct CursorBlink {
+    visible: bool,
+    deadline: Option<Instant>,
+}
+
+impl CursorBlink {
+    fn idle() -> Self {
+        Self {
+            visible: true,
+            deadline: None,
+        }
+    }
+
+    /// Starts the cycle the first frame that draws a blinking cursor.
+    fn start(&mut self, now: Instant) {
+        if self.deadline.is_none() {
+            self.visible = true;
+            self.deadline = Some(now + BLINK_INTERVAL);
+        }
+    }
+
+    /// Shows the cursor and restarts the cycle after user activity, so it never
+    /// hides just as the user types.
+    fn restart(&mut self, now: Instant) {
+        if self.deadline.is_some() {
+            self.visible = true;
+            self.deadline = Some(now + BLINK_INTERVAL);
+        }
+    }
+
+    /// Returns the cursor to steady and stops the timer.
+    fn stop(&mut self) {
+        self.visible = true;
+        self.deadline = None;
+    }
+
+    /// Flips the phase once the deadline passes. Returns whether it flipped.
+    fn advance(&mut self, now: Instant) -> bool {
+        if !self.deadline.is_some_and(|deadline| now >= deadline) {
+            return false;
+        }
+        self.visible = !self.visible;
+        self.deadline = Some(now + BLINK_INTERVAL);
+        true
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -892,6 +963,18 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.blink.advance(Instant::now()) {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        match self.blink.deadline {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -917,6 +1000,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorLeft { .. } => self.set_scrollbar_hover(false),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::Focused(focused) => {
+                if focused {
+                    // Coming back to the window shows the cursor immediately.
+                    self.blink.restart(Instant::now());
+                }
                 if !focused {
                     // A pressed button may never get its release after focus
                     // loss; balance the application and end local drags.
@@ -1395,5 +1482,43 @@ mod tests {
     #[test]
     fn collapsed_double_click_copies() {
         assert!(should_copy_on_release(2, true));
+    }
+
+    #[test]
+    fn blink_flips_after_the_interval_and_stops_when_steady() {
+        let now = Instant::now();
+        let mut blink = CursorBlink::idle();
+        blink.start(now);
+        assert!(blink.visible);
+        assert!(!blink.advance(now + BLINK_INTERVAL / 2));
+        assert!(blink.advance(now + BLINK_INTERVAL));
+        assert!(!blink.visible);
+        assert!(blink.advance(now + BLINK_INTERVAL * 2));
+        assert!(blink.visible);
+
+        blink.stop();
+        assert!(blink.visible);
+        assert_eq!(blink.deadline, None);
+        assert!(!blink.advance(now + BLINK_INTERVAL * 10));
+    }
+
+    #[test]
+    fn blink_restart_shows_the_cursor_and_extends_the_phase() {
+        let now = Instant::now();
+        let mut blink = CursorBlink::idle();
+        blink.start(now);
+        blink.advance(now + BLINK_INTERVAL);
+        assert!(!blink.visible);
+
+        blink.restart(now + BLINK_INTERVAL);
+        assert!(blink.visible);
+        assert_eq!(blink.deadline, Some(now + BLINK_INTERVAL * 2));
+    }
+
+    #[test]
+    fn steady_cursor_never_starts_a_timer() {
+        let mut blink = CursorBlink::idle();
+        blink.restart(Instant::now());
+        assert_eq!(blink.deadline, None);
     }
 }
