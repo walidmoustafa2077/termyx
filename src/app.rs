@@ -16,6 +16,7 @@ use winit::window::{Window, WindowId};
 use crate::config::{BidiConfig, Config};
 use crate::event::UserEvent;
 use crate::fonts::FontSet;
+use crate::icon;
 use crate::input::{self, KeyInput, Mods};
 use crate::platform;
 use crate::pty::PtySession;
@@ -107,6 +108,13 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_TITLE)
             .with_inner_size(LogicalSize::new(width, height));
+        let attributes = match icon::window_icon() {
+            Ok(icon) => attributes.with_window_icon(Some(icon)),
+            Err(err) => {
+                tracing::warn!("window icon unavailable: {err:#}");
+                attributes
+            }
+        };
         let window = Arc::new(event_loop.create_window(attributes)?);
         // Center on the primary monitor so the OS never places the window over
         // the taskbar or past the screen edge.

@@ -5,6 +5,7 @@ mod bidi;
 mod config;
 mod event;
 mod fonts;
+mod icon;
 mod input;
 mod platform;
 mod pty;
