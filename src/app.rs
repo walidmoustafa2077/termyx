@@ -585,8 +585,8 @@ impl App {
         let size = window.inner_size();
         scrollbar::geometry(
             size.width,
+            size.height,
             renderer.padding(),
-            renderer.fonts().cell_h,
             self.rows,
             terminal.history_size(),
             terminal.display_offset(),

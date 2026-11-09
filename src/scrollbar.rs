@@ -18,19 +18,20 @@ pub struct ScrollbarGeometry {
 }
 
 /// Thumb geometry for the given viewport and scrollback state.
-/// Returns `None` when there is no history, the view is live at the bottom,
-/// or the viewport is too narrow. `hovered` widens the thumb leftward so its
-/// right edge stays pinned to the window edge.
+/// Returns `None` when there is no history or the viewport is too narrow.
+/// The track spans the viewport height so the thumb reaches both ends.
+/// `hovered` widens the thumb leftward so its right edge stays pinned to the
+/// window edge.
 pub fn geometry(
     viewport_width: u32,
+    viewport_height: u32,
     padding: u32,
-    cell_h: u32,
     rows: usize,
     history: usize,
     offset: usize,
     hovered: bool,
 ) -> Option<ScrollbarGeometry> {
-    if history == 0 || offset == 0 || rows == 0 || cell_h == 0 {
+    if history == 0 || viewport_height == 0 || rows == 0 {
         return None;
     }
 
@@ -40,8 +41,8 @@ pub fn geometry(
         return None;
     }
 
-    let track_y = padding as f32;
-    let track_h = rows as f32 * cell_h as f32;
+    let track_y = EDGE_GAP;
+    let track_h = viewport_height as f32 - EDGE_GAP * 2.0;
     let total = (history + rows) as f32;
     let thumb_h = (track_h * rows as f32 / total).clamp(MIN_THUMB_H.min(track_h), track_h);
     let scroll = offset.min(history) as f32 / history as f32;
@@ -76,25 +77,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_scrollbar_at_live_bottom() {
-        assert!(geometry(1000, 4, 20, 10, 20, 0, false).is_none());
+    fn thumb_sits_at_bottom_at_live_view() {
+        let geom = geometry(1000, 600, 4, 10, 20, 0, false).expect("scrollbar");
+        assert_eq!(geom.thumb_y + geom.thumb_h, geom.track_y + geom.track_h);
     }
 
     #[test]
     fn thumb_sits_at_bottom_when_scrolled_one_row_above_live() {
-        let geom = geometry(1000, 4, 20, 10, 20, 1, false).expect("scrollbar");
+        let geom = geometry(1000, 600, 4, 10, 20, 1, false).expect("scrollbar");
         assert!(geom.thumb_y > geom.track_y);
     }
 
     #[test]
     fn thumb_sits_at_top_when_scrolled_to_history() {
-        let geom = geometry(1000, 4, 20, 10, 100, 100, false).expect("scrollbar");
+        let geom = geometry(1000, 600, 4, 10, 100, 100, false).expect("scrollbar");
         assert_eq!(geom.thumb_y, geom.track_y);
     }
 
     #[test]
     fn offset_round_trips_for_top_middle_and_bottom() {
-        let geom = geometry(1000, 4, 20, 10, 100, 50, false).expect("scrollbar");
+        let geom = geometry(1000, 600, 4, 10, 100, 50, false).expect("scrollbar");
         assert_eq!(offset_for_thumb_top(geom.track_y, &geom, 100), 100);
         let middle = geom.track_y + (geom.track_h - geom.thumb_h) / 2.0;
         assert_eq!(offset_for_thumb_top(middle, &geom, 100), 50);
@@ -104,20 +106,27 @@ mod tests {
 
     #[test]
     fn no_scrollbar_without_history_or_space() {
-        assert!(geometry(1000, 4, 20, 10, 0, 0, false).is_none());
-        assert!(geometry(4, 4, 20, 10, 20, 0, false).is_none());
+        assert!(geometry(1000, 600, 4, 10, 0, 0, false).is_none());
+        assert!(geometry(4, 600, 4, 10, 20, 0, false).is_none());
     }
 
     #[test]
     fn thumb_has_a_minimum_height() {
-        let geom = geometry(1000, 4, 20, 10, 1000, 500, false).expect("scrollbar");
+        let geom = geometry(1000, 600, 4, 10, 1000, 500, false).expect("scrollbar");
         assert_eq!(geom.thumb_h, 12.0);
     }
 
     #[test]
+    fn track_spans_the_viewport_height() {
+        let geom = geometry(1000, 600, 4, 10, 100, 50, false).expect("scrollbar");
+        assert_eq!(geom.track_y, EDGE_GAP);
+        assert_eq!(geom.track_y + geom.track_h, 600.0 - EDGE_GAP);
+    }
+
+    #[test]
     fn hovered_thumb_is_wider_and_keeps_its_right_edge() {
-        let rest = geometry(1000, 4, 20, 10, 100, 50, false).expect("scrollbar");
-        let hovered = geometry(1000, 4, 20, 10, 100, 50, true).expect("scrollbar");
+        let rest = geometry(1000, 600, 4, 10, 100, 50, false).expect("scrollbar");
+        let hovered = geometry(1000, 600, 4, 10, 100, 50, true).expect("scrollbar");
         assert!(hovered.width > rest.width);
         assert_eq!(hovered.x + hovered.width, rest.x + rest.width);
         assert_eq!(hovered.thumb_y, rest.thumb_y);
