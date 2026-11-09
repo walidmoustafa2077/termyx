@@ -122,10 +122,12 @@ to a later phase, and it has not been accepted or soak-tested.
   Without history those keys still reach the shell or TUI as modified keys.
 - Scrolling clears the current selection; selection does not yet stay anchored
   to scrollback content.
+- The thumb maps over the rows scrolling can actually reach: leading blank
+  scrollback rows are skipped, so dragging to the top stops at the first line
+  that carries text.
 
-Open questions: the thumb mapping and page size are provisional, blank history
-rows can stop the thumb before the top, and track clicks do not repeat while
-the button is held.
+Open questions: the thumb mapping and page size are provisional, and track
+clicks do not repeat while the button is held.
 
 ## Phase 2 acceptance
 

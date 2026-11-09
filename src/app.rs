@@ -290,7 +290,7 @@ impl App {
                 let has_history = self
                     .terminal
                     .as_ref()
-                    .is_some_and(|terminal| terminal.history_size() > 0);
+                    .is_some_and(|terminal| terminal.scrollable_history() > 0);
                 if has_history {
                     self.scroll_local(lines);
                     return;
@@ -620,7 +620,7 @@ impl App {
             renderer.padding(),
             renderer.fonts().cell_h,
             self.rows,
-            terminal.history_size(),
+            terminal.scrollable_history(),
             terminal.display_offset(),
             hovered,
         )
@@ -662,7 +662,7 @@ impl App {
         let Some(geom) = self.scrollbar_geometry(true) else {
             return;
         };
-        let Some(history) = self.terminal.as_ref().map(Terminal::history_size) else {
+        let Some(history) = self.terminal.as_ref().map(Terminal::scrollable_history) else {
             return;
         };
         let current = self
@@ -680,7 +680,7 @@ impl App {
         let Some(terminal) = self.terminal.as_mut() else {
             return false;
         };
-        if lines == 0 || terminal.history_size() == 0 {
+        if lines == 0 || terminal.scrollable_history() == 0 {
             return false;
         }
         let before = terminal.display_offset();

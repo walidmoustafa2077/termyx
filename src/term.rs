@@ -3,6 +3,7 @@
 use alacritty_terminal::event::Event;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::Line;
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use unicode_width::UnicodeWidthStr;
@@ -83,6 +84,8 @@ pub struct GridSnapshot {
     pub lines: Vec<RowSnapshot>,
     pub cursor: CursorState,
     pub display_offset: usize,
+    /// Scrollback rows the scrollbar can map to; leading blank rows are
+    /// excluded so the thumb reaches the top where scrolling stops.
     pub history: usize,
 }
 
@@ -246,6 +249,25 @@ impl Terminal {
         self.term.grid().history_size()
     }
 
+    /// Number of scrollback rows the viewport can reach. Leading blank rows
+    /// are excluded because [`Self::scroll_display`] stops on the first row
+    /// that carries text. The scrollbar maps its thumb over this range so the
+    /// thumb reaches the track top exactly where scrolling stops.
+    pub fn scrollable_history(&self) -> usize {
+        let history = self.history_size();
+        let mut blank = 0;
+        while blank < history && self.history_row_is_blank(blank) {
+            blank += 1;
+        }
+        history - blank
+    }
+
+    fn history_row_is_blank(&self, row: usize) -> bool {
+        let history = self.history_size();
+        let line = Line(-((history - row) as i32));
+        self.term.grid()[line][..].iter().all(|cell| cell.c == ' ')
+    }
+
     /// Scrolls the viewport by `delta` lines. Blank history rows are skipped,
     /// so scrolling back stops at the first line that carries text instead of
     /// parking the viewport on empty rows nobody wrote.
@@ -331,7 +353,7 @@ impl Terminal {
             lines,
             cursor,
             display_offset: content.display_offset,
-            history: self.history_size(),
+            history: self.scrollable_history(),
         }
     }
 
@@ -548,6 +570,24 @@ mod tests {
             .map(|cell| cell.text.as_str())
             .collect();
         assert_eq!(top.trim(), "prompt", "blank history rows must stay hidden");
+    }
+
+    #[test]
+    fn scrollable_history_ends_at_the_first_text_row() {
+        let mut term = Terminal::new(20, 3, 1_000);
+        // Two blank lines reach the scrollback before the shell writes anything.
+        term.feed(b"\r\n\r\nprompt\r\n");
+        for index in 0..10 {
+            term.feed(format!("line{index}\r\n").as_bytes());
+        }
+
+        let scrollable = term.scrollable_history();
+        assert!(scrollable < term.history_size());
+        term.scroll_display(1_000);
+        assert_eq!(term.display_offset(), scrollable);
+        // The scrollbar maps `display_offset` over `snapshot.history`, so the
+        // two must agree for the thumb to reach the track top.
+        assert_eq!(term.snapshot().history, scrollable);
     }
 
     #[test]
