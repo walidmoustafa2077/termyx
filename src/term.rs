@@ -246,8 +246,22 @@ impl Terminal {
         self.term.grid().history_size()
     }
 
+    /// Scrolls the viewport by `delta` lines. Blank history rows are skipped,
+    /// so scrolling back stops at the first line that carries text instead of
+    /// parking the viewport on empty rows nobody wrote.
     pub fn scroll_display(&mut self, delta: i32) {
         self.term.scroll_display(Scroll::Delta(delta));
+        while self.term.grid().display_offset() > 0 && self.top_row_is_blank() {
+            self.term.scroll_display(Scroll::Delta(-1));
+        }
+    }
+
+    fn top_row_is_blank(&self) -> bool {
+        self.term
+            .renderable_content()
+            .display_iter
+            .take(self.size.cols)
+            .all(|indexed| indexed.cell.c == ' ')
     }
 
     pub fn snapshot(&self) -> GridSnapshot {
@@ -515,6 +529,25 @@ mod tests {
         term.scroll_display(2);
         assert_eq!(term.display_offset(), 2);
         assert_eq!(term.snapshot().display_offset, 2);
+    }
+
+    #[test]
+    fn scroll_display_stops_at_the_first_text_row() {
+        let mut term = Terminal::new(20, 3, 1_000);
+        // Two blank lines reach the scrollback before the shell writes anything.
+        term.feed(b"\r\n\r\nprompt\r\n");
+        for index in 0..10 {
+            term.feed(format!("line{index}\r\n").as_bytes());
+        }
+
+        term.scroll_display(1_000);
+        let snapshot = term.snapshot();
+        let top: String = snapshot.lines[0]
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(top.trim(), "prompt", "blank history rows must stay hidden");
     }
 
     #[test]
