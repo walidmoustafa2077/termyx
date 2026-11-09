@@ -27,8 +27,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rfd = "0.15"
 arboard = "3"
+png = "0.17"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+embed-resource = "3"
