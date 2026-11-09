@@ -1640,6 +1640,29 @@ mod tests {
     }
 
     #[test]
+    fn the_scrollbar_track_starts_below_the_top_inset() {
+        let mut renderer = default_renderer();
+        renderer.resize(200, 300);
+        renderer.set_top_inset(32);
+        // Scrolled to the oldest history: the thumb rests at the track's top.
+        let snapshot = scroll_snapshot(10, 20, 20);
+        let maps: Vec<_> = (0..snapshot.rows)
+            .map(|_| VisualMap::identity(snapshot.cols))
+            .collect();
+        renderer.draw(&snapshot, &maps, None);
+        renderer.sync();
+
+        let top = *painted_rows(&renderer)
+            .first()
+            .expect("the thumb must paint");
+        assert_eq!(
+            top,
+            (renderer.padding + renderer.top_inset) as usize,
+            "the track must begin below the strip, not under it"
+        );
+    }
+
+    #[test]
     fn hovering_widens_the_scrollbar_thumb() {
         let mut renderer = default_renderer();
         renderer.resize(200, 300);

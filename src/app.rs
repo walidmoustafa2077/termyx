@@ -773,9 +773,7 @@ impl App {
         let (row, column) = cell_at(
             self.cursor_pos.0,
             self.cursor_pos.1,
-            (renderer.padding() + renderer.top_inset()) as f64,
-            renderer.fonts().cell_w as f64,
-            renderer.fonts().cell_h as f64,
+            GridGeometry::of(renderer),
             self.cols,
             self.rows,
         );
@@ -794,15 +792,7 @@ impl App {
     fn pos_at(&self, x: f64, y: f64) -> Option<LogicalPos> {
         let renderer = self.renderer.as_ref()?;
         let terminal = self.terminal.as_ref()?;
-        let (row, visual) = cell_at(
-            x,
-            y,
-            (renderer.padding() + renderer.top_inset()) as f64,
-            renderer.fonts().cell_w as f64,
-            renderer.fonts().cell_h as f64,
-            self.cols,
-            self.rows,
-        );
+        let (row, visual) = cell_at(x, y, GridGeometry::of(renderer), self.cols, self.rows);
         let snapshot = terminal.snapshot();
         let line = snapshot.lines.get(row)?;
         Some(logical_pos_at(row, visual, line, &self.config.bidi))
@@ -1193,19 +1183,35 @@ fn logical_pos_at(row: usize, visual: usize, line: &RowSnapshot, bidi: &BidiConf
     }
 }
 
-fn cell_at(
-    x: f64,
-    y: f64,
+/// Where the grid starts and how big its cells are, in physical pixels. The x
+/// origin is the window padding alone; the y origin also clears the tab strip,
+/// so the two origins stay distinct here.
+#[derive(Clone, Copy)]
+struct GridGeometry {
     padding: f64,
+    top_inset: f64,
     cell_w: f64,
     cell_h: f64,
-    cols: usize,
-    rows: usize,
-) -> (usize, usize) {
+}
+
+impl GridGeometry {
+    fn of(renderer: &Renderer) -> Self {
+        Self {
+            padding: renderer.padding() as f64,
+            top_inset: renderer.top_inset() as f64,
+            cell_w: renderer.fonts().cell_w as f64,
+            cell_h: renderer.fonts().cell_h as f64,
+        }
+    }
+}
+
+fn cell_at(x: f64, y: f64, grid: GridGeometry, cols: usize, rows: usize) -> (usize, usize) {
     let cols = cols.max(1);
     let rows = rows.max(1);
-    let visual = (((x - padding) / cell_w).floor() as isize).clamp(0, cols as isize - 1) as usize;
-    let row = (((y - padding) / cell_h).floor() as isize).clamp(0, rows as isize - 1) as usize;
+    let visual =
+        (((x - grid.padding) / grid.cell_w).floor() as isize).clamp(0, cols as isize - 1) as usize;
+    let row = (((y - grid.padding - grid.top_inset) / grid.cell_h).floor() as isize)
+        .clamp(0, rows as isize - 1) as usize;
     (row, visual)
 }
 
@@ -1326,12 +1332,24 @@ mod tests {
 
     #[test]
     fn cell_at_maps_pixels_to_grid_cells() {
-        assert_eq!(cell_at(4.0, 4.0, 4.0, 10.0, 20.0, 80, 24), (0, 0));
-        assert_eq!(cell_at(13.0, 24.0, 4.0, 10.0, 20.0, 80, 24), (1, 0));
-        assert_eq!(
-            cell_at(10_000.0, 10_000.0, 4.0, 10.0, 20.0, 80, 24),
-            (23, 79)
-        );
+        let grid = GridGeometry {
+            padding: 4.0,
+            top_inset: 0.0,
+            cell_w: 10.0,
+            cell_h: 20.0,
+        };
+        assert_eq!(cell_at(4.0, 4.0, grid, 80, 24), (0, 0));
+        assert_eq!(cell_at(13.0, 24.0, grid, 80, 24), (1, 0));
+        assert_eq!(cell_at(10_000.0, 10_000.0, grid, 80, 24), (23, 79));
+
+        // The strip moves the rows down but never shifts the columns: x = 26 is
+        // column 2 whether or not a strip is reserved, and y = 40 is row 0 only
+        // because the 32 px strip is subtracted from y.
+        let stripped = GridGeometry {
+            top_inset: 32.0,
+            ..grid
+        };
+        assert_eq!(cell_at(26.0, 40.0, stripped, 80, 24), (0, 2));
     }
 
     #[test]
