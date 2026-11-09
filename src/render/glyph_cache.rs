@@ -89,8 +89,9 @@ impl GlyphCache {
 
         // 2. Project onto the three sub-pixel columns: channel i of the logical
         //    pixel samples the horizontal coverage curve at its own offset.
-        //    Vertically a single centre row is taken, matching the console
-        //    host's grid-snapped rows instead of smearing over the band.
+        //    Vertically every sub-row is averaged, so a pixel's alpha is the
+        //    glyph's real area coverage; taking one row instead would paint
+        //    horizontal strokes at full opacity and make the text too bold.
         let mask_w = cells_w * SUBPIXELS;
         let mask_h = cells_h;
         let stride = mask_w as usize;
@@ -103,35 +104,22 @@ impl GlyphCache {
                     let base = (sample.floor() as u32).min(big_w - 1);
                     let next = (base + 1).min(big_w - 1);
                     let frac = sample - base as f32;
-                    let y0 = (y * RASTER_SUPERSAMPLE + RASTER_SUPERSAMPLE / 2) as usize;
-                    let lo = big_mask[y0 * big_w as usize + base as usize] as f32;
-                    let hi = big_mask[y0 * big_w as usize + next as usize] as f32;
-                    let coverage = lo + (hi - lo) * frac;
+                    let mut coverage = 0f32;
+                    for dy in 0..RASTER_SUPERSAMPLE {
+                        let y0 = (y * RASTER_SUPERSAMPLE + dy) as usize;
+                        let lo = big_mask[y0 * big_w as usize + base as usize] as f32;
+                        let hi = big_mask[y0 * big_w as usize + next as usize] as f32;
+                        coverage += lo + (hi - lo) * frac;
+                    }
+                    coverage /= RASTER_SUPERSAMPLE as f32;
                     let index = y as usize * stride + (x * SUBPIXELS + sub) as usize;
-                    mask[index] = (coverage * 255.0).round() as u8;
+                    mask[index] = coverage.round() as u8;
                 }
-            }
-        }
-
-        // 3. ClearType-style horizontal filter: each channel mixes itself with
-        //    its sub-pixel neighbours so edge energy spreads like on an LCD
-        //    instead of spiking in one channel.
-        let mut filtered = vec![0u8; mask.len()];
-        let taps = [0.25f32, 0.5, 0.25];
-        for y in 0..mask_h as usize {
-            for k in 0..stride {
-                let mut acc = 0f32;
-                for (t, weight) in taps.iter().enumerate() {
-                    let offset = t as i32 - 1;
-                    let column = (k as i32 + offset).clamp(0, stride as i32 - 1) as usize;
-                    acc += weight * f32::from(mask[y * stride + column]);
-                }
-                filtered[y * stride + k] = (acc / taps.iter().sum::<f32>()).round() as u8;
             }
         }
 
         let rect = self.atlas.alloc(mask_w, mask_h)?;
-        self.atlas.upload(rect, &filtered);
+        self.atlas.upload(rect, &mask);
         Some(GlyphSlot {
             rect,
             bearing_x: (bounds.min.x / big).round() as i32,

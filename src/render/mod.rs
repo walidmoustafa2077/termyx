@@ -493,11 +493,11 @@ fn blit_scaled(
             if subs.iter().all(|value| *value == 0) {
                 continue;
             }
-            let alphas = gamma_correct(subs);
+            let alpha = gamma_correct(subs);
             let index = y as usize * stride + x as usize * 4;
-            data[index] = blend(data[index], ink.color.r, alphas[0]);
-            data[index + 1] = blend(data[index + 1], ink.color.g, alphas[1]);
-            data[index + 2] = blend(data[index + 2], ink.color.b, alphas[2]);
+            data[index] = blend(data[index], ink.color.r, alpha);
+            data[index + 1] = blend(data[index + 1], ink.color.g, alpha);
+            data[index + 2] = blend(data[index + 2], ink.color.b, alpha);
         }
     }
 }
@@ -510,28 +510,27 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)).round() as u8
 }
 
-/// Sub-pixel coverages blend into a ClearType-style fringe: each colour channel
-/// samples the glyph at a slightly different horizontal offset (the atlas mask
-/// carries three columns per logical pixel), and each gets its own gamma lift
-/// so edges on a dark background keep the console host's stroke weight
-/// without touching metrics.
-fn gamma_correct(coverage: [u8; 3]) -> [f32; 3] {
-    const GAMMAS: [f32; 3] = [0.44, 0.45, 0.47];
-    let mut alphas = [0f32; 3];
-    for sub in 0..3 {
-        alphas[sub] = (f32::from(coverage[sub]) / 255.0).powf(GAMMAS[sub]);
-    }
-    alphas
+/// Horizontal sub-pixel coverages average into one grayscale alpha. Windows
+/// Terminal renders small text with grayscale antialiasing, so deriving a
+/// separate red/green/blue alpha from each sub-pixel column would tint every
+/// edge with red and blue fringes the user does not see in the console host.
+/// The gamma keeps thin stems visible on a dark background.
+fn gamma_correct(coverage: [u8; 3]) -> f32 {
+    const GAMMA: f32 = 1.2;
+    let mean = coverage.iter().map(|value| f32::from(*value)).sum::<f32>() / (3.0 * 255.0);
+    mean.powf(GAMMA)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{BaseDirection, ThemeConfig};
-    use crate::term::{Affinity, Cell, CursorShape, CursorState, LogicalPos, RowSnapshot, Style};
+    use crate::term::{
+        Affinity, Cell, Color, CursorShape, CursorState, LogicalPos, RowSnapshot, Style,
+    };
 
     #[test]
-    fn glyph_edges_carry_subpixel_channel_fringes() {
+    fn glyph_edges_are_grayscale() {
         let mut renderer = default_renderer();
         let cell_w = renderer.fonts.cell_w;
         let cell_h = renderer.fonts.cell_h;
@@ -544,22 +543,24 @@ mod tests {
         renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
         renderer.sync();
         let width = renderer.pixmap.width() as usize;
-        let fringe = renderer
-            .pixels()
-            .iter()
-            .enumerate()
-            .filter(|(index, px)| {
-                let px = **px;
-                let r = ((px >> 16) & 0xFF) as i32;
-                let g = ((px >> 8) & 0xFF) as i32;
-                let b = (px & 0xFF) as i32;
-                index % width != 0 && ((r - g).abs() >= 6 || (g - b).abs() >= 6)
-            })
-            .count();
-        assert!(
-            fringe > 0,
-            "glyph edges must show red/blue subpixel coverage, not flat gray"
-        );
+        let background = packed(renderer.theme.background);
+        let mut painted = 0;
+        let mut tinted = 0;
+        for (index, px) in renderer.pixels().iter().enumerate() {
+            let px = *px;
+            if index % width == 0 || px == background {
+                continue;
+            }
+            painted += 1;
+            let r = (px >> 16) & 0xFF;
+            let g = (px >> 8) & 0xFF;
+            let b = px & 0xFF;
+            if r != g || g != b {
+                tinted += 1;
+            }
+        }
+        assert!(painted > 0, "the glyph must paint some pixels");
+        assert_eq!(tinted, 0, "glyph edges must be neutral gray, not tinted");
     }
 
     fn default_renderer() -> Renderer {
@@ -1170,30 +1171,37 @@ mod tests {
         let cell_w = renderer.fonts.cell_w;
         let cell_h = renderer.fonts.cell_h;
         renderer.resize(cell_w * 2, cell_h * 2);
-        let foreground = packed(renderer.theme.foreground);
         let background = packed(renderer.theme.background);
 
-        // Record where the glyph paints solid foreground ink with the cursor
-        // hidden, then require those same pixels to change only for a block.
+        // Record every pixel the glyph paints over the cell background with the
+        // cursor hidden, then require those same pixels to stay untouched under
+        // a beam cursor and to change under a block cursor.
         let hidden = render_m_with_cursor(&mut renderer, CursorShape::Block, false);
         let glyph: Vec<usize> = hidden
             .iter()
             .enumerate()
-            .filter(|(_, pixel)| **pixel == foreground)
+            .filter(|(_, pixel)| **pixel != background)
             .map(|(index, _)| index)
             .collect();
-        assert!(!glyph.is_empty(), "the M cell must paint foreground ink");
+        assert!(!glyph.is_empty(), "the M cell must paint ink");
 
         let block = render_m_with_cursor(&mut renderer, CursorShape::Block, true);
         assert!(
-            glyph.iter().any(|index| block[*index] == background),
-            "a block cursor must invert the glyph to the background color"
+            glyph.iter().any(|index| block[*index] != hidden[*index]),
+            "a block cursor must invert the glyph"
         );
 
         let beam = render_m_with_cursor(&mut renderer, CursorShape::Beam, true);
+        // The beam bar itself overwrites the leftmost glyph pixel column, so
+        // only pixels outside it must stay untouched.
+        let padding = renderer.padding() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let beam_w = (cell_w as f32 / 8.0).max(1.0) as usize;
         assert!(
-            glyph.iter().any(|index| beam[*index] == foreground),
-            "a beam cursor must leave the glyph in the foreground color"
+            glyph
+                .iter()
+                .all(|index| beam[*index] == hidden[*index] || index % width < padding + beam_w),
+            "a beam cursor must leave the glyph unchanged outside the bar"
         );
     }
 
