@@ -74,10 +74,11 @@ dynamic_title = false    # true lets apps set the title via OSC 0/2
 
 Arial is the default Arabic face. Kawkab Mono 0.501 is also bundled in
 `assets/fonts/`, embedded in the binary, and available as an explicit opt-in
-via `arabic_family = "Kawkab Mono"`. Arabic runs are positioned continuously
-from the shaper's advances and centered as a whole, so adjacent letters
-connect. Kawkab is not auto-selected because its narrower advance and ink
-render disconnected at 16 px with the current rasterizer. If the configured
+via `arabic_family = "Kawkab Mono"`. Arabic runs are shaped continuously
+from the shaper's advances and then stretched to fill their cell slots, so
+adjacent letters connect without leaving a gap next to the surrounding text.
+Kawkab is not auto-selected because its narrower advance and ink render
+disconnected at 16 px with the current rasterizer. If the configured
 family is unavailable, the terminal logs a warning and tries Arial, Tahoma,
 Noto Naskh Arabic, Noto Sans Arabic, DejaVu Sans, FreeSerif, Segoe UI, then
 Kawkab Mono. A face is accepted only when it shapes `لا` as a single lam-alef

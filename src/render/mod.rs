@@ -228,9 +228,17 @@ impl Renderer {
             .flat_map(|cluster| cluster.glyphs.iter())
             .map(|glyph| glyph.x_advance as f32 * scale)
             .sum();
-        // Right-align the Arabic run to its slot span so any excess width sits
-        // before the Arabic block (next to the Latin text), not split around it.
-        let mut arabic_pen = padding + run.slots.end as f32 * cell_w - arabic_natural;
+        // Connected Arabic forms are narrower than the isolated forms the
+        // face was calibrated against, so the run rarely fills its cells.
+        // Stretch it to exactly span them: anchoring it at either edge would
+        // leave a gap that grows with the length of the Arabic text.
+        let arabic_span = (run.slots.end - run.slots.start) as f32 * cell_w;
+        let arabic_scale_x = if arabic_natural > 0.0 {
+            arabic_span / arabic_natural
+        } else {
+            1.0
+        };
+        let mut arabic_pen = padding + run.slots.start as f32 * cell_w;
 
         for cluster in &run.clusters {
             let Some(first) = line.cells.get(cluster.cells.start) else {
@@ -263,7 +271,7 @@ impl Renderer {
                 .map(|glyph| glyph.x_advance as f32 * scale)
                 .sum();
             let (offset, scale_x) = if run.arabic {
-                (0.0, 1.0)
+                (0.0, arabic_scale_x)
             } else {
                 fit_cluster(natural, slot_w)
             };
@@ -884,6 +892,44 @@ mod tests {
         assert!(
             columns.iter().all(|column| *column < start + 3 * cell_w),
             "nothing may paint past the row: {columns:?}"
+        );
+    }
+
+    #[test]
+    fn arabic_run_starts_next_to_preceding_latin_text() {
+        let Some(mut renderer) = arabic_renderer() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        // Long enough that right-aligning the shaped run would leave several
+        // empty cells between the Latin text and the Arabic.
+        let arabic = "السلامةبليبتين";
+        let mut cells = vec![Cell {
+            text: "x".into(),
+            width: 1,
+            style: Style::default(),
+        }];
+        cells.extend(arabic.chars().map(|ch| Cell {
+            text: ch.to_string(),
+            width: 1,
+            style: Style::default(),
+        }));
+        let cols = cells.len() as u32;
+        renderer.resize(cell_w * (cols + 2), cell_h * 2);
+        let snapshot = row_snapshot(cells);
+        let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        renderer.draw(&snapshot, &maps, None);
+        renderer.sync();
+
+        let columns = painted_columns(&renderer);
+        let arabic_start = renderer.padding() + cell_w;
+        assert!(
+            columns
+                .iter()
+                .any(|column| (arabic_start..arabic_start + 2 * cell_w).contains(column)),
+            "Arabic must begin within two cells of the Latin text: {columns:?}"
         );
     }
 
