@@ -76,10 +76,11 @@ Segoe UI is the default Arabic face, matching the natural connected rendering
 used by PowerShell and the Windows UI. Kawkab Mono 0.501 is also bundled in
 `assets/fonts/`, embedded in the binary, and available as an explicit opt-in
 via `arabic_family = "Kawkab Mono"`. Arabic runs are shaped continuously from
-the shaper's natural advances and anchored at the start of their cell slots, so
-adjacent letters connect without a gap next to the surrounding text and the
-letterforms are never stretched. Kawkab is not auto-selected because its
-narrower ink renders disconnected at 16 px with the current rasterizer. If the
+the shaper's natural advances and anchored to the paragraph's start edge, so
+adjacent letters connect without a gap next to the surrounding text, RTL lines
+stay right-pinned, and the letterforms are never stretched. Kawkab is not
+auto-selected because its narrower ink renders disconnected at 16 px with the
+current rasterizer. If the
 configured family is unavailable, the terminal logs a warning and tries Segoe
 UI, Tahoma, Arial, Noto Naskh Arabic, Noto Sans Arabic, DejaVu Sans, FreeSerif,
 then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`

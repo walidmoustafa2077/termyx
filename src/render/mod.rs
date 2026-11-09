@@ -141,8 +141,9 @@ impl Renderer {
             let Some(line) = snapshot.lines.get(row) else {
                 continue;
             };
+            let rtl_base = maps.get(row).is_some_and(|map| map.rtl_base());
             for run in runs {
-                self.draw_shaped_run(run, line, row, cell_w, cell_h, cursor);
+                self.draw_shaped_run(run, line, row, cursor, rtl_base);
             }
         }
 
@@ -205,10 +206,11 @@ impl Renderer {
         run: &shape::ShapedRun,
         line: &RowSnapshot,
         row: usize,
-        cell_w: f32,
-        cell_h: f32,
         cursor: Option<(usize, usize, CursorShape)>,
+        rtl_base: bool,
     ) {
+        let cell_w = self.fonts.cell_w as f32;
+        let cell_h = self.fonts.cell_h as f32;
         let padding = self.padding as f32;
         // Share one baseline across the primary and Arabic faces so Arabic
         // sits on the same line as Latin instead of floating above it.
@@ -229,17 +231,22 @@ impl Renderer {
             .map(|glyph| glyph.x_advance as f32 * scale)
             .sum();
         // Connected Arabic forms are usually narrower than their cells, so
-        // let the run keep its natural advances and start at the run's first
-        // visual slot. That keeps the Arabic next to the preceding Latin text
-        // without stretching the letterforms; the unused cells stay at the
-        // visual end of the run. Only shrink a run that would overflow.
+        // let the run keep its natural advances and anchor it to the
+        // paragraph's start edge. That keeps the Arabic next to the preceding
+        // Latin text in an LTR line, and keeps an RTL line pinned to the right,
+        // without stretching the letterforms. Only shrink a run that would
+        // overflow.
         let arabic_span = (run.slots.end - run.slots.start) as f32 * cell_w;
         let arabic_scale_x = if arabic_natural > arabic_span && arabic_natural > 0.0 {
             arabic_span / arabic_natural
         } else {
             1.0
         };
-        let mut arabic_pen = padding + run.slots.start as f32 * cell_w;
+        let mut arabic_pen = if rtl_base {
+            padding + run.slots.end as f32 * cell_w - arabic_natural * arabic_scale_x
+        } else {
+            padding + run.slots.start as f32 * cell_w
+        };
 
         for cluster in &run.clusters {
             let Some(first) = line.cells.get(cluster.cells.start) else {
@@ -1014,6 +1021,42 @@ mod tests {
             rightmost + cell_w < run_end,
             "Arabic must keep natural advances and leave at least a cell unused \
              at the run end (rightmost {rightmost}, run end {run_end}): {columns:?}"
+        );
+    }
+
+    #[test]
+    fn arabic_run_stays_right_pinned_in_rtl_base_text() {
+        let Some(mut renderer) = arabic_renderer() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        let arabic = "السلامةبليبتين";
+        let cells: Vec<Cell> = arabic
+            .chars()
+            .map(|ch| Cell {
+                text: ch.to_string(),
+                width: 1,
+                style: Style::default(),
+            })
+            .collect();
+        let cols = cells.len() as u32;
+        renderer.resize(cell_w * (cols + 2), cell_h * 2);
+        let snapshot = row_snapshot(cells);
+        let map = VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Rtl);
+        assert!(map.rtl_base());
+        let run = &map.runs()[0];
+        let run_start = renderer.padding() + run.slots.start as u32 * cell_w;
+        renderer.draw(&snapshot, &[map], None);
+        renderer.sync();
+
+        let columns = painted_columns(&renderer);
+        let leftmost = *columns.first().expect("Arabic must paint");
+        assert!(
+            leftmost > run_start + 2 * cell_w,
+            "RTL text must leave its unused cells on the left, not squeeze to the \
+             start (leftmost {leftmost}, run start {run_start}): {columns:?}"
         );
     }
 

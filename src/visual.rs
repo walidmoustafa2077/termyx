@@ -18,6 +18,8 @@ pub struct VisualMap {
     /// Whether the run order and levels came from UAX #9 analysis. Identity
     /// maps have no levels, so shaping falls back to the text's script.
     analyzed: bool,
+    /// Resolved paragraph direction; the line is anchored to this edge.
+    rtl_base: bool,
 }
 
 impl VisualMap {
@@ -39,6 +41,7 @@ impl VisualMap {
             logical_to_visual: (0..cols).collect(),
             visual_to_logical: (0..cols).collect(),
             analyzed: false,
+            rtl_base: false,
         }
     }
 
@@ -52,10 +55,10 @@ impl VisualMap {
 
     pub fn from_bidi(row: &RowSnapshot, base: BaseDirection) -> Self {
         let analysis = bidi::analyze(row, base);
-        Self::build(row, analysis.levels, analysis.runs)
+        Self::build(row, analysis.levels, analysis.runs, analysis.rtl_base)
     }
 
-    fn build(row: &RowSnapshot, levels: Vec<u8>, runs: Vec<VisualRun>) -> Self {
+    fn build(row: &RowSnapshot, levels: Vec<u8>, runs: Vec<VisualRun>, rtl_base: bool) -> Self {
         let cols = levels.len();
         let mut logical_to_visual = vec![0; cols];
         let mut visual_to_logical = vec![0; cols];
@@ -95,6 +98,7 @@ impl VisualMap {
             logical_to_visual,
             visual_to_logical,
             analyzed: true,
+            rtl_base,
         }
     }
 
@@ -114,6 +118,12 @@ impl VisualMap {
     /// logical-order identity mapping.
     pub fn is_bidi_analyzed(&self) -> bool {
         self.analyzed
+    }
+
+    /// Whether the resolved paragraph direction is right-to-left. The line is
+    /// anchored to the right edge in that case, matching `base_direction`.
+    pub fn rtl_base(&self) -> bool {
+        self.rtl_base
     }
 
     /// Visual column of a logical cell. Clamps to the last cell.

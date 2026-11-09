@@ -72,6 +72,9 @@ pub struct VisualRun {
 pub struct BidiRow {
     pub levels: Vec<u8>,
     pub runs: Vec<VisualRun>,
+    /// Resolved paragraph direction. `Auto` is resolved from the first strong
+    /// character, so this is always the direction the line is anchored to.
+    pub rtl_base: bool,
 }
 
 /// Resolves UAX #9 levels for one row and returns its runs in visual order.
@@ -92,6 +95,7 @@ pub fn analyze(row: &RowSnapshot, base: BaseDirection) -> BidiRow {
         return BidiRow {
             levels: vec![0; cols],
             runs,
+            rtl_base: base == BaseDirection::Rtl,
         };
     }
 
@@ -105,6 +109,7 @@ pub fn analyze(row: &RowSnapshot, base: BaseDirection) -> BidiRow {
         return BidiRow {
             levels: vec![0; cols],
             runs: Vec::new(),
+            rtl_base: base == BaseDirection::Rtl,
         };
     };
     let (byte_levels, byte_runs) = info.visual_runs(paragraph, 0..text.text.len());
@@ -144,7 +149,11 @@ pub fn analyze(row: &RowSnapshot, base: BaseDirection) -> BidiRow {
         slot = slot_end;
     }
 
-    BidiRow { levels, runs }
+    BidiRow {
+        levels,
+        runs,
+        rtl_base: paragraph.level.is_rtl(),
+    }
 }
 
 pub fn is_bidi_control(ch: char) -> bool {
@@ -273,6 +282,7 @@ mod tests {
         let row = row(&["a", "b", "c"]);
         let bidi = analyze(&row, BaseDirection::Rtl);
         assert_eq!(bidi.levels, vec![2, 2, 2]);
+        assert!(bidi.rtl_base);
     }
 
     #[test]
@@ -280,6 +290,7 @@ mod tests {
         let row = row(&["م", "ر", "ح"]);
         let bidi = analyze(&row, BaseDirection::Auto);
         assert_eq!(bidi.levels, vec![1, 1, 1]);
+        assert!(bidi.rtl_base);
     }
 
     #[test]
@@ -287,6 +298,7 @@ mod tests {
         let row = row(&["a", "b", "c", "م", "ر", "ح"]);
         let bidi = analyze(&row, BaseDirection::Ltr);
         assert_eq!(bidi.levels, vec![0, 0, 0, 1, 1, 1]);
+        assert!(!bidi.rtl_base);
         let map = VisualMap::from_bidi(&row, BaseDirection::Ltr);
         assert_eq!(map.visual_of(0), 0);
         assert_eq!(map.visual_of(3), 5);
