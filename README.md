@@ -1,4 +1,4 @@
-﻿# Termyx
+# Termyx
 
 A fast, native terminal emulator with first-class RTL support.
 
@@ -61,6 +61,9 @@ arabic_family = "Kawkab Mono"
 [bidi]
 enabled = true
 base_direction = "ltr"   # ltr | rtl | auto
+
+[window]
+dynamic_title = false    # true lets apps set the title via OSC 0/2
 ```
 
 - `ltr` (default) keeps the prompt pinned to the left and embeds RTL runs.
@@ -69,11 +72,15 @@ base_direction = "ltr"   # ltr | rtl | auto
 - `enabled = false` disables reordering; Arabic is still shaped, but mixed rows
   are not reordered.
 
-No Arabic font binary is bundled yet. When `font.arabic_family` is missing,
-the terminal logs a warning and uses the first installed Arabic-capable face
-from Arial, Tahoma, Noto Naskh Arabic, Noto Sans Arabic, DejaVu Sans, FreeSerif,
-or Segoe UI, in that order. A face is only accepted when it shapes `لا` as a
-single lam-alef ligature. See `assets/fonts/README.md`.
+Kawkab Mono 0.501 is bundled in `assets/fonts/` and embedded in the binary,
+and it is the default Arabic face. Arabic runs are positioned continuously from
+the shaper's advances and centered as a whole, so adjacent letters connect even
+though Kawkab's own advance is narrower than the primary cell. If the configured
+family is unavailable, the terminal logs a warning and uses the first installed
+Arabic-capable face from Arial, Tahoma, Noto Naskh Arabic, Noto Sans Arabic,
+DejaVu Sans, FreeSerif, or Segoe UI. A face is accepted only when it shapes `لا`
+as a single lam-alef ligature and its advance fits the primary cell. See
+`assets/fonts/README.md`.
 
 ## Terminal protocol support
 
@@ -133,7 +140,8 @@ separately re-run in this check.
   Latin number embedded inside an Arabic word).
 - A caret or selection boundary inside a two-cell lam-alef draws at the cell
   boundary; the ligature is still drawn once.
-- The Kawkab Mono asset is not bundled in this phase; system fallback is used.
+- Text uses grayscale antialiasing with a mild gamma lift, not ClearType
+  subpixel rendering.
 - OSC 8 hyperlinks are parsed and stored per cell but are not clickable yet.
 - OSC 133 shell integration is not parsed; prompts and command marks are not
   exposed to the terminal.

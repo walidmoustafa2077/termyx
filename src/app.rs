@@ -757,6 +757,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Title(title) => {
+                if !self.config.window.dynamic_title {
+                    return;
+                }
                 if let Some(window) = &self.window {
                     if title.is_empty() {
                         // `OSC 0;` / `OSC 2;` with no payload restores the

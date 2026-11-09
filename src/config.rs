@@ -80,6 +80,9 @@ pub struct WindowConfig {
     pub width: u32,
     pub height: u32,
     pub padding: u32,
+    /// When false, OSC 0/2 title changes are ignored and the window keeps
+    /// its default title.
+    pub dynamic_title: bool,
 }
 
 impl Default for WindowConfig {
@@ -88,6 +91,7 @@ impl Default for WindowConfig {
             width: 1440,
             height: 800,
             padding: 8,
+            dynamic_title: false,
         }
     }
 }
@@ -184,7 +188,7 @@ pub struct ShellConfig {
 const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("font", &["family", "arabic_family", "size", "line_height"]),
     ("bidi", &["enabled", "base_direction"]),
-    ("window", &["width", "height", "padding"]),
+    ("window", &["width", "height", "padding", "dynamic_title"]),
     ("scrollback", &["lines"]),
     ("selection", &["trim_trailing", "copy_on_select"]),
     (
@@ -337,6 +341,7 @@ mod tests {
         assert_eq!(c.window.width, 1440);
         assert_eq!(c.window.height, 800);
         assert_eq!(c.window.padding, 8);
+        assert!(!c.window.dynamic_title);
         assert_eq!(c.scrollback.lines, 10_000);
         assert!(c.selection.trim_trailing);
         assert!(c.selection.copy_on_select);
@@ -400,6 +405,12 @@ mod tests {
             .unwrap()
             .validate();
         assert_eq!(c.scrollback.lines, 200_000);
+    }
+
+    #[test]
+    fn dynamic_title_reads_from_window_table() {
+        let c = Config::from_toml_str("[window]\ndynamic_title = true\n").unwrap();
+        assert!(c.window.dynamic_title);
     }
 
     #[test]

@@ -16,7 +16,12 @@ pub enum FontError {
 /// `Segoe UI` is last on purpose: it covers Arabic letters but does not ligate
 /// lam-alef, so it is only usable for isolated glyphs. Faces that fail the
 /// lam-alef check are skipped anyway.
+/// Bundled OFL Arabic face; loaded before system fonts so the fallback chain
+/// never depends on Arial or another proportional host font.
+pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabMono-Regular.ttf");
+
 const ARABIC_FALLBACKS: &[&str] = &[
+    "Kawkab Mono",
     "Arial",
     "Tahoma",
     "Noto Naskh Arabic",
@@ -49,6 +54,8 @@ pub struct FontFace {
     pub data: Vec<u8>,
     pub index: u32,
     pub family: String,
+    /// Extra scale applied to this face so its ink matches the primary face.
+    pub scale: f32,
 }
 
 pub struct FontSet {
@@ -74,6 +81,7 @@ impl FontSet {
         line_height: f32,
     ) -> Result<Self, FontError> {
         let mut database = Database::new();
+        database.load_font_data(BUNDLED_ARABIC.to_vec());
         database.load_system_fonts();
         let (data, index) = load_primary(&database, family)?;
         let font = FontVec::try_from_vec_and_index(data.clone(), index)
@@ -90,7 +98,7 @@ impl FontSet {
         let cell_w = advance.ceil().max(1.0) as u32;
         let cell_h = ((ascent - descent) * line_height).ceil().max(1.0) as u32;
 
-        let arabic = load_arabic(&database, arabic_family);
+        let arabic = load_arabic(&database, arabic_family, size_px, cell_w);
         let symbols = load_symbols(
             &database,
             family,
@@ -202,6 +210,7 @@ fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec
             data,
             index,
             family: (*family).to_string(),
+            scale: 1.0,
         });
         if symbols.len() == 6 {
             break;
@@ -210,7 +219,12 @@ fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec
     symbols
 }
 
-fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
+fn load_arabic(
+    database: &Database,
+    configured: &str,
+    size_px: f32,
+    cell_w: u32,
+) -> Option<FontFace> {
     let candidates = std::iter::once(configured).chain(ARABIC_FALLBACKS.iter().copied());
     for family in candidates {
         if family.is_empty() {
@@ -236,6 +250,18 @@ fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
         let Ok(font) = FontVec::try_from_vec_and_index(data.clone(), index) else {
             continue;
         };
+        let advance = font
+            .as_scaled(PxScale::from(size_px))
+            .h_advance(font.glyph_id('م'));
+        if advance > cell_w as f32 * 1.05 {
+            tracing::debug!(
+                family,
+                advance,
+                cell_w,
+                "Arabic face is wider than the primary cell; skipping"
+            );
+            continue;
+        }
         if family != configured {
             tracing::warn!(
                 requested = configured,
@@ -248,6 +274,7 @@ fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
             data,
             index,
             family: family.to_string(),
+            scale: 1.0,
         };
         tracing::debug!(family = %face.family, "Arabic face loaded");
         return Some(face);
@@ -264,7 +291,30 @@ fn load_arabic(database: &Database, configured: &str) -> Option<FontFace> {
 /// faces such as `Segoe UI` that cover the letters but render lam-alef as two
 /// disconnected glyphs.
 fn can_render_arabic(data: &[u8], index: u32) -> bool {
-    has_arabic_coverage(data, index) && ligates_lam_alef(data, index)
+    has_arabic_coverage(data, index) && ligates_lam_alef(data, index) && joins_arabic(data, index)
+}
+
+/// Rejects faces that expose Arabic letters but do not apply cursive joining:
+/// shaping `مرحبا` must produce at least one contextual form that differs from
+/// the isolated glyphs. Without this, text renders as disconnected letters.
+fn joins_arabic(data: &[u8], index: u32) -> bool {
+    let Some(face) = rustybuzz::Face::from_slice(data, index) else {
+        return false;
+    };
+    let isolated: Vec<u32> = "مرحبا"
+        .chars()
+        .filter_map(|ch| face.glyph_index(ch))
+        .map(|glyph| u32::from(glyph.0))
+        .collect();
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str("مرحبا");
+    buffer.set_direction(rustybuzz::Direction::RightToLeft);
+    buffer.set_script(rustybuzz::script::ARABIC);
+    let shaped = rustybuzz::shape(&face, &[], buffer);
+    shaped
+        .glyph_infos()
+        .iter()
+        .any(|info| !isolated.contains(&info.glyph_id))
 }
 
 fn has_arabic_coverage(data: &[u8], index: u32) -> bool {
@@ -330,6 +380,34 @@ mod tests {
         assert!(face.font.glyph_id('ا').0 != 0);
         assert!(!face.family.is_empty());
         assert!(font.has_arabic());
+    }
+
+    #[test]
+    fn default_arabic_face_fits_primary_cell() {
+        let font = FontSet::load("Consolas", "Arial", 16.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.2))
+            .expect("a monospace font must exist");
+        let Some(face) = font.arabic.as_ref() else {
+            eprintln!("skipping: no Arabic-capable system font installed");
+            return;
+        };
+        let scaled = face.font.as_scaled(PxScale::from(font.size_px));
+        let advance = scaled.h_advance(face.font.glyph_id('م'));
+        assert!(
+            advance <= font.cell_w as f32 * 1.05,
+            "{} advance {advance} must fit cell {}",
+            face.family,
+            font.cell_w
+        );
+    }
+
+    #[test]
+    fn bundled_kawkab_is_available_when_requested() {
+        let font = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+            .expect("a monospace font must exist");
+        let face = font.arabic.as_ref().expect("bundled Kawkab must load");
+        assert_eq!(face.family, "Kawkab Mono");
     }
 
     #[test]

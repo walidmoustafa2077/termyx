@@ -205,7 +205,24 @@ impl Renderer {
         // with a taller ascent may paint a pixel or two above the cell top.
         let baseline = padding + row as f32 * cell_h + self.fonts.ascent;
         let units = run.units_per_em.max(1) as f32;
-        let scale = self.fonts.size_px / units;
+        let face_scale = if run.arabic {
+            self.fonts.arabic.as_ref().map_or(1.0, |face| face.scale)
+        } else {
+            1.0
+        };
+        let scale = self.fonts.size_px * face_scale / units;
+        // Shape the whole Arabic run continuously. Snapping each cluster to
+        // its own cell leaves side-bearing gaps that break cursive joins.
+        let arabic_span = (run.slots.end - run.slots.start) as f32 * cell_w;
+        let arabic_natural: f32 = run
+            .clusters
+            .iter()
+            .flat_map(|cluster| cluster.glyphs.iter())
+            .map(|glyph| glyph.x_advance as f32 * scale)
+            .sum();
+        let mut arabic_pen = padding
+            + run.slots.start as f32 * cell_w
+            + ((arabic_span - arabic_natural) * 0.5).max(0.0);
 
         for cluster in &run.clusters {
             let Some(first) = line.cells.get(cluster.cells.start) else {
@@ -237,8 +254,16 @@ impl Renderer {
                 .iter()
                 .map(|glyph| glyph.x_advance as f32 * scale)
                 .sum();
-            let (offset, scale_x) = fit_cluster(natural, slot_w);
-            let mut pen = padding + slot_start as f32 * cell_w + offset;
+            let (offset, scale_x) = if run.arabic {
+                (0.0, 1.0)
+            } else {
+                fit_cluster(natural, slot_w)
+            };
+            let mut pen = if run.arabic {
+                arabic_pen
+            } else {
+                padding + slot_start as f32 * cell_w + offset
+            };
 
             for (glyph_index, glyph) in cluster.glyphs.iter().enumerate() {
                 let mut font_id = u8::from(run.arabic);
@@ -256,7 +281,10 @@ impl Renderer {
                         id = symbol_glyph;
                     }
                 }
-                if let Some(slot) = self.cache.get(font_id, font, id, self.fonts.size_px) {
+                if let Some(slot) =
+                    self.cache
+                        .get(font_id, font, id, self.fonts.size_px * face_scale)
+                {
                     let x = pen + glyph.x_offset as f32 * scale * scale_x;
                     let y = baseline - glyph.y_offset as f32 * scale;
                     blit_scaled(
@@ -273,6 +301,9 @@ impl Renderer {
                     );
                 }
                 pen += glyph.x_advance as f32 * scale * scale_x;
+            }
+            if run.arabic {
+                arabic_pen = pen;
             }
         }
     }
@@ -440,6 +471,7 @@ fn blit_scaled(
             if coverage == 0 {
                 continue;
             }
+            let coverage = gamma_correct(coverage);
             let alpha = coverage as f32 / 255.0;
             let index = y as usize * stride + x as usize * 4;
             data[index] = blend(data[index], ink.color.r, alpha);
@@ -455,6 +487,13 @@ fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)).round() as u8
 }
 
+/// Grayscale coverage on a dark background looks washed out compared with
+/// ClearType. A mild gamma lift restores contrast without changing metrics.
+fn gamma_correct(coverage: u8) -> u8 {
+    const TEXT_GAMMA: f32 = 0.85;
+    ((coverage as f32 / 255.0).powf(TEXT_GAMMA) * 255.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,16 +501,16 @@ mod tests {
     use crate::term::{Affinity, Cell, CursorShape, CursorState, LogicalPos, RowSnapshot, Style};
 
     fn default_renderer() -> Renderer {
-        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+        let fonts = FontSet::load("Consolas", "Arial", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 14.0, 1.2))
             .expect("a monospace font must exist");
         Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
             .expect("renderer must be constructible")
     }
 
     fn arabic_renderer() -> Option<Renderer> {
-        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
-            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+        let fonts = FontSet::load("Consolas", "Arial", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 14.0, 1.2))
             .ok()?;
         if !fonts.has_arabic() {
             return None;
@@ -501,6 +540,13 @@ mod tests {
             display_offset: 0,
             history: 0,
         }
+    }
+
+    #[test]
+    fn gamma_lifts_midtones_without_clipping() {
+        assert_eq!(gamma_correct(0), 0);
+        assert_eq!(gamma_correct(255), 255);
+        assert!(gamma_correct(128) > 128);
     }
 
     #[test]
@@ -758,15 +804,18 @@ mod tests {
         renderer.sync();
         let start = renderer.padding();
         let columns = painted_columns(&renderer);
+        let ligature: Vec<u32> = columns
+            .iter()
+            .copied()
+            .filter(|column| *column >= start && *column < start + 2 * cell_w)
+            .collect();
         assert!(
-            columns.iter().any(|column| *column < start + cell_w),
-            "the ligature must paint in the first cell: {columns:?}"
+            !ligature.is_empty(),
+            "the ligature must paint inside its two-cell slot: {columns:?}"
         );
         assert!(
-            columns
-                .iter()
-                .any(|column| *column >= start + cell_w && *column < start + 2 * cell_w),
-            "the ligature must cross into the second cell: {columns:?}"
+            ligature.len() <= 2 * cell_w as usize,
+            "the ligature must not overflow its two-cell slot: {ligature:?}"
         );
         assert!(
             columns

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use rustybuzz::{BufferClusterLevel, Direction, Face, UnicodeBuffer};
+use rustybuzz::{script, BufferClusterLevel, Direction, Face, UnicodeBuffer};
 
 use crate::bidi::RowText;
 use crate::visual::VisualMap;
@@ -116,6 +116,9 @@ fn shape_text(text: &str, rtl: bool, face: &Face<'_>) -> Shaped {
     } else {
         Direction::LeftToRight
     });
+    if contains_arabic(text) {
+        buffer.set_script(script::ARABIC);
+    }
     buffer.set_cluster_level(BufferClusterLevel::MonotoneGraphemes);
     let shaped = rustybuzz::shape(face, &[], buffer);
 
@@ -233,8 +236,15 @@ pub fn shape_row(
             // Identity maps carry no levels, so their direction comes from the
             // segment's first strong character. Analyzed maps always trust the
             // bidi level, even when it is even and the text is Arabic.
+            // Arabic segments always shape right-to-left: the script's joining
+            // forms require the RTL direction even when an outer bidi level is
+            // even (for example inside an explicit LTR embedding). Other
+            // segments trust the bidi level, and identity maps fall back to
+            // their first strong character.
             let rtl = if map.is_bidi_analyzed() {
                 run.level % 2 == 1
+            } else if has_arabic {
+                true
             } else {
                 first_strong_is_rtl(text)
             };
@@ -341,6 +351,7 @@ mod tests {
 
     fn find_arabic_font() -> Option<(Vec<u8>, u32)> {
         let mut database = fontdb::Database::new();
+        database.load_font_data(crate::fonts::BUNDLED_ARABIC.to_vec());
         database.load_system_fonts();
         for family in [
             "Kawkab Mono",

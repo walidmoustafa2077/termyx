@@ -1,18 +1,26 @@
 # Bundled fonts
 
-Termyx prefers a cell-compatible Arabic face. The configured default is
-`Kawkab Mono`, which is OFL 1.1.
+Termyx bundles **Kawkab Mono 0.501**, licensed under the SIL Open Font
+License 1.1. The full license text is `OFL.txt` in this directory.
 
-This directory intentionally contains no font binary yet. Until the asset task
-lands, `src/fonts.rs` falls back to an installed Arabic-capable system face
-(Arial, Tahoma, Noto Naskh Arabic, Noto Sans Arabic, DejaVu Sans, FreeSerif, or
-Segoe UI) and logs a warning naming the requested family. A face is only chosen
-when it shapes `لا` as a single lam-alef ligature, so a face that covers Arabic
-letters but cannot shape them is skipped.
+- `KawkabMono-Regular.ttf` — upstream `kawkab-mono-0.501.zip` from
+  <https://github.com/aiaf/kawkab-mono/releases/tag/v0.501>.
+- `OFL.txt` — license shipped with that release.
 
-When the asset is added:
+`src/fonts.rs` embeds the font with `include_bytes!` and registers it with
+`fontdb` **before** loading system fonts, so it is always available. It is the
+default Arabic face.
 
-- Place `KawkabMono-Regular.ttf` here.
-- Add the OFL 1.1 license as `assets/fonts/KawkabMono-OFL.txt`.
-- Load it with `fontdb::Database::load_font_data` before querying system fonts.
-- Keep the fallback chain for machines where the file is missing.
+Kawkab's advance is narrower than the primary monospace cell (about 5.7 px vs
+8.8 px at 16 px). Snapping each shaped cluster to its own cell left side-bearing
+gaps and broke cursive joins, so the renderer positions an Arabic run
+continuously from the shaper's advances and centers the whole run inside its
+slot span. That keeps adjacent letters connected.
+
+The fallback chain is Kawkab Mono, Arial, Tahoma, Noto Naskh Arabic, Noto Sans
+Arabic, DejaVu Sans, FreeSerif, Segoe UI. A candidate is accepted only when it:
+
+1. covers Arabic letters,
+2. shapes `لا` as a single lam-alef ligature,
+3. applies Arabic joining substitutions, and
+4. has an advance that fits within the primary cell width.

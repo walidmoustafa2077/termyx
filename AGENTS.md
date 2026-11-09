@@ -53,16 +53,21 @@ If a request conflicts with them, ask before drifting.
 - The UI thread owns the window, renderer, terminal, and interaction state.
   There is one PTY reader thread.
 
-## Current scope (Phases 0–2 + Batch 1)
+## Current scope (Phases 0–2 + Batches 1–3)
 
-In: one window, one shell session, bidi/RTL rendering with Arabic shaping,
-scrollback, resize, selection/copy/paste, config, logging, application mouse
-reporting (DEC modes 1000/1002/1003/1005/1006 with Shift+drag local selection),
-extended keys (Shift+Tab, F1–F12, modified navigation), cursor shape/visibility,
-focus reporting, window title (OSC 0/2), and OSC 52 copy.
+In: one window, one shell session, bidi/RTL rendering with Arabic shaping and
+the bundled Kawkab Mono face (run-level continuous layout), scrollback with a
+draggable scrollbar, resize, word/line/block selection, copy-on-select,
+right-click paste, application mouse reporting (DEC modes
+1000/1002/1003/1005/1006 with Shift+drag local selection), extended keys
+(Shift+Tab, F1–F12, modified navigation), cursor shape/visibility, focus
+reporting, window title (OSC 0/2, `dynamic_title` opt-in), OSC 52 copy, and
+symbol-font fallback.
 
-Not yet: bundled Arabic font, OSC 8 clickable links, OSC 133 shell integration,
-IME preedit, tabs, splits, profiles, command palette, search, AI, images.
+Not yet: exact cell alignment for narrow Arabic runs (Kawkab is laid out
+continuously and centered per run), OSC 8 clickable links, OSC 133 shell
+integration, IME preedit, tabs, splits, profiles, command palette, search, AI,
+images.
 
 ## Workflow
 
