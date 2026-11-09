@@ -63,6 +63,7 @@ pub struct App {
     wheel_remainder: f32,
     scrollbar_drag: bool,
     scrollbar_grab: f32,
+    scrollbar_hover: bool,
     cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
@@ -88,6 +89,7 @@ impl App {
             wheel_remainder: 0.0,
             scrollbar_drag: false,
             scrollbar_grab: 0.0,
+            scrollbar_hover: false,
             cursor_pos: (0.0, 0.0),
             cols: 80,
             rows: 24,
@@ -219,6 +221,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        let scrollbar_hover = self.scrollbar_hover || self.scrollbar_drag;
         let (Some(renderer), Some(terminal), Some(surface)) =
             (&mut self.renderer, &self.terminal, &mut self.surface)
         else {
@@ -230,6 +233,7 @@ impl App {
             .iter()
             .map(|line| VisualMap::for_row(line, &self.config.bidi))
             .collect();
+        renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         renderer.sync();
 
@@ -308,6 +312,9 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        // Keep the scrollbar expanded for the whole drag, even when the pointer
+        // slips off the thumb.
+        self.set_scrollbar_hover(self.scrollbar_drag || self.scrollbar_hit(x, y).is_some());
 
         if self.scrollbar_drag {
             self.scroll_to_thumb(y as f32 - self.scrollbar_grab);
@@ -526,6 +533,8 @@ impl App {
             self.mouse_down = true;
         } else if self.scrollbar_drag {
             self.scrollbar_drag = false;
+            let (x, y) = self.cursor_pos;
+            self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
             return;
         } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
             // Route by the state captured at press time: a forwarded press is
@@ -569,7 +578,7 @@ impl App {
             .unwrap_or_else(TermMode::empty)
     }
 
-    fn scrollbar_geometry(&self) -> Option<ScrollbarGeometry> {
+    fn scrollbar_geometry(&self, hovered: bool) -> Option<ScrollbarGeometry> {
         let renderer = self.renderer.as_ref()?;
         let terminal = self.terminal.as_ref()?;
         let window = self.window.as_ref()?;
@@ -581,11 +590,14 @@ impl App {
             self.rows,
             terminal.history_size(),
             terminal.display_offset(),
+            hovered,
         )
     }
 
     fn scrollbar_hit(&self, x: f64, y: f64) -> Option<(ScrollbarGeometry, f32)> {
-        let geom = self.scrollbar_geometry()?;
+        // Hit-test the expanded width so the pointer stays on the thumb while
+        // it is hovered, and so clicks just left of the resting thumb work.
+        let geom = self.scrollbar_geometry(true)?;
         let x = x as f32;
         let y = y as f32;
         if x < geom.x || x > geom.x + geom.width {
@@ -602,8 +614,20 @@ impl App {
         Some((geom, grab))
     }
 
+    /// Expands the scrollbar while the pointer is over it. Redraws only when
+    /// the hover state changes.
+    fn set_scrollbar_hover(&mut self, hover: bool) {
+        if self.scrollbar_hover == hover {
+            return;
+        }
+        self.scrollbar_hover = hover;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn scroll_to_thumb(&mut self, thumb_top: f32) {
-        let Some(geom) = self.scrollbar_geometry() else {
+        let Some(geom) = self.scrollbar_geometry(true) else {
             return;
         };
         let Some(terminal) = self.terminal.as_mut() else {
@@ -816,6 +840,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(position.x, position.y)
             }
+            WindowEvent::CursorLeft { .. } => self.set_scrollbar_hover(false),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
             WindowEvent::Focused(focused) => {
                 if !focused {
@@ -826,6 +851,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.mouse_down = false;
                     self.scrollbar_drag = false;
+                    let (x, y) = self.cursor_pos;
+                    self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
                 }
                 if self.app_mouse_mode().contains(TermMode::FOCUS_IN_OUT) {
                     self.write_input(&input::encode_focus(focused));

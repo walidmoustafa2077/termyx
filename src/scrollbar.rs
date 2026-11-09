@@ -1,7 +1,9 @@
 //! Scrollbar geometry and drag-to-offset mapping.
 
-/// Width of the scrollbar thumb in pixels.
+/// Width of the scrollbar thumb in pixels at rest.
 pub const WIDTH: f32 = 6.0;
+/// Width of the scrollbar thumb in pixels while hovered or dragged.
+pub const HOVER_WIDTH: f32 = 12.0;
 const MIN_THUMB_H: f32 = 12.0;
 const EDGE_GAP: f32 = 2.0;
 
@@ -17,7 +19,8 @@ pub struct ScrollbarGeometry {
 
 /// Thumb geometry for the given viewport and scrollback state.
 /// Returns `None` when there is no history, the view is live at the bottom,
-/// or the viewport is too narrow.
+/// or the viewport is too narrow. `hovered` widens the thumb leftward so its
+/// right edge stays pinned to the window edge.
 pub fn geometry(
     viewport_width: u32,
     padding: u32,
@@ -25,12 +28,14 @@ pub fn geometry(
     rows: usize,
     history: usize,
     offset: usize,
+    hovered: bool,
 ) -> Option<ScrollbarGeometry> {
     if history == 0 || offset == 0 || rows == 0 || cell_h == 0 {
         return None;
     }
 
-    let x = viewport_width as f32 - WIDTH - EDGE_GAP;
+    let width = if hovered { HOVER_WIDTH } else { WIDTH };
+    let x = viewport_width as f32 - width - EDGE_GAP;
     if x < padding as f32 {
         return None;
     }
@@ -44,7 +49,7 @@ pub fn geometry(
 
     Some(ScrollbarGeometry {
         x,
-        width: WIDTH,
+        width,
         track_y,
         track_h,
         thumb_y,
@@ -72,24 +77,24 @@ mod tests {
 
     #[test]
     fn no_scrollbar_at_live_bottom() {
-        assert!(geometry(1000, 4, 20, 10, 20, 0).is_none());
+        assert!(geometry(1000, 4, 20, 10, 20, 0, false).is_none());
     }
 
     #[test]
     fn thumb_sits_at_bottom_when_scrolled_one_row_above_live() {
-        let geom = geometry(1000, 4, 20, 10, 20, 1).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 20, 1, false).expect("scrollbar");
         assert!(geom.thumb_y > geom.track_y);
     }
 
     #[test]
     fn thumb_sits_at_top_when_scrolled_to_history() {
-        let geom = geometry(1000, 4, 20, 10, 100, 100).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 100, 100, false).expect("scrollbar");
         assert_eq!(geom.thumb_y, geom.track_y);
     }
 
     #[test]
     fn offset_round_trips_for_top_middle_and_bottom() {
-        let geom = geometry(1000, 4, 20, 10, 100, 50).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 100, 50, false).expect("scrollbar");
         assert_eq!(offset_for_thumb_top(geom.track_y, &geom, 100), 100);
         let middle = geom.track_y + (geom.track_h - geom.thumb_h) / 2.0;
         assert_eq!(offset_for_thumb_top(middle, &geom, 100), 50);
@@ -99,13 +104,23 @@ mod tests {
 
     #[test]
     fn no_scrollbar_without_history_or_space() {
-        assert!(geometry(1000, 4, 20, 10, 0, 0).is_none());
-        assert!(geometry(4, 4, 20, 10, 20, 0).is_none());
+        assert!(geometry(1000, 4, 20, 10, 0, 0, false).is_none());
+        assert!(geometry(4, 4, 20, 10, 20, 0, false).is_none());
     }
 
     #[test]
     fn thumb_has_a_minimum_height() {
-        let geom = geometry(1000, 4, 20, 10, 1000, 500).expect("scrollbar");
+        let geom = geometry(1000, 4, 20, 10, 1000, 500, false).expect("scrollbar");
         assert_eq!(geom.thumb_h, 12.0);
+    }
+
+    #[test]
+    fn hovered_thumb_is_wider_and_keeps_its_right_edge() {
+        let rest = geometry(1000, 4, 20, 10, 100, 50, false).expect("scrollbar");
+        let hovered = geometry(1000, 4, 20, 10, 100, 50, true).expect("scrollbar");
+        assert!(hovered.width > rest.width);
+        assert_eq!(hovered.x + hovered.width, rest.x + rest.width);
+        assert_eq!(hovered.thumb_y, rest.thumb_y);
+        assert_eq!(hovered.thumb_h, rest.thumb_h);
     }
 }

@@ -27,6 +27,8 @@ pub struct Renderer {
     shape_cache: shape::ShapeCache,
     /// Whether the missing-shaping warning has already been logged.
     shape_warned: bool,
+    /// Whether the pointer is over the scrollbar, which widens its thumb.
+    scrollbar_hover: bool,
 }
 
 impl Renderer {
@@ -42,6 +44,7 @@ impl Renderer {
             padding,
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
+            scrollbar_hover: false,
         })
     }
 
@@ -152,14 +155,20 @@ impl Renderer {
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
+            self.scrollbar_hover,
         ) {
-            self.fill_rect(
-                geom.x,
-                geom.thumb_y,
-                geom.width,
-                geom.thumb_h,
-                self.theme.indexed(8),
-            );
+            let color = self.theme.indexed(8);
+            if self.scrollbar_hover {
+                let track_w = 2.0;
+                let track_x = geom.x + (geom.width - track_w) / 2.0;
+                let track = Rgb::new(
+                    blend(self.theme.background.r, color.r, 0.4),
+                    blend(self.theme.background.g, color.g, 0.4),
+                    blend(self.theme.background.b, color.b, 0.4),
+                );
+                self.fill_rect(track_x, geom.track_y, track_w, geom.track_h, track);
+            }
+            self.fill_rect(geom.x, geom.thumb_y, geom.width, geom.thumb_h, color);
         }
     }
 
@@ -412,6 +421,12 @@ impl Renderer {
 
     pub fn padding(&self) -> u32 {
         self.padding
+    }
+
+    /// Marks whether the pointer is over the scrollbar. A hovered scrollbar
+    /// widens its thumb and shows the track.
+    pub fn set_scrollbar_hover(&mut self, hover: bool) {
+        self.scrollbar_hover = hover;
     }
 }
 
@@ -1314,6 +1329,7 @@ mod tests {
             snapshot.rows,
             snapshot.history,
             snapshot.display_offset,
+            false,
         )
         .expect("history should show a scrollbar");
         let x = (geom.x + geom.width / 2.0).round() as u32;
@@ -1321,6 +1337,49 @@ mod tests {
         let width = renderer.pixmap.width() as usize;
         assert_eq!(
             renderer.pixels()[y * width + x as usize],
+            packed(renderer.theme.indexed(8))
+        );
+    }
+
+    #[test]
+    fn hovering_widens_the_scrollbar_thumb() {
+        let mut renderer = default_renderer();
+        renderer.resize(200, 300);
+        let snapshot = scroll_snapshot(10, 20, 5);
+        let maps: Vec<_> = (0..snapshot.rows)
+            .map(|_| VisualMap::identity(snapshot.cols))
+            .collect();
+        renderer.set_scrollbar_hover(true);
+        renderer.draw(&snapshot, &maps, None);
+        renderer.sync();
+
+        let rest = crate::scrollbar::geometry(
+            renderer.pixmap.width(),
+            renderer.padding,
+            renderer.fonts.cell_h,
+            snapshot.rows,
+            snapshot.history,
+            snapshot.display_offset,
+            false,
+        )
+        .expect("history should show a scrollbar");
+        let hovered = crate::scrollbar::geometry(
+            renderer.pixmap.width(),
+            renderer.padding,
+            renderer.fonts.cell_h,
+            snapshot.rows,
+            snapshot.history,
+            snapshot.display_offset,
+            true,
+        )
+        .expect("history should show a scrollbar");
+        let y = (hovered.thumb_y + hovered.thumb_h / 2.0).round() as usize;
+        let width = renderer.pixmap.width() as usize;
+        let left = hovered.x.round() as usize;
+        // The wider thumb reaches left of where the resting thumb stops.
+        assert!(left < rest.x.round() as usize);
+        assert_eq!(
+            renderer.pixels()[y * width + left],
             packed(renderer.theme.indexed(8))
         );
     }
