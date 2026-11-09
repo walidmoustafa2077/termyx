@@ -11,15 +11,16 @@ pub enum FontError {
     InvalidFont,
 }
 
-/// Families tried, in order, when the configured Arabic family is unavailable.
-///
-/// `Segoe UI` is last on purpose: it covers Arabic letters but does not ligate
-/// lam-alef, so it is only usable for isolated glyphs. Faces that fail the
-/// lam-alef check are skipped anyway.
-/// Bundled OFL Arabic face; loaded before system fonts so the fallback chain
-/// never depends on Arial or another proportional host font.
+/// Bundled OFL Arabic face, loaded before system fonts so it is always
+/// available when explicitly requested (`arabic_family = "Kawkab Mono"`).
 pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabMono-Regular.ttf");
 
+/// Families tried, in order, when the configured Arabic family is unavailable.
+///
+/// Arial is the default Arabic face. Kawkab Mono is last on purpose: its
+/// narrow metrics render disconnected at 16 px, so it is a last-resort
+/// fallback rather than an auto-selected default. Faces that fail the
+/// lam-alef check are skipped anyway.
 const ARABIC_FALLBACKS: &[&str] = &[
     "Arial",
     "Tahoma",
