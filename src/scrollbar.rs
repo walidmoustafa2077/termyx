@@ -5,7 +5,7 @@ pub const WIDTH: f32 = 6.0;
 /// Width of the scrollbar thumb in pixels while hovered or dragged.
 pub const HOVER_WIDTH: f32 = 12.0;
 const MIN_THUMB_H: f32 = 12.0;
-const EDGE_GAP: f32 = 2.0;
+const EDGE_GAP: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollbarGeometry {
@@ -18,11 +18,10 @@ pub struct ScrollbarGeometry {
 }
 
 /// Thumb geometry for the given viewport and scrollback state.
-/// Returns `None` when there is no history, the viewport is too narrow, or the
-/// view is live at the bottom and the pointer is away from the scrollbar. The
-/// track spans the viewport height so the thumb reaches both ends. `hovered`
-/// widens the thumb leftward so its right edge stays pinned to the window edge
-/// and reveals the scrollbar at the live bottom.
+/// Returns `None` when there is no history or the viewport is too narrow. The
+/// track spans the viewport height minus the edge gap so the thumb keeps clear
+/// of the window borders at both ends. `hovered` widens the thumb leftward so
+/// its right edge stays a constant distance from the window edge.
 pub fn geometry(
     viewport_width: u32,
     viewport_height: u32,
@@ -32,7 +31,7 @@ pub fn geometry(
     offset: usize,
     hovered: bool,
 ) -> Option<ScrollbarGeometry> {
-    if history == 0 || viewport_height == 0 || rows == 0 || (offset == 0 && !hovered) {
+    if history == 0 || viewport_height == 0 || rows == 0 {
         return None;
     }
 
@@ -78,14 +77,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_scrollbar_at_live_view_without_hover() {
-        assert!(geometry(1000, 600, 4, 10, 20, 0, false).is_none());
+    fn scrollbar_stays_visible_at_live_view() {
+        let geom = geometry(1000, 600, 4, 10, 20, 0, false).expect("scrollbar");
+        assert_eq!(geom.thumb_y + geom.thumb_h, geom.track_y + geom.track_h);
     }
 
     #[test]
-    fn hovering_reveals_the_thumb_at_live_view() {
-        let geom = geometry(1000, 600, 4, 10, 20, 0, true).expect("scrollbar");
-        assert_eq!(geom.thumb_y + geom.thumb_h, geom.track_y + geom.track_h);
+    fn thumb_keeps_clear_of_the_window_borders() {
+        let geom = geometry(1000, 600, 4, 10, 20, 0, false).expect("scrollbar");
+        assert!(geom.thumb_y + geom.thumb_h <= 600.0 - 4.0);
+        assert!(geom.x + geom.width <= 1000.0 - 4.0);
     }
 
     #[test]
