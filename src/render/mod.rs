@@ -24,6 +24,8 @@ pub struct Renderer {
     pub cache: GlyphCache,
     pub theme: Theme,
     padding: u32,
+    /// Pixels reserved above the grid for the tab strip.
+    top_inset: u32,
     shape_cache: shape::ShapeCache,
     /// Whether the missing-shaping warning has already been logged.
     shape_warned: bool,
@@ -42,6 +44,7 @@ impl Renderer {
             cache: GlyphCache::new(),
             theme,
             padding,
+            top_inset: 0,
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
             scrollbar_hover: false,
@@ -80,6 +83,7 @@ impl Renderer {
         let cell_w = self.fonts.cell_w as f32;
         let cell_h = self.fonts.cell_h as f32;
         let padding = self.padding as f32;
+        let top = self.grid_top();
 
         self.draw_cell_backgrounds(snapshot, maps, selection, cell_w, cell_h);
 
@@ -96,7 +100,7 @@ impl Renderer {
         };
         if let Some((row, visual, shape)) = cursor {
             let x = padding + visual as f32 * cell_w;
-            let y = padding + row as f32 * cell_h;
+            let y = top + row as f32 * cell_h;
             match shape {
                 CursorShape::Block => {
                     self.fill_rect(x, y, cell_w, cell_h, self.theme.cursor);
@@ -151,7 +155,7 @@ impl Renderer {
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
-            self.padding,
+            self.padding + self.top_inset,
             self.fonts.cell_h,
             snapshot.rows,
             snapshot.history,
@@ -185,7 +189,7 @@ impl Renderer {
             let Some(map) = maps.get(row) else {
                 continue;
             };
-            let y = self.padding as f32 + row as f32 * cell_h;
+            let y = self.grid_top() + row as f32 * cell_h;
             for (logical, cell) in line.cells.iter().enumerate() {
                 let x = self.padding as f32 + map.visual_of(logical) as f32 * cell_w;
                 let (_, background) = self.cell_colors(cell.style);
@@ -212,9 +216,10 @@ impl Renderer {
         let cell_w = self.fonts.cell_w as f32;
         let cell_h = self.fonts.cell_h as f32;
         let padding = self.padding as f32;
+        let top = self.grid_top();
         // Share one baseline across the primary and Arabic faces so Arabic
         // sits on the same line as Latin instead of floating above it.
-        let baseline = padding + row as f32 * cell_h + self.fonts.line_ascent();
+        let baseline = top + row as f32 * cell_h + self.fonts.line_ascent();
         let units = run.units_per_em.max(1) as f32;
         let face_scale = if run.arabic {
             self.fonts.arabic.as_ref().map_or(1.0, |face| face.scale)
@@ -296,7 +301,7 @@ impl Renderer {
             if !run.arabic && cluster.text == "\u{2580}" {
                 self.fill_rect(
                     padding + slot_start as f32 * cell_w,
-                    padding + row as f32 * cell_h,
+                    top + row as f32 * cell_h,
                     slot_w,
                     cell_h / 2.0,
                     color,
@@ -358,7 +363,7 @@ impl Renderer {
             let Some(map) = maps.get(row) else {
                 continue;
             };
-            let y = self.padding as f32 + row as f32 * cell_h;
+            let y = self.grid_top() + row as f32 * cell_h;
             for (logical, cell) in line.cells.iter().enumerate() {
                 if cell.style.hidden {
                     continue;
@@ -450,6 +455,21 @@ impl Renderer {
 
     pub fn padding(&self) -> u32 {
         self.padding
+    }
+
+    /// Pixels reserved above the grid for the tab strip. Drawing offsets every
+    /// grid row and the scrollbar's track by this amount.
+    pub fn set_top_inset(&mut self, inset: u32) {
+        self.top_inset = inset;
+    }
+
+    pub fn top_inset(&self) -> u32 {
+        self.top_inset
+    }
+
+    /// Y of the grid's first row: the window padding plus the tab strip.
+    fn grid_top(&self) -> f32 {
+        (self.padding + self.top_inset) as f32
     }
 
     /// Marks whether the pointer is over the scrollbar. A hovered scrollbar
@@ -646,6 +666,35 @@ mod tests {
             at(padding + cell_h - 1),
             background,
             "the cell's lower half must stay empty"
+        );
+    }
+
+    #[test]
+    fn the_grid_starts_below_the_top_inset() {
+        let mut renderer = default_renderer();
+        renderer.resize(200, 120);
+        renderer.set_top_inset(32);
+        assert_eq!(renderer.top_inset(), 32);
+
+        let cell_h = renderer.fonts.cell_h;
+        let padding = renderer.padding();
+        let snapshot = single_cell_snapshot(Cell {
+            text: "x".into(),
+            width: 1,
+            style: Style::default(),
+        });
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.sync();
+
+        let rows = painted_rows(&renderer);
+        let first = *rows.first().expect("the glyph must paint some ink");
+        assert!(
+            first >= (padding + 32) as usize,
+            "nothing may paint inside the strip (topmost ink at row {first})"
+        );
+        assert!(
+            first < (padding + 32 + cell_h) as usize,
+            "the glyph must paint in the first row below the inset (topmost ink at row {first})"
         );
     }
 

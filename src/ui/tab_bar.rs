@@ -3,18 +3,27 @@
 
 /// Height of the strip in logical pixels; the terminal grid starts below it.
 pub const TAB_STRIP_HEIGHT: f32 = 32.0;
+// The rest of the strip is layout and hit-testing geometry with no non-test
+// consumer until Task 8 paints it, so it compiles for the tests only.
 /// Widest a single tab grows before the title is clipped.
+#[cfg(test)]
 pub const MAX_TAB_WIDTH: f32 = 220.0;
 /// Narrowest a tab shrinks to while the strip still has room.
+#[cfg(test)]
 pub const MIN_TAB_WIDTH: f32 = 90.0;
 /// Width of the `+` and `⌄` buttons.
+#[cfg(test)]
 pub const BUTTON_WIDTH: f32 = 32.0;
+#[cfg(test)]
 const CLOSE_SIZE: f32 = 16.0;
+#[cfg(test)]
 const TAB_PADDING: f32 = 12.0;
 // Room beside the title: left inset for the glyph, the close button, padding.
 // Wide enough that a normal title reaches `MAX_TAB_WIDTH` and stays capped there.
+#[cfg(test)]
 const TITLE_SIZE: f32 = 120.0;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -23,12 +32,14 @@ pub struct Rect {
     pub h: f32,
 }
 
+#[cfg(test)]
 impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabRect {
     pub index: usize,
@@ -36,6 +47,7 @@ pub struct TabRect {
     pub close: Rect,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabHit {
     Tab(usize),
@@ -44,6 +56,7 @@ pub enum TabHit {
     Chevron,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabBarLayout {
     pub width: f32,
@@ -53,6 +66,7 @@ pub struct TabBarLayout {
     pub chevron: Rect,
 }
 
+#[cfg(test)]
 impl TabBarLayout {
     /// `width_of` measures a title at the UI font size, so a long title both
     /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip

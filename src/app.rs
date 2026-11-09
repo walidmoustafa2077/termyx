@@ -107,6 +107,12 @@ impl App {
         }
     }
 
+    /// Pixels reserved above the grid for the tab strip. The strip geometry is
+    /// float; the renderer takes an integer inset.
+    fn tab_strip_px(&self) -> u32 {
+        crate::ui::tab_bar::TAB_STRIP_HEIGHT as u32
+    }
+
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
         let monitor = event_loop.primary_monitor().map(|monitor| {
             let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
@@ -153,6 +159,7 @@ impl App {
         let theme = Theme::from_config(&self.config.theme);
         platform::apply_dark_frame(&window, theme.background);
         let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
+        renderer.set_top_inset(self.tab_strip_px());
 
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -165,6 +172,7 @@ impl App {
             renderer.fonts().cell_w,
             renderer.fonts().cell_h,
             renderer.padding(),
+            renderer.top_inset(),
         );
         let terminal = Terminal::new_with_events(
             cols,
@@ -227,6 +235,7 @@ impl App {
             renderer.fonts().cell_w,
             renderer.fonts().cell_h,
             renderer.padding(),
+            renderer.top_inset(),
         );
         if cols == self.cols && rows == self.rows {
             return false;
@@ -668,7 +677,7 @@ impl App {
         let size = window.inner_size();
         scrollbar::geometry(
             size.width,
-            renderer.padding(),
+            renderer.padding() + renderer.top_inset(),
             renderer.fonts().cell_h,
             self.rows,
             terminal.scrollable_history(),
@@ -764,7 +773,7 @@ impl App {
         let (row, column) = cell_at(
             self.cursor_pos.0,
             self.cursor_pos.1,
-            renderer.padding() as f64,
+            (renderer.padding() + renderer.top_inset()) as f64,
             renderer.fonts().cell_w as f64,
             renderer.fonts().cell_h as f64,
             self.cols,
@@ -788,7 +797,7 @@ impl App {
         let (row, visual) = cell_at(
             x,
             y,
-            renderer.padding() as f64,
+            (renderer.padding() + renderer.top_inset()) as f64,
             renderer.fonts().cell_w as f64,
             renderer.fonts().cell_h as f64,
             self.cols,
@@ -1054,12 +1063,19 @@ fn scaled_font_size(size: f32, scale_factor: f64) -> f32 {
     (size as f64 * scale_factor) as f32
 }
 
-fn grid_size(width: u32, height: u32, cell_w: u32, cell_h: u32, padding: u32) -> (usize, usize) {
+fn grid_size(
+    width: u32,
+    height: u32,
+    cell_w: u32,
+    cell_h: u32,
+    padding: u32,
+    top_inset: u32,
+) -> (usize, usize) {
     // The scrollbar lives in a reserved gutter so its hovered width never
     // covers the last text column.
     let gutter = scrollbar::GUTTER.ceil() as u32;
     let usable_w = width.saturating_sub(padding.saturating_mul(2).saturating_add(gutter));
-    let usable_h = height.saturating_sub(padding.saturating_mul(2));
+    let usable_h = height.saturating_sub(padding.saturating_mul(2).saturating_add(top_inset));
     let cols = (usable_w / cell_w.max(1)).max(20) as usize;
     let rows = (usable_h / cell_h.max(1)).max(5) as usize;
     (cols, rows)
@@ -1222,17 +1238,25 @@ mod tests {
 
     #[test]
     fn grid_size_uses_padding_and_minimums() {
-        assert_eq!(grid_size(1200, 800, 10, 20, 4), (117, 39));
-        assert_eq!(grid_size(100, 100, 10, 20, 4), (20, 5));
+        assert_eq!(grid_size(1200, 800, 10, 20, 4, 0), (117, 39));
+        assert_eq!(grid_size(100, 100, 10, 20, 4, 0), (20, 5));
     }
 
     #[test]
     fn grid_size_reserves_the_scrollbar_gutter() {
         let usable = 1200 - 4 * 2;
         assert_eq!(
-            grid_size(1200, 800, 1, 20, 4).0,
+            grid_size(1200, 800, 1, 20, 4, 0).0,
             usable - scrollbar::GUTTER.ceil() as usize
         );
+    }
+
+    #[test]
+    fn the_tab_strip_costs_two_rows_of_grid() {
+        let padding = 8;
+        let (_, full) = grid_size(800, 600, 8, 16, padding, 0);
+        let (_, with_strip) = grid_size(800, 600, 8, 16, padding, 32);
+        assert_eq!(full - with_strip, 2);
     }
 
     #[test]
