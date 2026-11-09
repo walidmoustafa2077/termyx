@@ -159,6 +159,27 @@ lam-alef aligned), pure Arabic, right-to-left drag selection with
 without a panic. The Persian/Urdu and harakat examples above were not
 separately re-run in this check.
 
+## MVP acceptance (M5)
+
+Measured on Windows 11 x64, AMD Ryzen 5 2600 (6 cores / 12 threads,
+3.4 GHz), release build, 2026-11-10:
+
+| Check | Target | Measured |
+| --- | --- | --- |
+| Full-frame redraw at 200x50 | < 8 ms | 7.08 ms fastest, 7.57 ms median over 40 frames |
+| Input-to-paint | < 16 ms | 9.6 ms median, 5.9 ms fastest over 24 keystrokes |
+| Cold start | < 300 ms | 47 ms warm, 510 ms on the first launch after a build |
+| Resident memory, idle | < 80 MB | 41.1 MB working set / 32.2 MB private |
+| Resident memory, 10,000 scrollback lines | < 80 MB | 71.7 MB working set / 65.3 MB private |
+| Release binary | < 15 MB | 4.05 MB |
+| Code page | 65001 | `chcp` reports 65001 and UTF-8 survives the PTY round trip |
+
+The renderer budget is checked by an ignored test; run
+`cargo test --release full_frame_redraw -- --ignored --nocapture`. Arabic,
+lam-alef, selection, and resize behavior is covered by the test suite and the
+Phase 2 acceptance run above. PowerShell was exercised here; bash and zsh use
+the same VT path but were not run on this machine.
+
 ## Known limitations
 
 - Bidi is per row. A soft-wrapped RTL paragraph is ordered row by row.
@@ -168,7 +189,7 @@ separately re-run in this check.
   boundary; the ligature is still drawn once.
 - Text uses grayscale antialiasing with a mild gamma lift, not ClearType
   subpixel rendering.
-- OSC 8 hyperlinks are parsed and stored per cell but are not clickable yet.
+- OSC 8 hyperlinks are ignored; links are not shown and cannot be opened.
 - OSC 133 shell integration is not parsed; prompts and command marks are not
   exposed to the terminal.
 - IME preedit is not shown; only committed text reaches the shell.
