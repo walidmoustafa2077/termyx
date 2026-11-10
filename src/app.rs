@@ -976,22 +976,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Title { session, title } => {
                 // The label belongs to its tab whether or not that tab is on
                 // screen; only the active tab also names the window.
-                self.tabs.set_title(session, &title);
-                if self
-                    .tabs
-                    .active()
-                    .is_some_and(|active| active.id == session)
-                {
+                if route_title(&mut self.tabs, session, &title) {
                     self.apply_title(&title);
                 }
             }
             UserEvent::ResetTitle { session } => {
-                self.tabs.set_title(session, "");
-                if self
-                    .tabs
-                    .active()
-                    .is_some_and(|active| active.id == session)
-                {
+                if route_title(&mut self.tabs, session, "") {
                     self.apply_title("");
                 }
             }
@@ -1125,6 +1115,16 @@ fn feed_session(tabs: &mut TabSet, session: SessionId, bytes: &[u8]) -> FeedOutc
     } else {
         FeedOutcome::Background
     }
+}
+
+/// Routes one title event to the tab it names.
+///
+/// The label always belongs to that tab, on screen or not; an id no session
+/// carries changes nothing. Returns whether the caller must also apply the
+/// title to the window, which is true only for the tab on screen.
+fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> bool {
+    tabs.set_title(session, title);
+    tabs.active().is_some_and(|active| active.id == session)
 }
 
 fn grid_size(
@@ -1749,5 +1749,39 @@ mod tests {
         assert_eq!(strip_px(1.0), 32);
         assert_eq!(strip_px(1.25), 40);
         assert_eq!(strip_px(1.5), 48);
+    }
+
+    #[test]
+    fn a_background_title_labels_its_tab_but_not_the_window() {
+        // `App` needs a live event loop, so the routing decision is pinned
+        // through `route_title`: its return value is exactly the condition
+        // `user_event` uses to rename the window.
+        let mut tabs = TabSet::new();
+        let background = tabs.next_id();
+        let shown = tabs.next_id();
+        tabs.push(test_session(background));
+        tabs.push(test_session(shown));
+
+        // A background tab's label lands on that tab and only that tab, and
+        // the window keeps its name.
+        assert!(!route_title(&mut tabs, background, "build"));
+        assert_eq!(tabs.titles(), vec!["build", FALLBACK_TITLE]);
+
+        // The tab on screen names both its label and the window.
+        assert!(route_title(&mut tabs, shown, "tests"));
+        assert_eq!(tabs.titles(), vec!["build", "tests"]);
+
+        // Resetting either tab clears just that label back to the fallback;
+        // only the tab on screen may reset the window name.
+        assert!(!route_title(&mut tabs, background, ""));
+        assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, "tests"]);
+        assert!(route_title(&mut tabs, shown, ""));
+        assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, FALLBACK_TITLE]);
+
+        // A late title from a closed tab changes no label and never names the
+        // window.
+        let closed = tabs.next_id();
+        assert!(!route_title(&mut tabs, closed, "ghost"));
+        assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, FALLBACK_TITLE]);
     }
 }
