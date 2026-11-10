@@ -48,10 +48,10 @@ pub const DRAG_GUTTER: f32 = 24.0;
 /// Width of one of the three window controls at the strip's right end,
 /// matching the Windows caption buttons.
 pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
-/// Logical px a tab spends on chrome besides the title itself: the left
-/// padding, the icon, the gap after the icon, the gap before the close box,
-/// the close box, and the right padding — `12 + 16 + 6 + 6 + 16 + 12`.
-pub const TITLE_SIZE: f32 = 68.0;
+/// Logical px a tab spends on chrome besides the title itself: the icon inset,
+/// the icon, the gap after the icon, the gap before the close box, the close
+/// box, and the right padding — `10 + 16 + 10 + 10 + 16 + 12`.
+pub const TITLE_SIZE: f32 = 74.0;
 /// Em size of a tab title at 100 % zoom, deliberately below the chrome size
 /// (`fonts::UI_SIZE_PX`, 14) the menus, buttons and caption glyphs use.
 ///
@@ -60,12 +60,29 @@ pub const TITLE_SIZE: f32 = 68.0;
 /// wider than the reference. 12.5 keeps the width on the reference and the cap
 /// within a pixel of it.
 pub const TAB_TITLE_SIZE: f32 = 12.5;
-/// Left inset from the tab edge to the app icon.
+/// Inset from the tab's left edge to the shell icon.
+///
+/// Measured on Windows Terminal 1.24: the icon's 16 px box starts 10 px inside
+/// the tab. Our previous 12 px pushed the mark two pixels right of the
+/// reference.
+pub(crate) const TAB_ICON_INSET: f32 = 10.0;
+/// Inset from the tab's right edge to the close box.
+///
+/// Wider than the icon's: WT centres the `✕` 22 px from the tab's right edge,
+/// which a 16 px box needs 12 px of padding to reach.
 pub(crate) const TAB_PADDING: f32 = 12.0;
 /// Side of the square app icon every tab stamps at its left.
 pub(crate) const TAB_ICON_SIZE: f32 = 16.0;
-/// Gap between the icon, the title, and the close box.
-pub(crate) const TAB_ICON_GAP: f32 = 6.0;
+/// Gap after the icon and before the close box.
+///
+/// Measured: WT's title ink starts 36 px inside the tab, so with a 10 px icon
+/// inset and a 16 px icon the gap is 10 px, not the 6 px we shipped.
+pub(crate) const TAB_ICON_GAP: f32 = 10.0;
+/// Radius of the active tab's top corners.
+///
+/// The measured WT corner walks in 5, 3, 2, 2, 1 px over its first six rows,
+/// which is an 8 px radius. At 6 px ours read as a tighter, squarer tab.
+pub(crate) const TAB_RADIUS: f32 = 8.0;
 const CLOSE_SIZE: f32 = 16.0;
 /// Em size of the `✕` ink, smaller than a title so the cross does not fill its
 /// box edge to edge.

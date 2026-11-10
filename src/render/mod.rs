@@ -17,8 +17,8 @@ use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::ui::tab_bar::{
-    Rect, StripHover, TabBarLayout, CLOSE_GLYPH_SIZE, TAB_ICON_GAP, TAB_ICON_SIZE, TAB_PADDING,
-    TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
+    Rect, StripHover, TabBarLayout, CLOSE_GLYPH_SIZE, TAB_ICON_GAP, TAB_ICON_INSET, TAB_ICON_SIZE,
+    TAB_RADIUS, TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
 };
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -121,6 +121,57 @@ impl RunRow<'_> {
         };
         selection.is_selected(self.index, cell, map.visual_of(cell), self.maps)
     }
+}
+
+/// Sub-samples per axis when antialiasing a rounded corner. Four is the
+/// smallest count that keeps a 8 px radius from showing stair steps at 100 %.
+const CORNER_SAMPLES: u32 = 4;
+
+/// Share of the pixel at (`x`, `y`) that lies inside the rounded rectangle
+/// whose corner is centred on (`cx`, `cy`).
+///
+/// `right`/`bottom` mirror the corner: to the rect's interior the rounded
+/// corner cuts away the part beyond the circle, so a sample is inside when it
+/// has passed the centre on the axis that points into the rect, or when it is
+/// within the radius. Windows Terminal's own corners fade over a few pixels
+/// (`#333333` → `#2E2E2E` → `#0C0C0C` in one row); a hard step is what made our
+/// tab look like a cut-out pasted on the strip.
+fn corner_coverage(
+    x: f32,
+    y: f32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    right: bool,
+    bottom: bool,
+) -> f32 {
+    let mut hits = 0;
+    for sy in 0..CORNER_SAMPLES {
+        for sx in 0..CORNER_SAMPLES {
+            let sample_x = x + (sx as f32 + 0.5) / CORNER_SAMPLES as f32;
+            let sample_y = y + (sy as f32 + 0.5) / CORNER_SAMPLES as f32;
+            let inside_x = if right {
+                sample_x <= cx
+            } else {
+                sample_x >= cx
+            };
+            let inside_y = if bottom {
+                sample_y <= cy
+            } else {
+                sample_y >= cy
+            };
+            if inside_x || inside_y {
+                hits += 1;
+                continue;
+            }
+            let dx = sample_x - cx;
+            let dy = sample_y - cy;
+            if dx * dx + dy * dy <= radius * radius {
+                hits += 1;
+            }
+        }
+    }
+    hits as f32 / (CORNER_SAMPLES * CORNER_SAMPLES) as f32
 }
 
 impl Renderer {
@@ -318,40 +369,27 @@ impl Renderer {
         self.fill_rect(0.0, 0.0, layout.width, layout.strip_h, self.theme.tab_bar);
     }
 
-    /// One fill for the active tab, its outline, then the pill behind a
-    /// hovered close button.
+    /// One fill for the active tab, then the pill behind a hovered close
+    /// button.
     ///
     /// The tab body floats on the strip: WT insets it by 8 px at the top and
     /// rounds its top corners, so the band shows above it. Only the active tab
-    /// gets a fill and an outline — its fill is the terminal background, which
-    /// makes it read as a cut-out — while an inactive tab paints nothing at
-    /// all, even under the pointer: WT highlights the control being hit, not
-    /// the tab card (measured: hovering a tab body changes no pixel).
+    /// gets a fill — its fill is the terminal background, which makes it read
+    /// as a cut-out — while an inactive tab paints nothing at all, even under
+    /// the pointer: WT highlights the control being hit, not the tab card
+    /// (measured: hovering a tab body changes no pixel).
+    ///
+    /// There is no outline. Measured on WT 1.24, the edge of the active tab
+    /// goes `#333333` → `#2E2E2E` → `#0C0C0C` across one pixel: a blend of the
+    /// rounded edge with the band, not a `#292929` stroke. Drawing a stroke
+    /// made the tab read as a card pasted on the strip.
     fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
-        let radius = 6.0 * layout.strip_h / TAB_STRIP_HEIGHT;
+        let radius = TAB_RADIUS * layout.strip_h / TAB_STRIP_HEIGHT;
         if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
             let radius = radius.min(tab.body.w / 2.0);
             self.fill_round_top(tab.body, radius, self.theme.tab_active);
-            self.stroke_tab(tab.body, radius);
         }
         self.draw_close_backdrop(layout, hover);
-    }
-
-    /// The 1 px `#292929` outline of the active tab: its top edge and both
-    /// sides. The bottom stays open so the tab meets the terminal flush, which
-    /// is what makes it read as a cut-out rather than a card.
-    fn stroke_tab(&mut self, rect: Rect, radius: f32) {
-        let color = self.theme.tab_border;
-        self.fill_rect(
-            rect.x + radius,
-            rect.y,
-            (rect.w - 2.0 * radius).max(0.0),
-            1.0,
-            color,
-        );
-        let side = (rect.h - radius).max(0.0);
-        self.fill_rect(rect.x, rect.y + radius, 1.0, side, color);
-        self.fill_rect(rect.x + rect.w - 1.0, rect.y + radius, 1.0, side, color);
     }
 
     /// The 32x24 pill behind a `✕` while the pointer is over the glyph.
@@ -491,9 +529,9 @@ impl Renderer {
         // One scale factor for the whole chrome budget, so the painter and
         // `TabBarLayout` cannot drift apart at another DPI.
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let tab_padding = TAB_PADDING * k;
+        let icon_inset = TAB_ICON_INSET * k;
         let icon_size = TAB_ICON_SIZE * k;
-        let title_left = (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
+        let title_left = (TAB_ICON_INSET + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         for tab in &layout.tabs {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
@@ -502,9 +540,9 @@ impl Renderer {
                 .get(tab.index)
                 .and_then(|icon| icon.as_ref())
                 .or(self.app_icon.as_ref())
-                .filter(|_| tab.rect.w >= tab_padding + icon_size);
+                .filter(|_| tab.rect.w >= icon_inset + icon_size);
             if let Some(icon) = icon {
-                let icon_x = tab.rect.x + tab_padding;
+                let icon_x = tab.rect.x + icon_inset;
                 // Content is positioned on the tab body, not the band: WT's
                 // icon sits centred in its 32 px card.
                 let icon_y = tab.body.y + (tab.body.h - icon_size) / 2.0;
@@ -820,22 +858,33 @@ impl Renderer {
         }
     }
 
+    /// Blends `color` into one pixel by `alpha` instead of overwriting it, so a
+    /// rounded corner can fade into whatever it is drawn over.
+    fn blend_pixel(&mut self, x: f32, y: f32, color: Rgb, alpha: f32) {
+        let pixmap_w = self.pixmap.width() as i32;
+        let pixmap_h = self.pixmap.height() as i32;
+        let px = x.round() as i32;
+        let py = y.round() as i32;
+        if px < 0 || py < 0 || px >= pixmap_w || py >= pixmap_h {
+            return;
+        }
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        let index = ((py * pixmap_w + px) * 4) as usize;
+        let alpha = (alpha * 255.0).round() as u32;
+        let data = self.pixmap.data_mut();
+        data[index] = blend_u8(data[index], color.r, alpha);
+        data[index + 1] = blend_u8(data[index + 1], color.g, alpha);
+        data[index + 2] = blend_u8(data[index + 2], color.b, alpha);
+        data[index + 3] = 255;
+    }
+
     /// Fills `rect` with its top two corners rounded by `radius`, leaving the
     /// bottom corners square so a tab meets the strip's rule flush.
     fn fill_round_top(&mut self, rect: Rect, radius: f32, color: Rgb) {
         let radius = radius.min(rect.w / 2.0).min(rect.h).max(0.0);
-        for dy in 0..radius.round() as i32 {
-            // Distance from the corner circle's centre to this row's middle.
-            let y = radius - dy as f32 - 0.5;
-            let inset = radius - (radius * radius - y * y).max(0.0).sqrt();
-            self.fill_rect(
-                rect.x + inset,
-                rect.y + dy as f32,
-                (rect.w - 2.0 * inset).max(1.0),
-                1.0,
-                color,
-            );
-        }
         self.fill_rect(
             rect.x,
             rect.y + radius,
@@ -843,22 +892,42 @@ impl Renderer {
             (rect.h - radius).max(0.0),
             color,
         );
+        let rows = radius.round() as usize;
+        // One extra column each side carries the fade into the band.
+        let caps = (radius + 1.0).min(rect.w / 2.0) as usize;
+        for dy in 0..rows {
+            let y = rect.y + dy as f32;
+            let middle = (rect.w - 2.0 * caps as f32).max(0.0);
+            self.fill_rect(rect.x + caps as f32, y, middle, 1.0, color);
+            for dx in 0..caps {
+                let left = corner_coverage(
+                    rect.x + dx as f32,
+                    y,
+                    rect.x + radius,
+                    rect.y + radius,
+                    radius,
+                    false,
+                    false,
+                );
+                self.blend_pixel(rect.x + dx as f32, y, color, left);
+                let right = corner_coverage(
+                    rect.x + rect.w - 1.0 - dx as f32,
+                    y,
+                    rect.x + rect.w - radius,
+                    rect.y + radius,
+                    radius,
+                    true,
+                    false,
+                );
+                self.blend_pixel(rect.x + rect.w - 1.0 - dx as f32, y, color, right);
+            }
+        }
     }
 
     /// Fills `rect` with all four corners rounded by `radius`, for the hover
     /// pills that float inside the strip rather than sitting on its rule.
     fn fill_round_rect(&mut self, rect: Rect, radius: f32, color: Rgb) {
         let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
-        let rows = radius.round() as i32;
-        for dy in 0..rows {
-            // Distance from the corner circle's centre to this row's middle.
-            let y = radius - dy as f32 - 0.5;
-            let inset = radius - (radius * radius - y * y).max(0.0).sqrt();
-            let width = (rect.w - 2.0 * inset).max(1.0);
-            self.fill_rect(rect.x + inset, rect.y + dy as f32, width, 1.0, color);
-            let bottom = rect.y + rect.h - 1.0 - dy as f32;
-            self.fill_rect(rect.x + inset, bottom, width, 1.0, color);
-        }
         self.fill_rect(
             rect.x,
             rect.y + radius,
@@ -866,6 +935,36 @@ impl Renderer {
             (rect.h - 2.0 * radius).max(0.0),
             color,
         );
+        let rows = radius.round() as usize;
+        let caps = (radius + 1.0).min(rect.w / 2.0) as usize;
+        for dy in 0..rows {
+            let top = rect.y + dy as f32;
+            let bottom = rect.y + rect.h - 1.0 - dy as f32;
+            let middle = (rect.w - 2.0 * caps as f32).max(0.0);
+            self.fill_rect(rect.x + caps as f32, top, middle, 1.0, color);
+            self.fill_rect(rect.x + caps as f32, bottom, middle, 1.0, color);
+            for dx in 0..caps {
+                for (x, y, is_right, is_bottom) in [
+                    (rect.x + dx as f32, top, false, false),
+                    (rect.x + rect.w - 1.0 - dx as f32, top, true, false),
+                    (rect.x + dx as f32, bottom, false, true),
+                    (rect.x + rect.w - 1.0 - dx as f32, bottom, true, true),
+                ] {
+                    let cx = if is_right {
+                        rect.x + rect.w - radius
+                    } else {
+                        rect.x + radius
+                    };
+                    let cy = if is_bottom {
+                        rect.y + rect.h - radius
+                    } else {
+                        rect.y + radius
+                    };
+                    let alpha = corner_coverage(x, y, cx, cy, radius, is_right, is_bottom);
+                    self.blend_pixel(x, y, color, alpha);
+                }
+            }
+        }
     }
 
     pub fn fonts(&self) -> &FontSet {
@@ -1276,19 +1375,19 @@ mod tests {
     }
 
     #[test]
-    fn a_border_line_splits_adjacent_tabs() {
+    fn adjacent_tabs_meet_without_a_divider() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let boundary = layout.tabs[1].rect.x;
-        // The active tab owns the outline, so its right edge is the last pixel
-        // before its neighbour; the inactive tab starts flush at `boundary`
-        // with no edge of its own.
+        // Measured: WT draws no divider between tabs — the active tab's fill
+        // ends, and the strip colour of the inactive neighbour is the contrast.
+        // A stroke here was the line that made the tab look pasted on.
         assert_eq!(
             pixel_at(&renderer, boundary - 1.0, 16.0),
-            renderer.theme.tab_border
+            renderer.theme.tab_active
         );
         assert_eq!(
             pixel_at(&renderer, boundary, 16.0),
@@ -1496,29 +1595,25 @@ mod tests {
     }
 
     #[test]
-    fn the_active_tab_keeps_an_open_bottom_edge() {
+    fn the_active_tab_is_a_flat_fill_with_an_open_bottom() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let tab = layout.tabs[0].body;
-        // The reference tab is raised: top and both sides are stroked, but its
-        // bottom edge stays the tab's own fill so it merges into the terminal.
-        assert_eq!(
-            pixel_at(&renderer, tab.x + 40.0, tab.y),
-            renderer.theme.tab_border,
-            "the top edge must be stroked"
-        );
-        assert_eq!(
-            pixel_at(&renderer, tab.x, tab.y + 16.0),
-            renderer.theme.tab_border,
-            "the left edge must be stroked"
-        );
-        assert_eq!(
-            pixel_at(&renderer, tab.x + tab.w - 1.0, tab.y + 16.0),
-            renderer.theme.tab_border,
-            "the right edge must be stroked"
-        );
+        // Measured on WT: the tab is a plain fill of the terminal colour with no
+        // stroke on any edge. The outline we drew was the "pasted card" look.
+        for (x, y, edge) in [
+            (tab.x + 40.0, tab.y, "top"),
+            (tab.x, tab.y + 16.0, "left"),
+            (tab.x + tab.w - 1.0, tab.y + 16.0, "right"),
+        ] {
+            assert_eq!(
+                pixel_at(&renderer, x, y),
+                renderer.theme.tab_active,
+                "the active tab's {edge} edge must not be stroked"
+            );
+        }
         for x in tab.x as u32 + 1..(tab.x + tab.w) as u32 - 1 {
             assert_eq!(
                 pixel_at(&renderer, x as f32, layout.strip_h - 1.0),
@@ -1828,7 +1923,7 @@ mod tests {
         let tab = layout.tabs[0].rect;
         assert_eq!(tab.w, 80.0);
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let title_left = tab.x + (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
+        let title_left = tab.x + (TAB_ICON_INSET + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_width = (tab.w - TITLE_SIZE * k).max(0.0);
         assert!(
             title_left + title_width <= layout.tabs[0].close.x,
@@ -1992,30 +2087,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_active_tab_has_its_top_and_side_borders() {
+    fn the_active_index_moves_the_tab_fill() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
-        // The second tab is the one the window shows, so the outline follows
-        // the active index rather than the leftmost tab.
+        // The second tab is the one the window shows, so the fill follows the
+        // active index rather than the leftmost tab.
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 1, None);
-        let tab = layout.tabs[1].body;
-        let border = renderer.theme.tab_border;
+        let first = layout.tabs[0].body;
+        let second = layout.tabs[1].body;
         assert_eq!(
-            pixel_at(&renderer, tab.x + 50.0, tab.y),
-            border,
-            "the active tab's top edge must be stroked"
+            pixel_at(&renderer, first.x + 50.0, 16.0),
+            renderer.theme.tab_bar,
+            "an inactive tab stays strip colour"
         );
         assert_eq!(
-            pixel_at(&renderer, tab.x, 16.0),
-            border,
-            "the active tab's left edge must be stroked"
-        );
-        assert_eq!(
-            pixel_at(&renderer, tab.x + tab.w - 1.0, 16.0),
-            border,
-            "the active tab's right edge must be stroked"
+            pixel_at(&renderer, second.x + 50.0, 16.0),
+            renderer.theme.tab_active,
+            "the active tab is filled with the terminal background"
         );
     }
 
@@ -2065,9 +2155,15 @@ mod tests {
         );
 
         // (d) The bounding box's top-left corner is rounded, so the band shows
-        // there; 10 px along the same row is the outline.
+        // there, and the corner is antialiased: a pixel on the curve is a blend
+        // of band and tab, never one or the other.
         assert_eq!(pixel_at(&renderer, body.x, body.y), theme.tab_bar);
-        assert_eq!(pixel_at(&renderer, body.x + 10.0, body.y), theme.tab_border);
+        assert_eq!(pixel_at(&renderer, body.x + 10.0, body.y), theme.tab_active);
+        let corner = pixel_at(&renderer, body.x + 4.0, body.y);
+        assert!(
+            corner.r > theme.tab_active.r && corner.r < theme.tab_bar.r,
+            "the corner must fade into the band, got {corner:?}"
+        );
 
         // (e) The only separator on this run of strip is the `+`/`⌄` boundary,
         // measured `#3D3D3D` in WT. Nothing is drawn at the `+` button's left
