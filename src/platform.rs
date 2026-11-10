@@ -48,18 +48,212 @@ pub fn apply_dark_frame(window: &winit::window::Window, background: Rgb) {
 #[cfg(not(target_os = "windows"))]
 pub fn apply_dark_frame(_window: &winit::window::Window, _background: Rgb) {}
 
-/// Restores the resize frame, snap, and shadow that removing the caption also
-/// removes.
+/// One side or corner of the resize frame.
 ///
-/// A frameless winit window loses its non-client area, so edge hit-testing and
-/// Aero Snap go with the caption. Clearing `WS_CAPTION` and `WS_POPUP` while
-/// setting `WS_THICKFRAME` (plus the system-menu and minimise/maximise bits)
-/// restores the style `DefWindowProc` resizes and snaps with, and
-/// `SWP_FRAMECHANGED` recomputes the frame without drawing a title bar.
+/// The geometry helper below compiles on every platform so its tests can run
+/// anywhere; only the Windows hit-test proc maps these to `HT*` codes.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Where a client-area point falls on the resize border, if anywhere.
 ///
-/// winit 0.30 still answers `WM_NCCALCSIZE` for an undecorated window and keeps
-/// the client area over the whole window, so these bits alone do not restore
-/// edge hit-testing; that needs a `WM_NCHITTEST` path.
+/// Kept as pure arithmetic so the edge rules can be tested without a window. A
+/// window narrower or shorter than two borders has no unambiguous edge, so
+/// every point is interior there.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn resize_edge(x: i32, y: i32, width: i32, height: i32, border: i32) -> Option<Edge> {
+    if border <= 0 || width < 2 * border || height < 2 * border {
+        return None;
+    }
+    let left = x < border;
+    let right = x >= width - border;
+    let top = y < border;
+    let bottom = y >= height - border;
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(Edge::TopLeft),
+        (_, true, true, _) => Some(Edge::TopRight),
+        (true, _, _, true) => Some(Edge::BottomLeft),
+        (_, true, _, true) => Some(Edge::BottomRight),
+        (true, ..) => Some(Edge::Left),
+        (_, true, ..) => Some(Edge::Right),
+        (_, _, true, _) => Some(Edge::Top),
+        (_, _, _, true) => Some(Edge::Bottom),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+type Hwnd = *mut core::ffi::c_void;
+#[cfg(target_os = "windows")]
+type Wparam = usize;
+#[cfg(target_os = "windows")]
+type Lparam = isize;
+#[cfg(target_os = "windows")]
+type Lresult = isize;
+#[cfg(target_os = "windows")]
+type SubclassProc = unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam, usize, usize) -> Lresult;
+
+#[cfg(target_os = "windows")]
+const WM_NCHITTEST: u32 = 0x0084;
+/// Width of the invisible border that starts a resize, in physical pixels.
+#[cfg(target_os = "windows")]
+const RESIZE_BORDER: i32 = 6;
+#[cfg(target_os = "windows")]
+const HTLEFT: Lresult = 10;
+#[cfg(target_os = "windows")]
+const HTRIGHT: Lresult = 11;
+#[cfg(target_os = "windows")]
+const HTTOP: Lresult = 12;
+#[cfg(target_os = "windows")]
+const HTTOPLEFT: Lresult = 13;
+#[cfg(target_os = "windows")]
+const HTTOPRIGHT: Lresult = 14;
+#[cfg(target_os = "windows")]
+const HTBOTTOM: Lresult = 15;
+#[cfg(target_os = "windows")]
+const HTBOTTOMLEFT: Lresult = 16;
+#[cfg(target_os = "windows")]
+const HTBOTTOMRIGHT: Lresult = 17;
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct WinPoint {
+    x: i32,
+    y: i32,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct WinRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[cfg(target_os = "windows")]
+impl Edge {
+    /// The `WM_NCHITTEST` code `DefWindowProc` turns into a resize loop.
+    fn hit_test(self) -> Lresult {
+        match self {
+            Edge::Left => HTLEFT,
+            Edge::Right => HTRIGHT,
+            Edge::Top => HTTOP,
+            Edge::TopLeft => HTTOPLEFT,
+            Edge::TopRight => HTTOPRIGHT,
+            Edge::Bottom => HTBOTTOM,
+            Edge::BottomLeft => HTBOTTOMLEFT,
+            Edge::BottomRight => HTBOTTOMRIGHT,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "comctl32")]
+unsafe extern "system" {
+    fn SetWindowSubclass(
+        hwnd: Hwnd,
+        subclass_proc: Option<SubclassProc>,
+        id: usize,
+        data: usize,
+    ) -> i32;
+    fn DefSubclassProc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" {
+    fn ScreenToClient(hwnd: Hwnd, point: *mut WinPoint) -> i32;
+    fn GetClientRect(hwnd: Hwnd, rect: *mut WinRect) -> i32;
+    fn IsZoomed(hwnd: Hwnd) -> i32;
+}
+
+/// Answers `WM_NCHITTEST` with the resize edge under the pointer.
+///
+/// winit removes the non-client area of an undecorated window, so
+/// `DefWindowProc` never reports a frame edge on its own. This subclass supplies
+/// the missing codes; every other message, and every interior point, is chained
+/// back to winit's procedure.
+///
+/// # Safety
+///
+/// Windows calls this only on the thread owning the window, with the handle the
+/// subclass was installed on.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn chrome_hit_test(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: Wparam,
+    lparam: Lparam,
+    _id: usize,
+    _data: usize,
+) -> Lresult {
+    if msg == WM_NCHITTEST && unsafe { IsZoomed(hwnd) } == 0 {
+        // SAFETY: `lparam` is the screen point the `WM_NCHITTEST` contract
+        // documents, and `hwnd` is the live window this subclass belongs to.
+        if let Some(edge) = unsafe { hit_test_edge(hwnd, lparam) } {
+            return edge.hit_test();
+        }
+    }
+    // SAFETY: chains to the procedure this subclass replaced (winit's) for
+    // every message and point this handler does not consume.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// The resize edge under a `WM_NCHITTEST` screen point, if the pointer is on
+/// the client area's border.
+///
+/// # Safety
+///
+/// `hwnd` must be a live window handle and `lparam` a `WM_NCHITTEST` point.
+#[cfg(target_os = "windows")]
+unsafe fn hit_test_edge(hwnd: Hwnd, lparam: Lparam) -> Option<Edge> {
+    // The message packs the signed screen coordinates into its two halves.
+    let mut point = WinPoint {
+        x: lparam as u16 as i16 as i32,
+        y: (lparam >> 16) as u16 as i16 as i32,
+    };
+    // SAFETY: `point` is a writable `POINT` holding a screen coordinate, the
+    // layout `ScreenToClient` converts, and `hwnd` is live.
+    if unsafe { ScreenToClient(hwnd, &mut point) } == 0 {
+        return None;
+    }
+    let mut rect = WinRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: `rect` is a writable `RECT` for the same live window.
+    if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
+        return None;
+    }
+    resize_edge(
+        point.x,
+        point.y,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        RESIZE_BORDER,
+    )
+}
+
+/// Restores the resize frame and gives the frameless window a resize border.
+///
+/// winit removes the non-client area of an undecorated window, so the style
+/// bits alone cannot make `DefWindowProc` report frame edges. This clears
+/// `WS_CAPTION` and `WS_POPUP`, restores `WS_THICKFRAME` with the system-menu
+/// and minimise/maximise bits (what the frame, snap and taskbar behaviour
+/// need), recomputes the frame without a title bar, and installs the subclass
+/// that answers the missing edge hit-test.
 #[cfg(target_os = "windows")]
 pub fn apply_custom_chrome(window: &winit::window::Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -149,6 +343,18 @@ pub fn apply_custom_chrome(window: &winit::window::Window) {
             "could not recompute the window frame"
         );
     }
+
+    // SAFETY: `hwnd` is winit's live window and the subclass is installed once
+    // per window, right after creation; `chrome_hit_test` chains every message
+    // it does not consume back to winit's procedure.
+    if unsafe { SetWindowSubclass(hwnd, Some(chrome_hit_test), 0, 0) } == 0 {
+        // Without the subclass the window still opens and paints; it just
+        // cannot be resized from its border.
+        tracing::warn!(
+            err = %std::io::Error::last_os_error(),
+            "could not install the resize hit-test subclass"
+        );
+    }
 }
 
 /// Other platforms have no caption to remove here; winit's frameless window
@@ -191,4 +397,39 @@ pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
         .arg(path)
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_corner_and_edge_midpoint_maps_to_its_edge() {
+        // 6 px border on a 200 x 100 client area: four corners and four side
+        // midpoints, eight points in all.
+        let (w, h, b) = (200, 100, 6);
+        assert_eq!(resize_edge(0, 0, w, h, b), Some(Edge::TopLeft));
+        assert_eq!(resize_edge(w - 1, 0, w, h, b), Some(Edge::TopRight));
+        assert_eq!(resize_edge(0, h - 1, w, h, b), Some(Edge::BottomLeft));
+        assert_eq!(resize_edge(w - 1, h - 1, w, h, b), Some(Edge::BottomRight));
+        assert_eq!(resize_edge(0, h / 2, w, h, b), Some(Edge::Left));
+        assert_eq!(resize_edge(w - 1, h / 2, w, h, b), Some(Edge::Right));
+        assert_eq!(resize_edge(w / 2, 0, w, h, b), Some(Edge::Top));
+        assert_eq!(resize_edge(w / 2, h - 1, w, h, b), Some(Edge::Bottom));
+    }
+
+    #[test]
+    fn an_interior_point_is_not_an_edge() {
+        assert_eq!(resize_edge(100, 50, 200, 100, 6), None);
+        // The border is a strict outer band: one pixel inside it is interior.
+        assert_eq!(resize_edge(6, 6, 200, 100, 6), None);
+    }
+
+    #[test]
+    fn a_window_too_small_for_two_borders_has_no_edges() {
+        // 10 px is narrower and shorter than 2 * 6, so no point is unambiguous.
+        assert_eq!(resize_edge(0, 0, 10, 10, 6), None);
+        assert_eq!(resize_edge(5, 5, 10, 10, 6), None);
+        assert_eq!(resize_edge(9, 9, 10, 10, 6), None);
+    }
 }
