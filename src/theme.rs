@@ -44,9 +44,9 @@ pub struct Theme {
     pub tab_bar: Rgb,
     pub tab_active: Rgb,
     pub tab_hover: Rgb,
-    /// The square behind the active tab's close button while the pointer is
-    /// over it. Lighter than the active tab so the button reads as pressed in,
-    /// not dug out.
+    /// The square behind a close button while the pointer is over its tab.
+    /// Lighter than the active tab so the button reads as pressed in, not dug
+    /// out.
     pub tab_close_hover: Rgb,
     pub tab_border: Rgb,
     /// Dropdown panel. Fixed for now, in the strip's dark family; a light

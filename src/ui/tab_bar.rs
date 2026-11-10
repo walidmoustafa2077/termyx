@@ -6,14 +6,20 @@ pub const TAB_STRIP_HEIGHT: f32 = 32.0;
 /// Widest a single tab grows before the title is clipped.
 pub const MAX_TAB_WIDTH: f32 = 220.0;
 /// Narrowest a tab shrinks to while the strip still has room.
-pub const MIN_TAB_WIDTH: f32 = 90.0;
+pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width of the `+` and `⌄` buttons.
 pub const BUTTON_WIDTH: f32 = 32.0;
+/// Logical px a tab spends on chrome besides the title itself: the left
+/// padding, the icon, two gaps, the close box, and the right padding. At the
+/// reference's tight metrics the close box shares the right padding.
+pub const TITLE_SIZE: f32 = 56.0;
+/// Left inset from the tab edge to the app icon.
+pub(crate) const TAB_PADDING: f32 = 12.0;
+/// Side of the square app icon every tab stamps at its left.
+pub(crate) const TAB_ICON_SIZE: f32 = 16.0;
+/// Gap between the icon, the title, and the close box.
+pub(crate) const TAB_ICON_GAP: f32 = 6.0;
 const CLOSE_SIZE: f32 = 16.0;
-const TAB_PADDING: f32 = 12.0;
-// Room beside the title: left inset for the glyph, the close button, padding.
-// Wide enough that a normal title reaches `MAX_TAB_WIDTH` and stays capped there.
-const TITLE_SIZE: f32 = 120.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -183,12 +189,29 @@ mod tests {
 
     #[test]
     fn tabs_are_laid_out_left_to_right_and_are_capped() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], fixed);
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], |_| 200.0);
         assert_eq!(layout.tabs.len(), 3);
         assert!((layout.tabs[0].rect.x - 0.0).abs() < f32::EPSILON);
         assert!(layout.tabs[1].rect.x > layout.tabs[0].rect.x);
         assert!(layout.tabs[2].rect.x > layout.tabs[1].rect.x);
         assert!((layout.tabs[0].rect.w - MAX_TAB_WIDTH).abs() < f32::EPSILON);
+
+        // A title narrower than the cap hugs its own text plus the chrome.
+        let short = TabBarLayout::new(1200.0, 32.0, &["one"], |_| 30.0);
+        assert_eq!(short.tabs[0].rect.w, 30.0 + TITLE_SIZE);
+    }
+
+    #[test]
+    fn a_short_title_hugs_its_text() {
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one"], |_| 30.0);
+        assert_eq!(layout.tabs[0].rect.w, 30.0 + TITLE_SIZE);
+    }
+
+    #[test]
+    fn a_narrow_tab_still_leaves_room_for_every_chrome_piece() {
+        // Both are layout constants, so the invariant is checked at compile
+        // time rather than re-evaluated by every test run.
+        const { assert!(MIN_TAB_WIDTH >= TITLE_SIZE) };
     }
 
     #[test]

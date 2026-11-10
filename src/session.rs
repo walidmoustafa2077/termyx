@@ -395,6 +395,19 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_path_does_not_replace_the_stored_title() {
+        let mut slots = TabSlots::new();
+        slots.push(1);
+        slots.set_title(1, "Windows PowerShell");
+        assert!(!slots.set_title(1, r"C:\WINDOWS\System32\WindX"));
+        assert_eq!(
+            slots.titles(),
+            vec!["Windows PowerShell"],
+            "a ConPTY path must leave the profile name in place"
+        );
+    }
+
+    #[test]
     fn a_new_slot_becomes_active_and_ids_never_repeat() {
         let mut slots = TabSlots::new();
         slots.push(1);

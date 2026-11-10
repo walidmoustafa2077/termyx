@@ -41,7 +41,7 @@ impl Renderer {
             } else {
                 Some(self.fonts().ui_width(&item.shortcut, ui_px))
             };
-            ui_text::draw_text(
+            ui_text::draw_text_ellipsis(
                 self,
                 &item.label,
                 row.x + 26.0 * k,

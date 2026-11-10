@@ -15,7 +15,10 @@ use crate::selection::Selection;
 use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
-use crate::ui::tab_bar::{StripHover, TabBarLayout, TAB_STRIP_HEIGHT};
+use crate::ui::tab_bar::{
+    Rect, StripHover, TabBarLayout, TAB_ICON_GAP, TAB_ICON_SIZE, TAB_PADDING, TAB_STRIP_HEIGHT,
+    TITLE_SIZE,
+};
 use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
@@ -216,7 +219,7 @@ impl Renderer {
         self.draw_tabs(layout, active, hover);
         self.draw_band_rule(layout);
         self.draw_buttons(layout, ui_px, hover);
-        self.draw_titles(layout, ui_px, active);
+        self.draw_titles(layout, ui_px, active, hover);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -225,14 +228,17 @@ impl Renderer {
         self.fill_rect(0.0, 0.0, layout.width, layout.strip_h, self.theme.tab_bar);
     }
 
-    /// One fill per tab, then the details that tell them apart: a rule between
-    /// neighbours and, on the active tab under the pointer, a backdrop behind
-    /// the close button.
+    /// One fill per tab, then the outlines that tell them apart, then the
+    /// backdrop behind a hovered close button.
+    ///
+    /// Strokes run after every fill, or a later tab's fill would cover its
+    /// neighbour's right edge.
     fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
         let hovered = match hover {
             Some(StripHover::Tab(index)) => Some(index),
             _ => None,
         };
+        let radius = 8.0 * layout.strip_h / TAB_STRIP_HEIGHT;
         for tab in &layout.tabs {
             let color = if tab.index == active {
                 self.theme.tab_active
@@ -241,30 +247,47 @@ impl Renderer {
             } else {
                 self.theme.tab_bar
             };
-            self.fill_rect(tab.rect.x, 0.0, tab.rect.w, layout.strip_h, color);
+            self.fill_round_top(tab.rect, radius.min(tab.rect.w / 2.0), color);
         }
-        // The first tab starts at the window edge; every later one gets a line
-        // on its left, or two inactive tabs merge into one block.
-        for tab in layout.tabs.iter().skip(1) {
-            self.fill_rect(tab.rect.x, 0.0, 1.0, layout.strip_h, self.theme.tab_border);
+        for tab in &layout.tabs {
+            self.stroke_tab(tab.rect, radius.min(tab.rect.w / 2.0));
         }
-        self.draw_close_backdrop(layout, active, hovered);
+        self.draw_close_backdrop(layout, hovered);
     }
 
-    /// Paints the square behind the active tab's `✕` while that tab is
-    /// hovered, so the hit target reads as the button it already is.
-    fn draw_close_backdrop(&mut self, layout: &TabBarLayout, active: usize, hover: Option<usize>) {
-        if hover != Some(active) {
-            return;
-        }
-        let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) else {
+    /// The 1 px `#2b2b2b` outline of one tab: its top edge and both sides. The
+    /// bottom stays open so the tab meets the strip's rule flush.
+    fn stroke_tab(&mut self, rect: Rect, radius: f32) {
+        let color = self.theme.tab_border;
+        self.fill_rect(
+            rect.x + radius,
+            rect.y,
+            (rect.w - 2.0 * radius).max(0.0),
+            1.0,
+            color,
+        );
+        let side = (rect.h - radius).max(0.0);
+        self.fill_rect(rect.x, rect.y + radius, 1.0, side, color);
+        self.fill_rect(rect.x + rect.w - 1.0, rect.y + radius, 1.0, side, color);
+    }
+
+    /// Paints the rounded square behind a `✕` while its tab is hovered, so the
+    /// hit target reads as the button it already is. The active tab shows the
+    /// glyph at rest; every tab shows the backdrop while under the pointer.
+    fn draw_close_backdrop(&mut self, layout: &TabBarLayout, hover: Option<usize>) {
+        let Some(index) = hover else {
             return;
         };
-        self.fill_rect(
-            tab.close.x,
-            tab.close.y,
-            tab.close.w,
-            tab.close.h,
+        let Some(tab) = layout.tabs.iter().find(|tab| tab.index == index) else {
+            return;
+        };
+        if tab.close.w <= 0.0 {
+            return;
+        }
+        let radius = 4.0 * layout.strip_h / TAB_STRIP_HEIGHT;
+        self.fill_round_top(
+            tab.close,
+            radius.min(tab.close.w / 2.0),
             self.theme.tab_close_hover,
         );
     }
@@ -280,14 +303,10 @@ impl Renderer {
         );
     }
 
-    /// The `+` and `⌄` glyphs. They share one inset and one colour, so they are
-    /// painted from the same pair of constants. A hovered button is filled with
-    /// the strip's `#1f1f1f` tone before its glyph goes down.
+    /// The `+` and `⌄` glyphs, centred in their buttons. A hovered button is
+    /// filled with the strip's `#1f1f1f` tone before its glyph goes down.
     fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32, hover: Option<StripHover>) {
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let inset_x = 9.0 * k;
-        let top = 6.0 * k;
-        let width = layout.plus.w;
         let foreground = self.theme.foreground;
         let buttons = [
             ("+", layout.plus, StripHover::Plus),
@@ -295,46 +314,66 @@ impl Renderer {
         ];
         for (glyph, rect, target) in buttons {
             if hover == Some(target) {
-                self.fill_rect(rect.x, 0.0, rect.w, rect.h, self.theme.tab_active);
+                self.fill_round_top(rect, 4.0 * k, self.theme.tab_active);
             }
-            ui_text::draw_text(self, glyph, rect.x + inset_x, top, ui_px, foreground, width);
+            let glyph_w = self.fonts().ui_width(glyph, ui_px);
+            ui_text::draw_text(
+                self,
+                glyph,
+                rect.x + (rect.w - glyph_w) / 2.0,
+                rect.y + (rect.h - ui_px) / 2.0,
+                ui_px,
+                foreground,
+                rect.w,
+            );
         }
     }
 
-    /// Tab titles, then the active tab's close glyph.
+    /// Tab titles, with the app icon on the left and the close glyph on the
+    /// active tab or whichever tab the pointer is over.
     ///
     /// Every tab stamps the app icon before its title, so the strip identifies
     /// the shell at a glance. Inactive titles use the muted ANSI grey so the
     /// tab on screen reads as the active one even when both tabs share a band.
-    fn draw_titles(&mut self, layout: &TabBarLayout, ui_px: f32, active: usize) {
-        // Insets from the tab edge to the glyph slot, and from the strip top
-        // to the top of the title's em box. The layout reserves 12 logical px
-        // of left padding; the icon fills the gap that follows, and the
-        // reserve on the right keeps the close button clear of the title. All
-        // of them are logical, so they scale with the strip just as the layout
-        // constants do.
+    fn draw_titles(
+        &mut self,
+        layout: &TabBarLayout,
+        ui_px: f32,
+        active: usize,
+        hover: Option<StripHover>,
+    ) {
+        // One scale factor for the whole chrome budget, so the painter and
+        // `TabBarLayout` cannot drift apart at another DPI.
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let tab_padding = 12.0 * k;
-        let icon_size = 16.0 * k;
-        let title_left = tab_padding + icon_size + 6.0 * k;
+        let tab_padding = TAB_PADDING * k;
+        let icon_size = TAB_ICON_SIZE * k;
+        let title_left = (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_top = 9.0 * k;
-        let close_reserve = 24.0 * k;
         let foreground = self.theme.foreground;
         let muted = self.theme.indexed(8);
         for tab in &layout.tabs {
-            if let Some(icon) = self.tab_icon.as_ref() {
+            // A crowded strip can shrink a tab below the icon's own slot; the
+            // blit would then spill into the neighbour, so skip it exactly as
+            // the layout drops a close box that will not fit.
+            let icon = self
+                .tab_icon
+                .as_ref()
+                .filter(|_| tab.rect.w >= tab_padding + icon_size);
+            if let Some(icon) = icon {
                 let icon_x = tab.rect.x + tab_padding;
                 let icon_y = (layout.strip_h - icon_size) / 2.0;
                 blit_tab_icon(&mut self.pixmap, icon, icon_x, icon_y, icon_size);
             }
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
-            let title_width = (tab.rect.w - title_left - close_reserve).max(0.0);
+            // A tab is sized as its title plus `TITLE_SIZE`, so the title owns
+            // exactly what the chrome budget leaves.
+            let title_width = (tab.rect.w - TITLE_SIZE * k).max(0.0);
             let color = if tab.index == active {
                 foreground
             } else {
                 muted
             };
-            ui_text::draw_text(
+            ui_text::draw_text_ellipsis(
                 self,
                 title,
                 tab.rect.x + title_left,
@@ -343,12 +382,15 @@ impl Renderer {
                 color,
                 title_width,
             );
-            if tab.index == active {
+            let shows_close = tab.index == active || hover == Some(StripHover::Tab(tab.index));
+            if shows_close && tab.close.w > 0.0 {
+                let glyph = "✕";
+                let glyph_w = self.fonts().ui_width(glyph, ui_px);
                 ui_text::draw_text(
                     self,
-                    "✕",
-                    tab.close.x + 3.0 * k,
-                    tab.close.y + 1.0 * k,
+                    glyph,
+                    tab.close.x + (tab.close.w - glyph_w) / 2.0,
+                    tab.close.y + (tab.close.h - ui_px) / 2.0,
                     ui_px,
                     foreground,
                     tab.close.w,
@@ -614,6 +656,31 @@ impl Renderer {
                 data[index + 3] = 255;
             }
         }
+    }
+
+    /// Fills `rect` with its top two corners rounded by `radius`, leaving the
+    /// bottom corners square so a tab meets the strip's rule flush.
+    fn fill_round_top(&mut self, rect: Rect, radius: f32, color: Rgb) {
+        let radius = radius.min(rect.w / 2.0).min(rect.h).max(0.0);
+        for dy in 0..radius.round() as i32 {
+            // Distance from the corner circle's centre to this row's middle.
+            let y = radius - dy as f32 - 0.5;
+            let inset = radius - (radius * radius - y * y).max(0.0).sqrt();
+            self.fill_rect(
+                rect.x + inset,
+                rect.y + dy as f32,
+                (rect.w - 2.0 * inset).max(1.0),
+                1.0,
+                color,
+            );
+        }
+        self.fill_rect(
+            rect.x,
+            rect.y + radius,
+            rect.w,
+            (rect.h - radius).max(0.0),
+            color,
+        );
     }
 
     pub fn fonts(&self) -> &FontSet {
@@ -1187,10 +1254,76 @@ mod tests {
     }
 
     #[test]
+    fn an_inactive_tab_shows_its_close_glyph_only_when_hovered() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
+        renderer.draw_chrome(&layout, 12.0, 0, None);
+        let plain = pixel_at(&renderer, layout.tabs[1].close.x + 8.0, 16.0);
+        renderer.draw_chrome(
+            &layout,
+            12.0,
+            0,
+            Some(crate::ui::tab_bar::StripHover::Tab(1)),
+        );
+        let hovered = pixel_at(&renderer, layout.tabs[1].close.x + 3.0, 16.0);
+        assert_eq!(plain, renderer.theme.tab_bar);
+        assert_ne!(hovered, renderer.theme.tab_bar);
+    }
+
+    #[test]
+    fn every_tab_has_its_top_border() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
+        renderer.draw_chrome(&layout, 12.0, 0, None);
+        assert_eq!(
+            pixel_at(&renderer, layout.tabs[1].rect.x + 50.0, 0.0),
+            renderer.theme.tab_border
+        );
+    }
+
+    #[test]
+    fn a_tab_has_rounded_top_corners() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let tab = layout.tabs[0].rect;
+        // The corner falls outside the rounded fill, so the band shows through
+        // instead of the active tab's own colour.
+        assert_eq!(
+            pixel_at(&renderer, tab.x, tab.y),
+            renderer.theme.tab_bar,
+            "the top-left corner must be rounded away"
+        );
+    }
+
+    #[test]
+    fn an_icon_never_paints_outside_a_tab_that_cannot_hold_it() {
+        let mut renderer = default_renderer();
+        renderer.resize(200, 120);
+        // A strip too narrow to give either of two tabs its own icon slot:
+        // each tab is 18 px wide while the icon alone wants 28.
+        let layout = crate::ui::tab_bar::TabBarLayout::new(100.0, 32.0, &["one", "two"], |_| 20.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let second = layout.tabs[1].rect;
+        for y in 1..layout.strip_h as u32 - 1 {
+            for x in 1..second.w as u32 - 1 {
+                assert_eq!(
+                    pixel_at(&renderer, second.x + x as f32, y as f32),
+                    renderer.theme.tab_bar,
+                    "icon ink from the first tab reached ({x}, {y}) in the second"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_active_tab_paints_its_app_icon() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 100.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
         renderer.draw_chrome(&layout, 12.0, 0, None);
 
         // The icon slot starts 12 logical px into the tab and is 16 px square.
@@ -1198,6 +1331,12 @@ mod tests {
         assert_ne!(
             icon_pixel, renderer.theme.tab_active,
             "the icon slot is empty"
+        );
+        // The inactive tab stamps the same icon over its own fill.
+        assert_ne!(
+            pixel_at(&renderer, layout.tabs[1].rect.x + 20.0, 16.0),
+            renderer.theme.tab_bar,
+            "every tab, not only the active one, carries the icon"
         );
     }
 

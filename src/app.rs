@@ -1360,9 +1360,10 @@ enum StripAction {
 
 /// Maps a strip hit to its action. `hit` is `None` for a press on empty band.
 ///
-/// Only the tab on screen paints a `✕`, so the invisible close target on a
-/// background tab is treated as a click on that tab's body instead of closing
-/// a running shell the user never saw.
+/// Only the active tab's `✕` closes it; a background tab's close target is
+/// treated as a click on that tab's body. Hovering paints the glyph so the
+/// target is honest about where it is, but closing a shell the window is not
+/// showing still takes the deliberate second click once that tab is active.
 fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
     match hit {
         Some(TabHit::Tab(index)) => StripAction::Select(index),
@@ -2501,7 +2502,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_visible_close_button_closes_its_tab() {
+    fn only_the_active_tabs_close_button_closes_its_tab() {
         use crate::ui::tab_bar::TabHit;
         assert_eq!(
             strip_action(Some(TabHit::Close(1)), 1),
@@ -2511,7 +2512,7 @@ mod tests {
         assert_eq!(
             strip_action(Some(TabHit::Close(1)), 0),
             StripAction::Select(1),
-            "a background tab's invisible close target is just its body"
+            "a background tab's close target only selects it, even while hovered"
         );
     }
 

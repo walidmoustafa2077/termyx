@@ -54,6 +54,48 @@ pub fn draw_text(
     pen - x
 }
 
+/// Draws `text` clipped to `max_width`, replacing the cut tail with `…`.
+///
+/// Tab titles come from the shell and are arbitrarily long; a hard clip hides
+/// the end of the name, which is the part a user navigates by.
+pub fn draw_text_ellipsis(
+    renderer: &mut Renderer,
+    text: &str,
+    x: f32,
+    y: f32,
+    px: f32,
+    color: Rgb,
+    max_width: f32,
+) -> f32 {
+    // Measuring the whole string first skips the shortening work on the common
+    // case, where the tab is wide enough for its title.
+    if renderer.fonts().ui_width(text, px) <= max_width {
+        return draw_text(renderer, text, x, y, px, color, max_width);
+    }
+    let ellipsis_width = renderer.fonts().ui_width("…", px);
+    let budget = max_width - ellipsis_width;
+    if budget <= 0.0 {
+        // Not even the ellipsis fits; an empty title is better than ink over
+        // the close button.
+        return 0.0;
+    }
+    // Walk whole characters so a multi-byte glyph is never split, and stop
+    // before the character that would push the ellipsis past the clip.
+    let mut shortened = String::with_capacity(text.len());
+    let mut width = 0.0;
+    for ch in text.chars() {
+        let mut utf8 = [0u8; 4];
+        let advance = renderer.fonts().ui_width(ch.encode_utf8(&mut utf8), px);
+        if width + advance > budget {
+            break;
+        }
+        shortened.push(ch);
+        width += advance;
+    }
+    shortened.push('…');
+    draw_text(renderer, &shortened, x, y, px, color, max_width)
+}
+
 /// Resolves the face id, glyph, and advance (in `px` em units) that will
 /// rasterize `ch`.
 ///
@@ -160,6 +202,44 @@ mod tests {
         assert!(
             renderer.pixels().iter().any(|pixel| *pixel != background),
             "the glyphs must paint over the background"
+        );
+    }
+
+    #[test]
+    fn a_clipped_title_ends_with_an_ellipsis() {
+        // A title far wider than the clip must be shortened, not cut mid-glyph,
+        // and the ellipsis must sit wholly inside the width.
+        let mut renderer = crate::render::tests::default_renderer();
+        renderer.resize(400, 120);
+        let color = renderer.theme.foreground;
+        let width = draw_text_ellipsis(
+            &mut renderer,
+            "a very long tab title that cannot fit",
+            4.0,
+            4.0,
+            UI_SIZE_PX,
+            color,
+            40.0,
+        );
+        assert!(width <= 40.0 + 0.01);
+        renderer.sync();
+        let background = crate::render::tests::packed(renderer.theme.background);
+        assert!(
+            renderer.pixels().iter().any(|pixel| *pixel != background),
+            "the shortened title must still paint ink"
+        );
+    }
+
+    #[test]
+    fn a_title_that_fits_is_drawn_without_an_ellipsis() {
+        let mut renderer = crate::render::tests::default_renderer();
+        renderer.resize(200, 60);
+        let color = renderer.theme.foreground;
+        let measured = renderer.fonts().ui_width("Tab", UI_SIZE_PX);
+        let width = draw_text_ellipsis(&mut renderer, "Tab", 2.0, 2.0, UI_SIZE_PX, color, 100.0);
+        assert!(
+            (width - measured).abs() < 0.01,
+            "a title that fits must be painted whole, not shortened"
         );
     }
 }
