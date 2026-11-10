@@ -193,15 +193,26 @@ impl Renderer {
         active: usize,
         hover: Option<usize>,
     ) {
-        let height_px = layout.strip_h;
-        let width = layout.width.max(0.0);
-        if height_px <= 0.0 || width <= 0.0 {
+        if layout.strip_h <= 0.0 || layout.width <= 0.0 {
             return;
         }
-        let foreground = self.theme.foreground;
-        // The reserved band is chrome, not grid: it gets its own colour across
-        // the full width, whichever tabs happen to sit on it.
-        self.fill_rect(0.0, 0.0, width, height_px, self.theme.tab_bar);
+        self.fill_band(layout);
+        self.draw_tabs(layout, active, hover);
+        self.draw_band_rule(layout);
+        self.draw_buttons(layout, ui_px);
+        self.draw_titles(layout, ui_px, active);
+    }
+
+    /// The reserved band is chrome, not grid: it gets its own colour across
+    /// the full width, whichever tabs happen to sit on it.
+    fn fill_band(&mut self, layout: &TabBarLayout) {
+        self.fill_rect(0.0, 0.0, layout.width, layout.strip_h, self.theme.tab_bar);
+    }
+
+    /// One fill per tab, then the details that tell them apart: a rule between
+    /// neighbours and, on the active tab under the pointer, a backdrop behind
+    /// the close button.
+    fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<usize>) {
         for tab in &layout.tabs {
             let color = if tab.index == active {
                 self.theme.tab_active
@@ -210,51 +221,83 @@ impl Renderer {
             } else {
                 self.theme.tab_bar
             };
-            self.fill_rect(tab.rect.x, 0.0, tab.rect.w, height_px, color);
+            self.fill_rect(tab.rect.x, 0.0, tab.rect.w, layout.strip_h, color);
         }
-        self.fill_rect(0.0, height_px - 1.0, width, 1.0, self.theme.tab_border);
+        // The first tab starts at the window edge; every later one gets a line
+        // on its left, or two inactive tabs merge into one block.
+        for tab in layout.tabs.iter().skip(1) {
+            self.fill_rect(tab.rect.x, 0.0, 1.0, layout.strip_h, self.theme.tab_border);
+        }
+        // Only the active tab paints a `✕`; a square of its own while the tab
+        // is hovered makes it read as the button the hit test already treats it
+        // as.
+        if hover == Some(active) {
+            if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
+                self.fill_rect(
+                    tab.close.x,
+                    tab.close.y,
+                    tab.close.w,
+                    tab.close.h,
+                    self.theme.tab_hover,
+                );
+            }
+        }
+    }
 
-        // Inset from the tab edge to the glyph slot, and from the strip top to
-        // the top of the title's em box. The reserve on the right keeps the
+    /// The 1 px line that closes the band against the grid.
+    fn draw_band_rule(&mut self, layout: &TabBarLayout) {
+        self.fill_rect(
+            0.0,
+            layout.strip_h - 1.0,
+            layout.width,
+            1.0,
+            self.theme.tab_border,
+        );
+    }
+
+    /// The `+` and `⌄` glyphs. They share one inset and one colour, so they are
+    /// painted from the same pair of constants.
+    fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32) {
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
+        let inset_x = 9.0 * k;
+        let top = 6.0 * k;
+        let width = layout.plus.w;
+        let foreground = self.theme.foreground;
+        for (glyph, rect) in [("+", layout.plus), ("⌄", layout.chevron)] {
+            ui_text::draw_text(self, glyph, rect.x + inset_x, top, ui_px, foreground, width);
+        }
+    }
+
+    /// Tab titles, then the active tab's close glyph.
+    ///
+    /// Inactive titles use the muted ANSI grey so the tab on screen reads as
+    /// the active one even when both tabs share a band.
+    fn draw_titles(&mut self, layout: &TabBarLayout, ui_px: f32, active: usize) {
+        // Insets from the tab edge to the glyph slot, and from the strip top
+        // to the top of the title's em box. The reserve on the right keeps the
         // close button clear of the title. All of them are logical, so they
         // scale with the strip just as the layout constants do.
-        let k = height_px / TAB_STRIP_HEIGHT;
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let title_left = 34.0 * k;
         let title_top = 9.0 * k;
         let close_reserve = 24.0 * k;
-        let button_inset_x = 9.0 * k;
-        let button_top = 6.0 * k;
-        let button_width = layout.plus.w;
-
-        ui_text::draw_text(
-            self,
-            "+",
-            layout.plus.x + button_inset_x,
-            button_top,
-            ui_px,
-            foreground,
-            button_width,
-        );
-        ui_text::draw_text(
-            self,
-            "⌄",
-            layout.chevron.x + button_inset_x,
-            button_top,
-            ui_px,
-            foreground,
-            button_width,
-        );
-
+        let foreground = self.theme.foreground;
+        let muted = self.theme.indexed(8);
         for tab in &layout.tabs {
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
             let title_width = (tab.rect.w - title_left - close_reserve).max(0.0);
+            let color = if tab.index == active {
+                foreground
+            } else {
+                muted
+            };
             ui_text::draw_text(
                 self,
                 title,
                 tab.rect.x + title_left,
                 title_top,
                 ui_px,
-                foreground,
+                color,
                 title_width,
             );
             if tab.index == active {
@@ -795,6 +838,85 @@ mod tests {
         let active = pixel_at(&renderer, layout.tabs[0].rect.x + 4.0, 16.0);
         let inactive = pixel_at(&renderer, layout.tabs[1].rect.x + 4.0, 16.0);
         assert_ne!(active, inactive);
+    }
+
+    #[test]
+    fn an_inactive_tab_title_is_dimmer_than_the_active_one() {
+        let mut renderer = default_renderer();
+        renderer.resize(600, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(600.0, 32.0, &["one", "two"], |_| 100.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
+        let title_rect = |index: usize| {
+            let tab = layout.tabs[index].rect;
+            crate::ui::tab_bar::Rect {
+                x: tab.x + 34.0 * k,
+                y: 9.0 * k,
+                w: (tab.w - 34.0 * k - 24.0 * k).max(0.0),
+                h: 16.0 * k,
+            }
+        };
+        let active = brightest_red(&renderer, title_rect(0));
+        let inactive = brightest_red(&renderer, title_rect(1));
+        assert!(
+            active > inactive,
+            "the active title must use the foreground ({active}) and an inactive \
+             one the muted ANSI colour ({inactive})"
+        );
+    }
+
+    #[test]
+    fn a_border_line_splits_adjacent_tabs() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let boundary = layout.tabs[1].rect.x;
+        assert_eq!(
+            pixel_at(&renderer, boundary, 16.0),
+            renderer.theme.tab_border,
+            "the boundary between two tabs must paint the separator colour"
+        );
+    }
+
+    #[test]
+    fn hovering_the_active_tab_paints_a_backdrop_behind_the_close_button() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let close = layout.tabs[0].close;
+
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        assert_eq!(
+            count_color(&renderer, close, renderer.theme.tab_hover),
+            0,
+            "the close button has no backdrop when the pointer is away"
+        );
+
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(0));
+        assert!(
+            count_color(&renderer, close, renderer.theme.tab_hover) > 0,
+            "hovering the active tab must show the close button's backdrop"
+        );
+    }
+
+    /// Brightest red channel inside `rect`. Comparing peak ink rather than a
+    /// single pixel makes the title-colour test independent of antialiasing
+    /// coverage and glyph side bearings.
+    fn brightest_red(renderer: &Renderer, rect: crate::ui::tab_bar::Rect) -> u8 {
+        (rect.y as u32..(rect.y + rect.h) as u32)
+            .flat_map(|y| (rect.x as u32..(rect.x + rect.w) as u32).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(renderer, x as f32, y as f32).r)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn count_color(renderer: &Renderer, rect: crate::ui::tab_bar::Rect, color: Rgb) -> usize {
+        (rect.y as u32..(rect.y + rect.h) as u32)
+            .flat_map(|y| (rect.x as u32..(rect.x + rect.w) as u32).map(move |x| (x, y)))
+            .filter(|(x, y)| pixel_at(renderer, *x as f32, *y as f32) == color)
+            .count()
     }
 
     #[test]

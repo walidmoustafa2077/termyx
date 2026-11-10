@@ -87,6 +87,37 @@ then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`
 with contextual forms, either as a single lam-alef ligature or as connected
 two-glyph forms. See `assets/fonts/README.md`.
 
+## Tabs
+
+Each tab runs its own shell; the strip above the grid shows one tab per
+session.
+
+- `+` opens a tab with the `default_profile` shell, and `⌄` opens the menu.
+- `Ctrl+Shift+T` opens a tab and `Ctrl+Shift+W` closes the active one.
+- `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle forward and back.
+- `Ctrl+Shift+1` … `Ctrl+Shift+5` open the first five profiles directly.
+- The `⌄` menu lists every profile, then `Settings` (opens the config file),
+  `Command palette` (reserved for a later task), and `About`.
+
+`Ctrl+Shift+W` closes the shell in the active tab immediately; there is no
+confirmation and no undo.
+
+Profiles come from `[[profiles]]` tables, and `default_profile` picks the one a
+bare launch, `Ctrl+Shift+T`, and `+` open:
+
+```toml
+default_profile = 0
+
+[[profiles]]
+name = "PowerShell"
+program = "powershell.exe"
+
+[[profiles]]
+name = "Command Prompt"
+program = "cmd.exe"
+args = ["/k"]
+```
+
 ## Terminal protocol support
 
 The VT parser and grid come from `alacritty_terminal`, so standard terminal
@@ -193,4 +224,4 @@ the same VT path but were not run on this machine.
 - OSC 133 shell integration is not parsed; prompts and command marks are not
   exposed to the terminal.
 - IME preedit is not shown; only committed text reaches the shell.
-- Tabs, splits, profiles, search, images, and AI are later phases.
+- Splits, search, images, and AI are later phases.

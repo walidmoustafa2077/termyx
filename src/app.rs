@@ -165,6 +165,21 @@ impl App {
             // pointing at where the button used to be.
             self.open_menu();
         }
+        // A keyboard switch or a new tab must rename the OS window, which an
+        // OSC title alone cannot do once the opt-in is off. The layout rebuild
+        // is the one place every tab change passes through.
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let titles = self.tabs.titles();
+        let active_title = self
+            .tabs
+            .active_index()
+            .and_then(|index| titles.get(index).copied());
+        window.set_title(&window_title(
+            self.config.window.dynamic_title,
+            active_title,
+        ));
     }
 
     /// Opens the dropdown under the `⌄`, or closes it when it is already open.
@@ -619,6 +634,58 @@ impl App {
         }
     }
 
+    /// Runs a row of the `⌄` dropdown. The caller closes the menu first, so an
+    /// action that opens a shell or a dialog starts from a clean strip.
+    fn run_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Profile(index) => {
+                if let Err(err) = self.new_tab(index) {
+                    tracing::warn!(%err, "could not open a profile");
+                }
+            }
+            MenuAction::Settings => self.open_settings(),
+            MenuAction::CommandPalette => {
+                tracing::info!("the command palette arrives in a later task");
+            }
+            MenuAction::About => {
+                rfd::MessageDialog::new()
+                    .set_title(FALLBACK_TITLE)
+                    .set_description(concat!(
+                        "Termyx ",
+                        env!("CARGO_PKG_VERSION"),
+                        "\n\nA Rust terminal with RTL support."
+                    ))
+                    .set_level(rfd::MessageLevel::Info)
+                    .show();
+            }
+        }
+    }
+
+    /// Opens the config file, or the folder it belongs in when it does not
+    /// exist yet.
+    ///
+    /// A terminal runs fine without a config file, so `Settings` on a first run
+    /// is normal, not an error. Revealing the folder says where the file goes
+    /// without inventing one; a failure at either step is logged, never shown
+    /// as a dialog.
+    fn open_settings(&self) {
+        let path = crate::config::default_config_path();
+        if path.exists() {
+            if let Err(err) = platform::open_path(&path) {
+                tracing::warn!(%err, "could not open the config file");
+            }
+            return;
+        }
+        let folder = path.parent().unwrap_or(&path);
+        if let Err(err) = std::fs::create_dir_all(folder) {
+            tracing::warn!(%err, "could not create the config folder");
+        }
+        tracing::info!(path = %path.display(), "no config file yet; opening its folder");
+        if let Err(err) = platform::open_path(folder) {
+            tracing::warn!(%err, "could not open the config folder");
+        }
+    }
+
     /// Shows the tab `delta` places from the active one, wrapping at both ends.
     /// A lone tab has nowhere to go, so the strip is left alone.
     fn cycle_tab(&mut self, delta: isize) {
@@ -809,7 +876,7 @@ impl App {
                 self.press_in_chrome = true;
                 self.close_menu();
                 if let Some(action) = action {
-                    tracing::debug!(?action, "menu row chosen; its action arrives later");
+                    self.run_menu_action(action);
                 }
                 return false;
             }
@@ -1690,6 +1757,19 @@ fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> (bool, boo
     let label_changed = tabs.set_title(session, title);
     let window_title = tabs.active().is_some_and(|active| active.id == session);
     (label_changed, window_title)
+}
+
+/// The OS window title for the tab on screen.
+///
+/// `dynamic_title` is the config opt-in: when it is off the window keeps
+/// [`FALLBACK_TITLE`] whatever the tab says. With it on, the active tab's
+/// label names the window, so switching tabs renames it; a window with no tab
+/// has nothing to name.
+fn window_title(dynamic_title: bool, active_title: Option<&str>) -> String {
+    match active_title {
+        Some(title) if dynamic_title => title.to_string(),
+        _ => FALLBACK_TITLE.to_string(),
+    }
 }
 
 fn grid_size(
@@ -2706,6 +2786,22 @@ mod tests {
         assert!(!changed);
         assert!(!window);
         assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, FALLBACK_TITLE]);
+    }
+
+    #[test]
+    fn a_static_title_ignores_the_active_tab() {
+        assert_eq!(window_title(false, Some("build")), FALLBACK_TITLE);
+        assert_eq!(window_title(false, None), FALLBACK_TITLE);
+    }
+
+    #[test]
+    fn a_dynamic_title_follows_the_active_tab() {
+        assert_eq!(window_title(true, Some("build")), "build");
+    }
+
+    #[test]
+    fn a_dynamic_title_with_no_tab_falls_back() {
+        assert_eq!(window_title(true, None), FALLBACK_TITLE);
     }
 
     #[test]

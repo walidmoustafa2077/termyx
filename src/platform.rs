@@ -47,3 +47,36 @@ pub fn apply_dark_frame(window: &winit::window::Window, background: Rgb) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply_dark_frame(_window: &winit::window::Window, _background: Rgb) {}
+
+/// Opens `path` with the platform's default handler.
+///
+/// The child is not waited for: the opener outlives the call and the window
+/// must keep painting. A spawn failure is returned so the caller can log it,
+/// which is the only way a user with no file association learns about it.
+#[cfg(target_os = "windows")]
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    // `start` reads its first quoted argument as the window title, so the
+    // empty string is mandatory: without it a quoted path is swallowed as the
+    // title and nothing opens.
+    std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+/// Opens `path` with the platform's default handler.
+///
+/// See the Windows implementation for why the child is not waited for.
+#[cfg(not(target_os = "windows"))]
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
