@@ -197,21 +197,90 @@ impl FontSet {
         self.font_for_id(u8::from(arabic))
     }
 
-    /// Width of `text` in the UI face at `px`, falling back to the cell width
-    /// per character when the face is missing.
+    /// The face and glyph the chrome painter uses for `ch`.
     ///
-    /// `px` is an em size, the unit the glyph cache rasterizes at, so measured
-    /// advances and painted ink agree. It is already physical: the caller
-    /// multiplies the logical `UI_SIZE_PX` by the window's scale factor, the
-    /// same single conversion the tab strip height goes through.
+    /// The UI face does not map every symbol the chrome draws (`✕`, `⌄`), and
+    /// painting those with it would produce `.notdef` boxes. Falling back to
+    /// the same symbol faces the grid uses keeps measurement and ink on one
+    /// face, so a centred glyph is actually centred.
+    pub fn chrome_glyph(&self, ch: char) -> (u8, ab_glyph::GlyphId) {
+        let (ui_font, _index) = self.font_for_id(UI_FONT_ID);
+        let glyph = ui_font.glyph_id(ch);
+        if glyph.0 != 0 {
+            return (UI_FONT_ID, glyph);
+        }
+        self.symbol_for_char(ch).unwrap_or((UI_FONT_ID, glyph))
+    }
+
+    /// Width of `text` in the faces the chrome painter uses, at `px`.
+    ///
+    /// This follows [`FontSet::chrome_glyph`]'s per-character resolution, so an
+    /// advance measured here is the advance the painter moves the pen by: a
+    /// symbol the UI face lacks takes its fallback face's width, not the UI
+    /// `.notdef` box. `px` is an em size, the unit the glyph cache rasterizes
+    /// at, and already physical: the caller scales the logical `UI_SIZE_PX`
+    /// once with the window's scale factor.
     pub fn ui_width(&self, text: &str, px: f32) -> f32 {
-        let Some(face) = &self.ui else {
-            return text.chars().count() as f32 * self.cell_w as f32;
-        };
-        let scaled = face.font.as_scaled(em_px_scale(&face.font, px));
         text.chars()
-            .map(|ch| scaled.h_advance(face.font.glyph_id(ch)))
+            .map(|ch| {
+                let (face, glyph) = self.chrome_glyph(ch);
+                let (font, _index) = self.font_for_id(face);
+                font.as_scaled(em_px_scale(font, px)).h_advance(glyph)
+            })
             .sum()
+    }
+
+    /// Height of the UI face's line box, ascent to descent, at `px`.
+    ///
+    /// `draw_text` anchors its `y` to the top of this box, not to the em
+    /// square, so centring a glyph that has no measurable ink must use it.
+    pub fn ui_line_height(&self, px: f32) -> f32 {
+        let (font, _index) = self.font_for_id(UI_FONT_ID);
+        let scaled = font.as_scaled(em_px_scale(font, px));
+        scaled.ascent() - scaled.descent()
+    }
+
+    /// The ink box of `text` at `px`, as `(left, top, right, bottom)` in
+    /// physical pixels from the text origin: `(0, 0)` is the pen start on the
+    /// line box's top edge.
+    ///
+    /// Chrome glyphs are centred by their ink because they come from different
+    /// fallback faces and sit at different heights inside the same line box.
+    /// `None` when no character in `text` has a drawable outline.
+    pub fn chrome_ink_bounds(&self, text: &str, px: f32) -> Option<(f32, f32, f32, f32)> {
+        // The cache rasterizes at the rounded em size; measuring at the same
+        // size keeps this box on the outline the blit paints.
+        let size = px.round();
+        let (ui_font, _index) = self.font_for_id(UI_FONT_ID);
+        let ascent = ui_font.as_scaled(em_px_scale(ui_font, size)).ascent();
+        let mut pen = 0.0;
+        let mut bounds: Option<(f32, f32, f32, f32)> = None;
+        for ch in text.chars() {
+            let (face, glyph) = self.chrome_glyph(ch);
+            let (font, _index) = self.font_for_id(face);
+            let scale = em_px_scale(font, size);
+            let advance = font.as_scaled(scale).h_advance(glyph);
+            if let Some(outline) = font.outline_glyph(glyph.with_scale(scale)) {
+                let ink = outline.px_bounds();
+                let next = (
+                    pen + ink.min.x,
+                    ascent + ink.min.y,
+                    pen + ink.max.x,
+                    ascent + ink.max.y,
+                );
+                bounds = Some(match bounds {
+                    Some((left, top, right, bottom)) => (
+                        left.min(next.0),
+                        top.min(next.1),
+                        right.max(next.2),
+                        bottom.max(next.3),
+                    ),
+                    None => next,
+                });
+            }
+            pen += advance;
+        }
+        bounds
     }
 
     /// The first symbol face that maps `ch`, with the face id (`2..`) and the
@@ -619,12 +688,51 @@ mod tests {
     }
 
     #[test]
-    fn ui_width_falls_back_to_the_cell_width() {
+    fn ui_width_falls_back_to_the_primary_face() {
         let Some(mut fonts) = load("Consolas") else {
             return;
         };
+        // Without the proportional face the chrome is painted with the primary
+        // monospace face, so measurement must use that face's advances.
         fonts.ui = None;
-        assert_eq!(fonts.ui_width("abc", UI_SIZE_PX), 3.0 * fonts.cell_w as f32);
+        let (font, _index) = fonts.font_for_id(0);
+        let advance = font
+            .as_scaled(em_px_scale(font, UI_SIZE_PX))
+            .h_advance(font.glyph_id('a'));
+        assert!((fonts.ui_width("abc", UI_SIZE_PX) - 3.0 * advance).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_chrome_symbol_is_measured_on_the_face_that_paints_it() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        let mut checked = 0;
+        for ch in ['✕', '⌄'] {
+            let (face, glyph) = fonts.chrome_glyph(ch);
+            if face == UI_FONT_ID {
+                // This machine's UI face happens to map the symbol.
+                continue;
+            }
+            let (font, _index) = fonts.font_for_id(face);
+            let scaled = font.as_scaled(em_px_scale(font, UI_SIZE_PX));
+            let advance = scaled.h_advance(glyph);
+            let (ui_font, _index) = fonts.font_for_id(UI_FONT_ID);
+            let notdef = ui_font
+                .as_scaled(em_px_scale(ui_font, UI_SIZE_PX))
+                .h_advance(ui_font.glyph_id(ch));
+            let text = ch.to_string();
+            assert!(
+                (fonts.ui_width(&text, UI_SIZE_PX) - advance).abs() < 0.01,
+                "{ch:?} must be measured on its fallback face"
+            );
+            assert!(
+                (advance - notdef).abs() > 0.01,
+                "the fallback advance must differ from the UI's .notdef"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no chrome symbol exercised the fallback path");
     }
 
     #[test]

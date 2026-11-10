@@ -10,9 +10,9 @@ pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width of the `+` and `⌄` buttons.
 pub const BUTTON_WIDTH: f32 = 32.0;
 /// Logical px a tab spends on chrome besides the title itself: the left
-/// padding, the icon, two gaps, the close box, and the right padding. At the
-/// reference's tight metrics the close box shares the right padding.
-pub const TITLE_SIZE: f32 = 56.0;
+/// padding, the icon, the gap after the icon, the gap before the close box,
+/// the close box, and the right padding — `12 + 16 + 6 + 6 + 16 + 12`.
+pub const TITLE_SIZE: f32 = 68.0;
 /// Left inset from the tab edge to the app icon.
 pub(crate) const TAB_PADDING: f32 = 12.0;
 /// Side of the square app icon every tab stamps at its left.
@@ -20,6 +20,9 @@ pub(crate) const TAB_ICON_SIZE: f32 = 16.0;
 /// Gap between the icon, the title, and the close box.
 pub(crate) const TAB_ICON_GAP: f32 = 6.0;
 const CLOSE_SIZE: f32 = 16.0;
+/// Em size of the `✕` ink, smaller than a title so the cross does not fill its
+/// box edge to edge.
+pub(crate) const CLOSE_GLYPH_SIZE: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {

@@ -438,9 +438,7 @@ impl App {
         if !in_strip(y, layout.strip_h) {
             return None;
         }
-        // With no live tab nothing can be active, so no close can match.
-        let active = self.tabs.active_index().unwrap_or(usize::MAX);
-        Some(strip_action(layout.hit(x as f32, y as f32), active))
+        Some(strip_action(layout.hit(x as f32, y as f32)))
     }
 
     /// Paints `hover` as the target under the pointer, redrawing only when it
@@ -1360,15 +1358,14 @@ enum StripAction {
 
 /// Maps a strip hit to its action. `hit` is `None` for a press on empty band.
 ///
-/// Only the active tab's `✕` closes it; a background tab's close target is
-/// treated as a click on that tab's body. Hovering paints the glyph so the
-/// target is honest about where it is, but closing a shell the window is not
-/// showing still takes the deliberate second click once that tab is active.
-fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
+/// A `✕` closes its tab whichever tab it is: the glyph and its square only
+/// paint under the pointer, so a click on one is a deliberate act on the shell
+/// the user can see, and the close lands on the first click as it does in
+/// Windows Terminal.
+fn strip_action(hit: Option<TabHit>) -> StripAction {
     match hit {
         Some(TabHit::Tab(index)) => StripAction::Select(index),
-        Some(TabHit::Close(index)) if index == active => StripAction::Close(index),
-        Some(TabHit::Close(index)) => StripAction::Select(index),
+        Some(TabHit::Close(index)) => StripAction::Close(index),
         Some(TabHit::Plus) => StripAction::NewTab,
         Some(TabHit::Chevron) => StripAction::OpenMenu,
         None => StripAction::Ignore,
@@ -1377,9 +1374,9 @@ fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
 
 /// The strip target the pointer must highlight for a strip action.
 ///
-/// A hit on the active tab's `✕` is a close rather than a select, but the
-/// button sits inside its tab, so that tab is still the one under the pointer
-/// and must keep its hover. The `+`/`⌄` buttons highlight as themselves.
+/// A hit on any tab's `✕` is a close rather than a select, but the button sits
+/// inside its tab, so that tab is still the one under the pointer and must keep
+/// its hover. The `+`/`⌄` buttons highlight as themselves.
 fn strip_hover(action: Option<StripAction>) -> Option<StripHover> {
     match action {
         Some(StripAction::Select(index) | StripAction::Close(index)) => {
@@ -2396,7 +2393,7 @@ mod tests {
     fn a_press_on_empty_strip_band_is_consumed_as_ignore() {
         // Nothing sits under the pointer in the band, so the press stays the
         // strip's and never becomes a grid event.
-        assert_eq!(strip_action(None, 0), StripAction::Ignore);
+        assert_eq!(strip_action(None), StripAction::Ignore);
     }
 
     #[test]
@@ -2436,15 +2433,9 @@ mod tests {
     #[test]
     fn the_strip_controls_map_to_their_actions() {
         use crate::ui::tab_bar::TabHit;
-        assert_eq!(
-            strip_action(Some(TabHit::Tab(2)), 0),
-            StripAction::Select(2)
-        );
-        assert_eq!(strip_action(Some(TabHit::Plus), 0), StripAction::NewTab);
-        assert_eq!(
-            strip_action(Some(TabHit::Chevron), 0),
-            StripAction::OpenMenu
-        );
+        assert_eq!(strip_action(Some(TabHit::Tab(2))), StripAction::Select(2));
+        assert_eq!(strip_action(Some(TabHit::Plus)), StripAction::NewTab);
+        assert_eq!(strip_action(Some(TabHit::Chevron)), StripAction::OpenMenu);
     }
 
     fn six_profiles() -> Config {
@@ -2502,17 +2493,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_active_tabs_close_button_closes_its_tab() {
+    fn a_close_click_closes_its_tab_even_when_the_tab_is_not_active() {
         use crate::ui::tab_bar::TabHit;
         assert_eq!(
-            strip_action(Some(TabHit::Close(1)), 1),
+            strip_action(Some(TabHit::Close(1))),
             StripAction::Close(1),
-            "the active tab paints its close button, so the click closes it"
+            "every visible ✕ must close on the first click"
         );
         assert_eq!(
-            strip_action(Some(TabHit::Close(1)), 0),
-            StripAction::Select(1),
-            "a background tab's close target only selects it, even while hovered"
+            strip_action(Some(TabHit::Close(0))),
+            StripAction::Close(0),
+            "the target does not depend on which tab the window shows"
         );
     }
 

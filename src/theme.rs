@@ -48,6 +48,13 @@ pub struct Theme {
     /// Lighter than the active tab so the button reads as pressed in, not dug
     /// out.
     pub tab_close_hover: Rgb,
+    /// The title on the tab the window shows. Its own token rather than the
+    /// grid's `foreground`, so a user remapping ANSI grey cannot dim the tab
+    /// they are looking at.
+    pub tab_title: Rgb,
+    /// The title on a tab that is not the window's. One step below
+    /// [`Theme::tab_title`] so the active tab still reads first.
+    pub tab_title_inactive: Rgb,
     pub tab_border: Rgb,
     /// Dropdown panel. Fixed for now, in the strip's dark family; a light
     /// theme is out of scope until the whole theme can switch at once.
@@ -94,7 +101,9 @@ impl Theme {
             tab_bar: Rgb::new(12, 12, 12),
             tab_active: Rgb::new(31, 31, 31),
             tab_hover: Rgb::new(26, 26, 26),
-            tab_close_hover: Rgb::new(58, 58, 58),
+            tab_close_hover: Rgb::new(51, 51, 51),
+            tab_title: Rgb::new(255, 255, 255),
+            tab_title_inactive: Rgb::new(204, 204, 204),
             tab_border: Rgb::new(43, 43, 43),
             menu_background: Rgb::new(31, 31, 31),
             menu_hover: Rgb::new(43, 43, 43),
@@ -147,7 +156,9 @@ mod tests {
         assert_eq!(theme.tab_bar, Rgb::new(12, 12, 12));
         assert_eq!(theme.tab_hover, Rgb::new(26, 26, 26));
         assert_eq!(theme.tab_active, Rgb::new(31, 31, 31));
-        assert_eq!(theme.tab_close_hover, Rgb::new(58, 58, 58));
+        assert_eq!(theme.tab_close_hover, Rgb::new(51, 51, 51));
+        assert_eq!(theme.tab_title, Rgb::new(255, 255, 255));
+        assert_eq!(theme.tab_title_inactive, Rgb::new(204, 204, 204));
         assert!(theme.tab_bar.r < theme.tab_hover.r);
         assert!(
             theme.tab_hover.r < theme.tab_active.r,

@@ -6,9 +6,10 @@
 
 use ab_glyph::{Font, GlyphId, ScaleFont};
 
-use crate::fonts::{em_px_scale, UI_FONT_ID};
+use crate::fonts::{em_px_scale, FontSet, UI_FONT_ID};
 use crate::render::Renderer;
 use crate::theme::Rgb;
+use crate::ui::tab_bar::Rect;
 
 /// Draws `text` at `(x, y)` — the top-left corner, not the baseline — and
 /// returns the width consumed, clipped to `max_width`.
@@ -54,6 +55,71 @@ pub fn draw_text(
     pen - x
 }
 
+/// Draws `text` with its ink centred in `rect`, clipped to the rect's width.
+///
+/// `draw_text` anchors the top of the line box, and the chrome glyphs come
+/// from different fallback faces whose ink sits at different heights inside it.
+/// Centring by the em size or the line height therefore leaves `+` and `⌄`
+/// visibly low; the ink box is what the eye centres, so measure that instead.
+pub fn draw_text_centred(
+    renderer: &mut Renderer,
+    text: &str,
+    rect: Rect,
+    px: f32,
+    color: Rgb,
+) -> f32 {
+    let (x, y) = {
+        let fonts = renderer.fonts();
+        match fonts.chrome_ink_bounds(text, px) {
+            Some((left, top, right, bottom)) => (
+                rect.x + (rect.w - (right + left)) / 2.0,
+                rect.y + (rect.h - (bottom - top)) / 2.0 - top,
+            ),
+            None => {
+                // Nothing to measure: fall back to the line box, which is what
+                // `draw_text` lays its `y` against.
+                let width = fonts.ui_width(text, px);
+                let line_h = fonts.ui_line_height(px);
+                (
+                    rect.x + (rect.w - width) / 2.0,
+                    rect.y + (rect.h - line_h) / 2.0,
+                )
+            }
+        }
+    };
+    draw_text(renderer, text, x, y, px, color, rect.w)
+}
+
+/// Shortens `text` to fit `max_width`, replacing the cut tail with `…`.
+///
+/// Returns `text` unchanged when it already fits. A clip too narrow for the
+/// ellipsis itself yields an empty string: there is nothing honest to paint.
+fn elide(fonts: &FontSet, text: &str, px: f32, max_width: f32) -> String {
+    if fonts.ui_width(text, px) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis_width = fonts.ui_width("…", px);
+    let budget = max_width - ellipsis_width;
+    if budget <= 0.0 {
+        return String::new();
+    }
+    // Walk whole characters so a multi-byte glyph is never split, and stop
+    // before the character that would push the ellipsis past the clip.
+    let mut shortened = String::with_capacity(text.len());
+    let mut width = 0.0;
+    for ch in text.chars() {
+        let mut utf8 = [0u8; 4];
+        let advance = fonts.ui_width(ch.encode_utf8(&mut utf8), px);
+        if width + advance > budget {
+            break;
+        }
+        shortened.push(ch);
+        width += advance;
+    }
+    shortened.push('…');
+    shortened
+}
+
 /// Draws `text` clipped to `max_width`, replacing the cut tail with `…`.
 ///
 /// Tab titles come from the shell and are arbitrarily long; a hard clip hides
@@ -67,32 +133,7 @@ pub fn draw_text_ellipsis(
     color: Rgb,
     max_width: f32,
 ) -> f32 {
-    // Measuring the whole string first skips the shortening work on the common
-    // case, where the tab is wide enough for its title.
-    if renderer.fonts().ui_width(text, px) <= max_width {
-        return draw_text(renderer, text, x, y, px, color, max_width);
-    }
-    let ellipsis_width = renderer.fonts().ui_width("…", px);
-    let budget = max_width - ellipsis_width;
-    if budget <= 0.0 {
-        // Not even the ellipsis fits; an empty title is better than ink over
-        // the close button.
-        return 0.0;
-    }
-    // Walk whole characters so a multi-byte glyph is never split, and stop
-    // before the character that would push the ellipsis past the clip.
-    let mut shortened = String::with_capacity(text.len());
-    let mut width = 0.0;
-    for ch in text.chars() {
-        let mut utf8 = [0u8; 4];
-        let advance = renderer.fonts().ui_width(ch.encode_utf8(&mut utf8), px);
-        if width + advance > budget {
-            break;
-        }
-        shortened.push(ch);
-        width += advance;
-    }
-    shortened.push('…');
+    let shortened = elide(renderer.fonts(), text, px, max_width);
     draw_text(renderer, &shortened, x, y, px, color, max_width)
 }
 
@@ -104,16 +145,7 @@ pub fn draw_text_ellipsis(
 /// the same symbol-face lookup the grid uses picks a fallback, so the measured
 /// advance and the painted ink come from one face.
 fn glyph_for(renderer: &Renderer, ch: char, px: f32) -> (u8, GlyphId, f32) {
-    let (ui_font, _index) = renderer.fonts_face(UI_FONT_ID);
-    let ui_glyph = ui_font.glyph_id(ch);
-    let (face, glyph) = if ui_glyph.0 == 0 {
-        renderer
-            .fonts()
-            .symbol_for_char(ch)
-            .unwrap_or((UI_FONT_ID, ui_glyph))
-    } else {
-        (UI_FONT_ID, ui_glyph)
-    };
+    let (face, glyph) = renderer.fonts().chrome_glyph(ch);
     let (font, _index) = renderer.fonts_face(face);
     let scaled = font.as_scaled(em_px_scale(font, px));
     (face, glyph, scaled.h_advance(glyph))
@@ -240,6 +272,47 @@ mod tests {
         assert!(
             (width - measured).abs() < 0.01,
             "a title that fits must be painted whole, not shortened"
+        );
+    }
+
+    #[test]
+    fn elide_ends_with_an_ellipsis_only_when_it_has_to() {
+        let renderer = crate::render::tests::default_renderer();
+        let fonts = renderer.fonts();
+
+        let whole = elide(fonts, "Tab", UI_SIZE_PX, 100.0);
+        assert_eq!(
+            whole, "Tab",
+            "a title that fits must come back untouched, with no ellipsis"
+        );
+
+        let clipped = elide(
+            fonts,
+            "a very long tab title that cannot fit",
+            UI_SIZE_PX,
+            40.0,
+        );
+        assert!(
+            clipped.ends_with('…'),
+            "a shortened title must end with the cut mark, got {clipped:?}"
+        );
+        let width = fonts.ui_width(&clipped, UI_SIZE_PX);
+        assert!(
+            width <= 40.0 + 0.01,
+            "the shortened title must fit its budget (width {width})"
+        );
+    }
+
+    #[test]
+    fn elide_gives_up_when_even_the_ellipsis_does_not_fit() {
+        let renderer = crate::render::tests::default_renderer();
+        let fonts = renderer.fonts();
+        let ellipsis_width = fonts.ui_width("…", UI_SIZE_PX);
+        let narrow = ellipsis_width / 2.0;
+        assert_eq!(
+            elide(fonts, "some title", UI_SIZE_PX, narrow),
+            "",
+            "a clip narrower than the ellipsis must yield no text, not a panic or loop"
         );
     }
 }

@@ -16,8 +16,8 @@ use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::ui::tab_bar::{
-    Rect, StripHover, TabBarLayout, TAB_ICON_GAP, TAB_ICON_SIZE, TAB_PADDING, TAB_STRIP_HEIGHT,
-    TITLE_SIZE,
+    Rect, StripHover, TabBarLayout, CLOSE_GLYPH_SIZE, TAB_ICON_GAP, TAB_ICON_SIZE, TAB_PADDING,
+    TAB_STRIP_HEIGHT, TITLE_SIZE,
 };
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -217,8 +217,11 @@ impl Renderer {
         }
         self.fill_band(layout);
         self.draw_tabs(layout, active, hover);
-        self.draw_band_rule(layout);
         self.draw_buttons(layout, ui_px, hover);
+        // The rule goes down after the buttons: a hovered button's fill starts
+        // at the top of the strip, and painting it later would erase a window-
+        // wide rule behind that button.
+        self.draw_band_rule(layout);
         self.draw_titles(layout, ui_px, active, hover);
     }
 
@@ -316,16 +319,7 @@ impl Renderer {
             if hover == Some(target) {
                 self.fill_round_top(rect, 4.0 * k, self.theme.tab_active);
             }
-            let glyph_w = self.fonts().ui_width(glyph, ui_px);
-            ui_text::draw_text(
-                self,
-                glyph,
-                rect.x + (rect.w - glyph_w) / 2.0,
-                rect.y + (rect.h - ui_px) / 2.0,
-                ui_px,
-                foreground,
-                rect.w,
-            );
+            ui_text::draw_text_centred(self, glyph, rect, ui_px, foreground);
         }
     }
 
@@ -333,8 +327,9 @@ impl Renderer {
     /// active tab or whichever tab the pointer is over.
     ///
     /// Every tab stamps the app icon before its title, so the strip identifies
-    /// the shell at a glance. Inactive titles use the muted ANSI grey so the
-    /// tab on screen reads as the active one even when both tabs share a band.
+    /// the shell at a glance. The inactive title has its own chrome grey rather
+    /// than the grid's ANSI palette, so the tab on screen reads as the active
+    /// one even when both tabs share a band.
     fn draw_titles(
         &mut self,
         layout: &TabBarLayout,
@@ -350,7 +345,6 @@ impl Renderer {
         let title_left = (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_top = 9.0 * k;
         let foreground = self.theme.foreground;
-        let muted = self.theme.indexed(8);
         for tab in &layout.tabs {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
@@ -369,9 +363,9 @@ impl Renderer {
             // exactly what the chrome budget leaves.
             let title_width = (tab.rect.w - TITLE_SIZE * k).max(0.0);
             let color = if tab.index == active {
-                foreground
+                self.theme.tab_title
             } else {
-                muted
+                self.theme.tab_title_inactive
             };
             ui_text::draw_text_ellipsis(
                 self,
@@ -384,17 +378,7 @@ impl Renderer {
             );
             let shows_close = tab.index == active || hover == Some(StripHover::Tab(tab.index));
             if shows_close && tab.close.w > 0.0 {
-                let glyph = "✕";
-                let glyph_w = self.fonts().ui_width(glyph, ui_px);
-                ui_text::draw_text(
-                    self,
-                    glyph,
-                    tab.close.x + (tab.close.w - glyph_w) / 2.0,
-                    tab.close.y + (tab.close.h - ui_px) / 2.0,
-                    ui_px,
-                    foreground,
-                    tab.close.w,
-                );
+                ui_text::draw_text_centred(self, "✕", tab.close, CLOSE_GLYPH_SIZE * k, foreground);
             }
         }
     }
@@ -1034,19 +1018,23 @@ mod tests {
         let inactive = brightest_red(&renderer, title_rect(1));
         // Both tabs paint the same glyph at the same offset, so the inactive
         // peak reveals the coverage of the peak pixel; the active peak must then
-        // be that coverage of the foreground over the active tab's fill. If the
-        // active title fell back to the muted colour, its peak would land near
-        // the muted channel, not here.
+        // be that same coverage of its own chrome colour over the active tab's
+        // fill. If the active title reused the inactive token, the two peaks
+        // would be equal instead.
         let theme = &renderer.theme;
-        let muted = theme.indexed(8).r;
+        let muted = theme.tab_title_inactive.r;
         let coverage =
             (inactive as f32 - theme.tab_bar.r as f32) / (muted as f32 - theme.tab_bar.r as f32);
         assert!(coverage > 0.0, "the inactive title must leave some ink");
-        let expected = blend(theme.tab_active.r, theme.foreground.r, coverage) as f32;
+        let expected = blend(theme.tab_active.r, theme.tab_title.r, coverage) as f32;
         assert!(
             (active as f32 - expected).abs() <= 2.0,
-            "the active title must paint the foreground over the active tab: \
-             expected about {expected}, got {active} (muted ink would peak near {muted})"
+            "the active title must paint its chrome white over the active tab: \
+             expected about {expected}, got {active} (the inactive token would peak near {muted})"
+        );
+        assert!(
+            theme.tab_title.r > theme.tab_title_inactive.r,
+            "the active title must be the brighter of the two tokens"
         );
     }
 
@@ -1215,6 +1203,50 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_rule_survives_a_hovered_button() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(StripHover::Plus));
+        let y = layout.strip_h - 1.0;
+        for x in layout.plus.x as u32..(layout.plus.x + layout.plus.w) as u32 {
+            assert_eq!(
+                pixel_at(&renderer, x as f32, y),
+                renderer.theme.tab_border,
+                "a hovered + erased the band rule at column {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_without_a_close_box_paints_no_close() {
+        let mut renderer = default_renderer();
+        renderer.resize(100, 120);
+        // 18 px per tab: narrower than the padding plus the close box, so the
+        // layout drops the target and the painter must drop the square and glyph
+        // with it instead of bleeding into the neighbour.
+        let layout = TabBarLayout::new(100.0, 32.0, &["one", "two"], |_| 20.0);
+        assert_eq!(layout.tabs[0].close.w, 0.0, "the layout must drop the box");
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Tab(0)),
+        );
+        let tab = layout.tabs[0].rect;
+        assert_eq!(
+            count_color(&renderer, tab, renderer.theme.tab_close_hover),
+            0,
+            "no backdrop may paint where there is no close target"
+        );
+        assert_eq!(
+            count_color(&renderer, tab, renderer.theme.foreground),
+            0,
+            "no glyph may paint where there is no close target"
+        );
+    }
+
+    #[test]
     fn a_hovered_inactive_tab_uses_the_hover_colour() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
@@ -1254,6 +1286,29 @@ mod tests {
     }
 
     #[test]
+    fn the_title_clip_stops_before_the_close_box() {
+        // One 116 px tab: `(180 - 64) / 1`, wide enough to show a title and
+        // its ellipsis. The title is far longer than the tab can hold.
+        let layout = TabBarLayout::new(
+            180.0,
+            32.0,
+            &["a very long tab title that cannot fit"],
+            |_| 200.0,
+        );
+        let tab = layout.tabs[0].rect;
+        assert_eq!(tab.w, 116.0);
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
+        let title_left = tab.x + (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
+        let title_width = (tab.w - TITLE_SIZE * k).max(0.0);
+        assert!(
+            title_left + title_width <= layout.tabs[0].close.x,
+            "the title clip ends at {}, inside the close box that starts at {}",
+            title_left + title_width,
+            layout.tabs[0].close.x
+        );
+    }
+
+    #[test]
     fn an_inactive_tab_shows_its_close_glyph_only_when_hovered() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
@@ -1271,15 +1326,110 @@ mod tests {
         assert_ne!(hovered, renderer.theme.tab_bar);
     }
 
+    /// Ink bounding box inside `rect`, as `(left, top, right, bottom)` in
+    /// physical pixels, excluding any pixel equal to `background`.
+    ///
+    /// Centring tests compare this against the rect's centre instead of a
+    /// single pixel, so antialiasing and glyph side bearings cannot mask a
+    /// glyph that sits too high or too low.
+    fn ink_bounds(
+        renderer: &Renderer,
+        rect: crate::ui::tab_bar::Rect,
+        background: Rgb,
+    ) -> (f32, f32, f32, f32) {
+        let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for dy in 0..rect.h as u32 {
+            for dx in 0..rect.w as u32 {
+                let x = rect.x + dx as f32;
+                let y = rect.y + dy as f32;
+                if pixel_at(renderer, x, y) != background {
+                    left = left.min(x);
+                    top = top.min(y);
+                    right = right.max(x);
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+        (left, top, right, bottom)
+    }
+
+    /// Asserts the ink in `rect` is centred on both axes to within one pixel.
+    fn assert_centred(renderer: &Renderer, rect: crate::ui::tab_bar::Rect, background: Rgb) {
+        let (left, top, right, bottom) = ink_bounds(renderer, rect, background);
+        assert!(left <= right, "the glyph must paint ink");
+        let ink_x = (left + right) / 2.0;
+        let ink_y = (top + bottom) / 2.0;
+        let box_x = rect.x + rect.w / 2.0;
+        let box_y = rect.y + rect.h / 2.0;
+        assert!(
+            (ink_x - box_x).abs() <= 1.0,
+            "ink centre x {ink_x} must sit within 1 px of the box centre {box_x}"
+        );
+        assert!(
+            (ink_y - box_y).abs() <= 1.0,
+            "ink centre y {ink_y} must sit within 1 px of the box centre {box_y}"
+        );
+    }
+
     #[test]
-    fn every_tab_has_its_top_border() {
+    fn the_plus_glyph_is_vertically_centred() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        // The band rule crosses the button's last row; it is chrome, not glyph
+        // ink, so measure the button without it.
+        let button = crate::ui::tab_bar::Rect {
+            h: layout.plus.h - 1.0,
+            ..layout.plus
+        };
+        assert_centred(&renderer, button, renderer.theme.tab_bar);
+    }
+
+    #[test]
+    fn the_chevron_glyph_is_vertically_centred() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let button = crate::ui::tab_bar::Rect {
+            h: layout.chevron.h - 1.0,
+            ..layout.chevron
+        };
+        assert_centred(&renderer, button, renderer.theme.tab_bar);
+    }
+
+    #[test]
+    fn the_close_glyph_is_vertically_centred() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        assert_centred(&renderer, layout.tabs[0].close, renderer.theme.tab_active);
+    }
+
+    #[test]
+    fn every_tab_has_its_top_and_side_borders() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
         renderer.draw_chrome(&layout, 12.0, 0, None);
+        let tab = layout.tabs[1].rect;
+        let border = renderer.theme.tab_border;
         assert_eq!(
-            pixel_at(&renderer, layout.tabs[1].rect.x + 50.0, 0.0),
-            renderer.theme.tab_border
+            pixel_at(&renderer, tab.x + 50.0, tab.y),
+            border,
+            "the top edge must be stroked"
+        );
+        assert_eq!(
+            pixel_at(&renderer, tab.x, 16.0),
+            border,
+            "the left edge must be stroked"
+        );
+        assert_eq!(
+            pixel_at(&renderer, tab.x + tab.w - 1.0, 16.0),
+            border,
+            "the right edge must be stroked"
         );
     }
 
