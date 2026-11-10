@@ -15,7 +15,7 @@ use winit::window::{Window, WindowId};
 
 use crate::config::{BidiConfig, Config};
 use crate::event::UserEvent;
-use crate::fonts::FontSet;
+use crate::fonts::{FontSet, UI_SIZE_PX};
 use crate::icon;
 use crate::input::{self, KeyInput, Mods};
 use crate::platform;
@@ -25,6 +25,7 @@ use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
+use crate::ui::tab_bar::TabBarLayout;
 use crate::visual::VisualMap;
 
 /// Upper bound on a single paste, in Unicode scalar values. A larger clipboard
@@ -53,6 +54,12 @@ pub struct App {
     /// The open shells. Each session owns its parser, its PTY child, and its
     /// reader thread; the window shows whichever session is active.
     tabs: TabSet,
+    /// Strip geometry from the window width and every tab title. `None` until
+    /// the first session exists.
+    layout: Option<TabBarLayout>,
+    /// Tab under the pointer, painted as hover. Written by the strip's cursor
+    /// handling in Task 9.
+    hovered_tab: Option<usize>,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     selection: Option<Selection>,
@@ -83,6 +90,8 @@ impl App {
             surface: None,
             renderer: None,
             tabs: TabSet::new(),
+            layout: None,
+            hovered_tab: None,
             clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
@@ -115,6 +124,30 @@ impl App {
         self.window
             .as_ref()
             .map_or(1.0, |window| window.scale_factor())
+    }
+
+    /// Rebuilds the strip geometry. Called after a resize and after opening a
+    /// tab, because a tab's width depends on every title in the strip.
+    ///
+    /// Both inputs are physical: the window width and the strip height come
+    /// from `tab_strip_px`, and titles are measured at the already-scaled
+    /// chrome em size.
+    fn rebuild_layout(&mut self) {
+        let strip_h = self.tab_strip_px() as f32;
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let width = window.inner_size().width as f32;
+        let ui_px = UI_SIZE_PX * window.scale_factor() as f32;
+        let titles = self.tabs.titles();
+        let fonts = renderer.fonts();
+        let layout = TabBarLayout::new(width, strip_h, &titles, |title| {
+            fonts.ui_width(title, ui_px)
+        });
+        self.layout = Some(layout);
     }
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
@@ -286,6 +319,7 @@ impl App {
         self.tabs.push(session);
         // The new tab is active, so a selection on the old grid is stale.
         self.selection = None;
+        self.rebuild_layout();
         Ok(())
     }
 
@@ -296,7 +330,11 @@ impl App {
 
     fn render(&mut self) {
         let scrollbar_hover = self.scrollbar_hover || self.scrollbar_drag;
+        let ui_px = UI_SIZE_PX * self.scale_factor() as f32;
         let Some(session) = self.tabs.active() else {
+            return;
+        };
+        let Some(active) = self.tabs.active_index() else {
             return;
         };
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
@@ -322,6 +360,9 @@ impl App {
             .collect();
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
+        if let Some(layout) = self.layout.as_ref() {
+            renderer.draw_chrome(layout, ui_px, active, self.hovered_tab);
+        }
         renderer.sync();
 
         match surface.buffer_mut() {
@@ -979,10 +1020,20 @@ impl ApplicationHandler<UserEvent> for App {
                 if route_title(&mut self.tabs, session, &title) {
                     self.apply_title(&title);
                 }
+                // Every tab's width depends on every label, including one on a
+                // background tab.
+                self.rebuild_layout();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             UserEvent::ResetTitle { session } => {
                 if route_title(&mut self.tabs, session, "") {
                     self.apply_title("");
+                }
+                self.rebuild_layout();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             UserEvent::ClipboardStore(text) => {
@@ -1028,6 +1079,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // Reflow invalidates logical selection positions.
                     self.selection = None;
                 }
+                self.rebuild_layout();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }

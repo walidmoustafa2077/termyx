@@ -2,9 +2,6 @@
 
 mod atlas;
 mod glyph_cache;
-// Chrome text has no non-test consumer until Task 8 paints the tab strip
-// (Task 11 adds the dropdown menu), so it compiles for the tests only.
-#[cfg(test)]
 mod ui_text;
 
 use ab_glyph::GlyphId;
@@ -17,6 +14,7 @@ use crate::selection::Selection;
 use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
+use crate::ui::tab_bar::TabBarLayout;
 use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
@@ -178,6 +176,95 @@ impl Renderer {
                 self.fill_rect(track_x, geom.track_y, track_w, geom.track_h, track);
             }
             self.fill_rect(geom.x, geom.thumb_y, geom.width, geom.thumb_h, color);
+        }
+    }
+
+    /// Paints the tab strip band described by `layout`. Runs after the grid so
+    /// a window narrower than the strip never shows grid through it.
+    ///
+    /// `ui_px` is the physical chrome em size, already scaled by the window's
+    /// DPI factor; `active` indexes the tab the window shows, and `hover` is
+    /// the tab under the pointer, if any.
+    pub fn draw_chrome(
+        &mut self,
+        layout: &TabBarLayout,
+        ui_px: f32,
+        active: usize,
+        hover: Option<usize>,
+    ) {
+        let height_px = layout.strip_h;
+        let width = layout.width.max(0.0);
+        if height_px <= 0.0 || width <= 0.0 {
+            return;
+        }
+        let foreground = self.theme.foreground;
+        // The whole reserved band, not only the tab rects: grid ink from the
+        // previous frame must not survive in the strip.
+        self.fill_rect(0.0, 0.0, width, height_px, self.theme.tab_bar);
+        for tab in &layout.tabs {
+            let color = if tab.index == active {
+                self.theme.tab_active
+            } else if hover == Some(tab.index) {
+                self.theme.tab_hover
+            } else {
+                self.theme.tab_bar
+            };
+            self.fill_rect(tab.rect.x, 0.0, tab.rect.w, height_px, color);
+        }
+        self.fill_rect(0.0, height_px - 1.0, width, 1.0, self.theme.tab_border);
+
+        // Inset from the tab edge to the glyph slot, and from the strip top to
+        // the top of the title's em box. The reserve on the right keeps the
+        // close button clear of the title.
+        const TITLE_LEFT: f32 = 34.0;
+        const TITLE_TOP: f32 = 9.0;
+        const CLOSE_RESERVE: f32 = 24.0;
+        const BUTTON_INSET_X: f32 = 9.0;
+        const BUTTON_TOP: f32 = 6.0;
+        let button_width = crate::ui::tab_bar::BUTTON_WIDTH;
+
+        ui_text::draw_text(
+            self,
+            "+",
+            layout.plus.x + BUTTON_INSET_X,
+            BUTTON_TOP,
+            ui_px,
+            foreground,
+            button_width,
+        );
+        ui_text::draw_text(
+            self,
+            "⌄",
+            layout.chevron.x + BUTTON_INSET_X,
+            BUTTON_TOP,
+            ui_px,
+            foreground,
+            button_width,
+        );
+
+        for tab in &layout.tabs {
+            let title = layout.titles.get(tab.index).map_or("", String::as_str);
+            let title_width = (tab.rect.w - TITLE_LEFT - CLOSE_RESERVE).max(0.0);
+            ui_text::draw_text(
+                self,
+                title,
+                tab.rect.x + TITLE_LEFT,
+                TITLE_TOP,
+                ui_px,
+                foreground,
+                title_width,
+            );
+            if tab.index == active {
+                ui_text::draw_text(
+                    self,
+                    "✕",
+                    tab.close.x + 3.0,
+                    tab.close.y + 1.0,
+                    ui_px,
+                    foreground,
+                    tab.close.w,
+                );
+            }
         }
     }
 
@@ -445,21 +532,15 @@ impl Renderer {
     }
 
     /// Font data for a glyph-cache face id.
-    // These three shims serve `ui_text`, which has no non-test consumer until
-    // Task 8 paints the tab strip (Task 11 adds the dropdown menu), so they
-    // compile for the tests only.
-    #[cfg(test)]
     pub(crate) fn fonts_face(&self, id: u8) -> Option<(&ab_glyph::FontVec, u32)> {
         Some(self.fonts.font_for_id(id))
     }
 
-    #[cfg(test)]
     pub(crate) fn cache_get(&mut self, font: u8, id: GlyphId, size_px: u32) -> Option<GlyphSlot> {
         let (face, _index) = self.fonts.font_for_id(font);
         self.cache.get(font, face, id, size_px as f32)
     }
 
-    #[cfg(test)]
     pub(crate) fn blit(&mut self, slot: GlyphSlot, x: f32, y: f32, color: Rgb) {
         blit_scaled(
             &mut self.pixmap,
@@ -699,6 +780,47 @@ mod tests {
             background,
             "the cell's lower half must stay empty"
         );
+    }
+
+    #[test]
+    fn the_active_tab_is_lighter_than_its_neighbour() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+
+        let active = pixel_at(&renderer, layout.tabs[0].rect.x + 4.0, 16.0);
+        let inactive = pixel_at(&renderer, layout.tabs[1].rect.x + 4.0, 16.0);
+        assert_ne!(active, inactive);
+    }
+
+    #[test]
+    fn the_plus_button_paints_a_glyph() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let rect = layout.plus;
+        let background = renderer.theme.background;
+        let border = renderer.theme.tab_border;
+        // The bottom rule runs through the button rect, so ignore anything the
+        // chrome palette already explains and look for glyph ink.
+        let painted = (0..rect.w as u32).any(|dx| {
+            (0..rect.h as u32).any(|dy| {
+                let pixel = pixel_at(&renderer, rect.x + dx as f32, rect.y + dy as f32);
+                pixel != background && pixel != border
+            })
+        });
+        assert!(painted);
+    }
+
+    /// The pixmap pixel at a physical coordinate. Reads the pixmap rather than
+    /// the synced buffer so a test can inspect a drawing pass before `sync`.
+    fn pixel_at(renderer: &Renderer, x: f32, y: f32) -> Rgb {
+        let width = renderer.pixmap.width() as usize;
+        let index = (y as usize * width + x as usize) * 4;
+        let data = renderer.pixmap.data();
+        Rgb::new(data[index], data[index + 1], data[index + 2])
     }
 
     #[test]

@@ -39,6 +39,12 @@ pub struct Theme {
     pub selection: Rgb,
     pub normal: [Rgb; 8],
     pub bright: [Rgb; 8],
+    /// Chrome palette. Fixed for now: the strip matches the terminal
+    /// background so the band reads as window chrome rather than content.
+    pub tab_bar: Rgb,
+    pub tab_active: Rgb,
+    pub tab_hover: Rgb,
+    pub tab_border: Rgb,
 }
 
 impl Theme {
@@ -75,6 +81,10 @@ impl Theme {
                 parse(&config.bright_cyan, Rgb::new(97, 214, 214)),
                 parse(&config.bright_white, Rgb::new(242, 242, 242)),
             ],
+            tab_bar: Rgb::new(12, 12, 12),
+            tab_active: Rgb::new(31, 31, 31),
+            tab_hover: Rgb::new(42, 42, 42),
+            tab_border: Rgb::new(43, 43, 43),
         }
     }
 

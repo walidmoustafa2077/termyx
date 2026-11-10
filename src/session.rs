@@ -41,9 +41,8 @@ impl TabSlots {
         self.active = Some(self.ids.len() - 1);
     }
 
-    // The strip's click handling (Task 8) and closing a tab (Task 9) are the
-    // first non-test readers of the slot count, the active slot, the ids, and
-    // the labels, so these compile for the tests only.
+    // Counting tabs, checking emptiness, switching to one, and removing one
+    // are the close path's needs (Task 9), so those compile for the tests only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.ids.len()
@@ -95,9 +94,6 @@ impl TabSlots {
     }
 
     /// The labels of every slot, with the fallback for untitled ones.
-    ///
-    /// Only the test suite reads them until Task 8 draws the strip.
-    #[cfg(test)]
     pub fn titles(&self) -> Vec<&str> {
         self.titles
             .iter()
@@ -156,9 +152,8 @@ impl TabSet {
         self.sessions.len() - 1
     }
 
-    // Nothing on screen counts tabs, switches to one, closes one, or lists
-    // their labels until Tasks 8 and 9 wire the strip and the close button, so
-    // these compile for the tests only.
+    // Counting tabs, switching to one, and closing one are the close path's
+    // needs (Task 9), so those compile for the tests only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.len()
@@ -169,7 +164,6 @@ impl TabSet {
         self.sessions.is_empty()
     }
 
-    #[cfg(test)]
     pub fn active_index(&self) -> Option<usize> {
         self.slots.active_index()
     }
@@ -201,7 +195,6 @@ impl TabSet {
         self.sessions.iter_mut()
     }
 
-    #[cfg(test)]
     pub fn titles(&self) -> Vec<&str> {
         self.slots.titles()
     }

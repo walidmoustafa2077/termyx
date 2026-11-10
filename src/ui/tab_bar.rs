@@ -3,27 +3,18 @@
 
 /// Height of the strip in logical pixels; the terminal grid starts below it.
 pub const TAB_STRIP_HEIGHT: f32 = 32.0;
-// The rest of the strip is layout and hit-testing geometry with no non-test
-// consumer until Task 8 paints it, so it compiles for the tests only.
 /// Widest a single tab grows before the title is clipped.
-#[cfg(test)]
 pub const MAX_TAB_WIDTH: f32 = 220.0;
 /// Narrowest a tab shrinks to while the strip still has room.
-#[cfg(test)]
 pub const MIN_TAB_WIDTH: f32 = 90.0;
 /// Width of the `+` and `⌄` buttons.
-#[cfg(test)]
 pub const BUTTON_WIDTH: f32 = 32.0;
-#[cfg(test)]
 const CLOSE_SIZE: f32 = 16.0;
-#[cfg(test)]
 const TAB_PADDING: f32 = 12.0;
 // Room beside the title: left inset for the glyph, the close button, padding.
 // Wide enough that a normal title reaches `MAX_TAB_WIDTH` and stays capped there.
-#[cfg(test)]
 const TITLE_SIZE: f32 = 120.0;
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -32,14 +23,16 @@ pub struct Rect {
     pub h: f32,
 }
 
-#[cfg(test)]
 impl Rect {
+    // The strip's click handling (Task 9) is the first non-test consumer of
+    // the hit test, so `contains`, `TabHit`, and `hit` compile for the tests
+    // until then.
+    #[cfg(test)]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabRect {
     pub index: usize,
@@ -56,22 +49,27 @@ pub enum TabHit {
     Chevron,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabBarLayout {
     pub width: f32,
+    /// Physical height of the strip, the one `App` reserves above the grid.
+    pub strip_h: f32,
     pub tabs: Vec<TabRect>,
     pub titles: Vec<String>,
     pub plus: Rect,
     pub chevron: Rect,
 }
 
-#[cfg(test)]
 impl TabBarLayout {
+    /// `strip_h` is already physical: `App` scales the logical
+    /// [`TAB_STRIP_HEIGHT`] once and passes the result here, so this module
+    /// never multiplies by a DPI factor.
+    ///
     /// `width_of` measures a title at the UI font size, so a long title both
     /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip
     /// runs out of room.
-    pub fn new(width: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
+    pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
+        let strip_h = strip_h.max(0.0);
         let available = (width - 2.0 * BUTTON_WIDTH).max(MIN_TAB_WIDTH);
         let wanted: Vec<f32> = titles
             .iter()
@@ -92,11 +90,11 @@ impl TabBarLayout {
                 x,
                 y: 0.0,
                 w,
-                h: TAB_STRIP_HEIGHT,
+                h: strip_h,
             };
             let close = Rect {
                 x: rect.x + rect.w - TAB_PADDING - CLOSE_SIZE,
-                y: (TAB_STRIP_HEIGHT - CLOSE_SIZE) / 2.0,
+                y: (strip_h - CLOSE_SIZE) / 2.0,
                 w: CLOSE_SIZE,
                 h: CLOSE_SIZE,
             };
@@ -108,16 +106,17 @@ impl TabBarLayout {
             x,
             y: 0.0,
             w: BUTTON_WIDTH,
-            h: TAB_STRIP_HEIGHT,
+            h: strip_h,
         };
         let chevron = Rect {
             x: plus.x + BUTTON_WIDTH,
             y: 0.0,
             w: BUTTON_WIDTH,
-            h: TAB_STRIP_HEIGHT,
+            h: strip_h,
         };
         Self {
             width,
+            strip_h,
             tabs,
             titles: titles.iter().map(|title| (*title).to_string()).collect(),
             plus,
@@ -125,8 +124,9 @@ impl TabBarLayout {
         }
     }
 
+    #[cfg(test)]
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
-        if y < 0.0 || y >= TAB_STRIP_HEIGHT {
+        if y < 0.0 || y >= self.strip_h {
             return None;
         }
         if let Some(tab) = self.tabs.iter().find(|tab| tab.close.contains(x, y)) {
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn tabs_are_laid_out_left_to_right_and_are_capped() {
-        let layout = TabBarLayout::new(1200.0, &["one", "two", "three"], fixed);
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], fixed);
         assert_eq!(layout.tabs.len(), 3);
         assert!((layout.tabs[0].rect.x - 0.0).abs() < f32::EPSILON);
         assert!(layout.tabs[1].rect.x > layout.tabs[0].rect.x);
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn plus_and_chevron_sit_after_the_last_tab() {
-        let layout = TabBarLayout::new(1200.0, &["one"], fixed);
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one"], fixed);
         let tab_end = layout.tabs[0].rect.x + layout.tabs[0].rect.w;
         assert!(layout.plus.x >= tab_end);
         assert!(layout.chevron.x > layout.plus.x);
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn hit_test_finds_tab_close_plus_and_chevron() {
-        let layout = TabBarLayout::new(1200.0, &["one", "two"], fixed);
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two"], fixed);
         let first = layout.tabs[0].rect;
         assert_eq!(
             layout.hit(first.x + 4.0, first.y + 4.0),
@@ -195,10 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_is_a_single_row() {
-        let layout = TabBarLayout::new(1200.0, &["one"], fixed);
+    fn the_strip_is_a_single_row_of_the_requested_height() {
+        // The strip height is physical and comes from the caller; a scaled
+        // display passes 40 here and both the rects and the hit test follow.
+        let layout = TabBarLayout::new(1200.0, 40.0, &["one"], fixed);
+        assert_eq!(layout.strip_h, 40.0);
         assert_eq!(layout.tabs[0].rect.y, 0.0);
-        assert_eq!(layout.tabs[0].rect.h, TAB_STRIP_HEIGHT);
-        assert_eq!(layout.hit(600.0, TAB_STRIP_HEIGHT + 1.0), None);
+        assert_eq!(layout.tabs[0].rect.h, 40.0);
+        assert_eq!(layout.plus.h, 40.0);
+        assert_eq!(layout.hit(10.0, 39.0), Some(TabHit::Tab(0)));
+        assert_eq!(layout.hit(10.0, 40.0), None);
     }
 }
