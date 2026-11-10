@@ -2,6 +2,7 @@
 
 mod atlas;
 mod glyph_cache;
+mod menu;
 mod ui_text;
 
 use ab_glyph::GlyphId;

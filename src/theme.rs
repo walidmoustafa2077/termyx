@@ -45,6 +45,12 @@ pub struct Theme {
     pub tab_active: Rgb,
     pub tab_hover: Rgb,
     pub tab_border: Rgb,
+    /// Dropdown panel. Fixed for now, in the strip's dark family; a light
+    /// theme is out of scope until the whole theme can switch at once.
+    pub menu_background: Rgb,
+    /// The dropdown row under the pointer. One step above the panel, the same
+    /// way `tab_hover` sits above `tab_bar`.
+    pub menu_hover: Rgb,
 }
 
 impl Theme {
@@ -85,6 +91,8 @@ impl Theme {
             tab_active: Rgb::new(31, 31, 31),
             tab_hover: Rgb::new(26, 26, 26),
             tab_border: Rgb::new(43, 43, 43),
+            menu_background: Rgb::new(31, 31, 31),
+            menu_hover: Rgb::new(43, 43, 43),
         }
     }
 
@@ -138,6 +146,21 @@ mod tests {
         assert!(
             theme.tab_hover.r < theme.tab_active.r,
             "a hovered inactive tab must stay darker than the active tab"
+        );
+    }
+
+    #[test]
+    fn the_menu_palette_lifts_the_panel_and_its_hovered_row() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        assert_eq!(theme.menu_background, Rgb::new(31, 31, 31));
+        assert_eq!(theme.menu_hover, Rgb::new(43, 43, 43));
+        assert!(
+            theme.menu_background.r > theme.tab_bar.r,
+            "the panel must stand out from the strip it opens over"
+        );
+        assert!(
+            theme.menu_hover.r > theme.menu_background.r,
+            "a hovered row must stand out from the panel"
         );
     }
 }

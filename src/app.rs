@@ -25,6 +25,7 @@ use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
+use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
 use crate::ui::tab_bar::{TabBarLayout, TabHit};
 use crate::visual::VisualMap;
 
@@ -57,6 +58,9 @@ pub struct App {
     /// Strip geometry from the window width and every tab title. `None` until
     /// the first session exists.
     layout: Option<TabBarLayout>,
+    /// The open `⌄` dropdown, if any. While it is `Some` the menu owns the
+    /// pointer: presses, motion, the wheel, and Escape all route to it.
+    menu: Option<MenuLayout>,
     /// Tab under the pointer, painted as hover. Only a tab body counts: the
     /// close button and the two buttons leave it clear.
     hovered_tab: Option<usize>,
@@ -64,9 +68,10 @@ pub struct App {
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
-    // The press starting the current gesture was the tab strip's, so its
-    // release must not copy a selection or otherwise reach the grid.
-    press_in_strip: bool,
+    // The press starting the current gesture belonged to window chrome (the
+    // tab strip or the menu), so its release must not copy a selection or
+    // otherwise reach the grid.
+    press_in_chrome: bool,
     click_count: u8,
     last_click: Option<(Instant, f64, f64)>,
     // Button forwarded to a mouse-reporting application, if any. Local text
@@ -94,12 +99,13 @@ impl App {
             renderer: None,
             tabs: TabSet::new(),
             layout: None,
+            menu: None,
             hovered_tab: None,
             clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
-            press_in_strip: false,
+            press_in_chrome: false,
             click_count: 0,
             last_click: None,
             app_mouse_button: None,
@@ -153,6 +159,50 @@ impl App {
             fonts.ui_width(title, ui_px)
         });
         self.layout = Some(layout);
+        if self.menu.is_some() {
+            // The dropdown hangs off the chevron, which moves with the tabs and
+            // the window width; re-anchor an open menu instead of leaving it
+            // pointing at where the button used to be.
+            self.open_menu();
+        }
+    }
+
+    /// Opens the dropdown under the `⌄`, or closes it when it is already open.
+    fn toggle_menu(&mut self) {
+        if self.menu.is_some() {
+            self.close_menu();
+        } else {
+            self.open_menu();
+        }
+    }
+
+    /// Builds the dropdown from the live profile list and anchors it under the
+    /// chevron. Also called to re-anchor an open menu after the strip moves.
+    fn open_menu(&mut self) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let anchor = layout.chevron;
+        let (width, height) = self.window.as_ref().map_or((0.0, 0.0), |window| {
+            let size = window.inner_size();
+            (size.width as f32, size.height as f32)
+        });
+        let mut menu = MenuLayout::new(anchor, menu_items(&self.config), width, height);
+        // Opening through the chevron puts the pointer outside the panel, but a
+        // re-anchor can happen with the pointer already over a row.
+        menu.hovered = menu.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+        self.menu = Some(menu);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu.take().is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
@@ -424,6 +474,9 @@ impl App {
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, self.hovered_tab);
         }
+        if let Some(menu) = self.menu.as_ref() {
+            renderer.draw_menu(menu, ui_px);
+        }
         renderer.sync();
 
         match surface.buffer_mut() {
@@ -451,6 +504,12 @@ impl App {
         // Typing always reveals the cursor, so a keystroke is never typed into
         // a cursor that happens to be in its hidden phase.
         self.blink.restart(Instant::now());
+        // The dropdown is a layer over the grid: Escape dismisses it rather
+        // than reaching the shell.
+        if self.menu.is_some() && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.close_menu();
+            return false;
+        }
         // The tab shortcuts are chrome, not text: a key they claim must never
         // also reach the shell.
         if let Some(action) = tab_shortcut(&event, self.modifiers) {
@@ -594,6 +653,18 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        if let Some(menu) = self.menu.as_mut() {
+            // The dropdown owns the pointer while it is open: motion picks the
+            // row under it and nothing beneath the panel reacts.
+            let hovered = menu.hit(x as f32, y as f32);
+            if menu.hovered != hovered {
+                menu.hovered = hovered;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         // Only something that selects a tab highlights: a press on the active
         // tab's `✕` or on the two buttons leaves the strip flat.
         let hovered = match self.strip_action_at(x, y) {
@@ -641,6 +712,11 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        // The dropdown owns the pointer while it is open; the wheel must not
+        // scroll the grid under the panel.
+        if self.menu.is_some() {
+            return;
+        }
         // The strip is chrome: a wheel over it must not scroll the grid or
         // reach a mouse-reporting application.
         if self
@@ -709,6 +785,32 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
+            // With the dropdown open it owns the pointer: a press on a row is
+            // consumed (running its action is a later task), and a press
+            // anywhere else dismisses the panel. Neither reaches the strip or
+            // the grid.
+            if let Some(menu) = self.menu.as_ref() {
+                let action = menu
+                    .hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                    .and_then(|index| menu.items.get(index))
+                    .map(|item| item.action);
+                // A forwarded button belongs to the tab that owns it; balance
+                // it before the menu takes over the pointer.
+                if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+                    self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+                }
+                // The press is chrome's, so its release cannot copy a stale
+                // selection, and it starts no grid click chain.
+                self.mouse_down = false;
+                self.click_count = 0;
+                self.last_click = None;
+                self.press_in_chrome = true;
+                self.close_menu();
+                if let Some(action) = action {
+                    tracing::debug!(?action, "menu row chosen; its action arrives later");
+                }
+                return false;
+            }
             // The whole band owns its presses, not just the controls: a miss on
             // a tab must not paste, select, reach the PTY, or grab the
             // scrollbar, whichever button was pressed.
@@ -723,8 +825,8 @@ impl App {
                 self.mouse_down = false;
                 self.click_count = 0;
                 self.last_click = None;
-                // The release that ends this press is the strip's too.
-                self.press_in_strip = true;
+                // The release that ends this press is the chrome's too.
+                self.press_in_chrome = true;
                 if button == MouseButton::Left {
                     match action {
                         StripAction::Select(index) => {
@@ -739,11 +841,9 @@ impl App {
                                 tracing::warn!(%err, "could not open a tab");
                             }
                         }
-                        // The dropdown is its own task; the click is still the
-                        // strip's, so it must not fall through to the terminal.
-                        StripAction::OpenMenu => {
-                            tracing::debug!("the profile menu is not open yet")
-                        }
+                        // The dropdown is the strip's own layer; the click is
+                        // still chrome's, so it must not reach the terminal.
+                        StripAction::OpenMenu => self.toggle_menu(),
                         StripAction::Ignore => {}
                     }
                     if let Some(window) = &self.window {
@@ -757,7 +857,7 @@ impl App {
         if state == ElementState::Pressed {
             // Any press outside the band owns the next release, even if an
             // earlier band press never saw its own.
-            self.press_in_strip = false;
+            self.press_in_chrome = false;
             if self.scrollbar_drag && button != MouseButton::Left {
                 // The pointer belongs to the drag; a stray button must not
                 // paste or reach the application mid-gesture.
@@ -890,9 +990,9 @@ impl App {
             self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
         } else {
-            // Any release ends the press, so the band's claim on it dies here
+            // Any release ends the press, so the chrome's claim on it dies here
             // whichever branch handles the event.
-            let from_strip = std::mem::take(&mut self.press_in_strip);
+            let from_chrome = std::mem::take(&mut self.press_in_chrome);
             if self.scrollbar_drag && button == MouseButton::Left {
                 self.scrollbar_drag = false;
                 let (x, y) = self.cursor_pos;
@@ -910,7 +1010,7 @@ impl App {
                 if button == MouseButton::Left && self.config.selection.copy_on_select {
                     if let Some(selection) = &self.selection {
                         let collapsed = selection.anchor == selection.focus;
-                        if release_copies_selection(from_strip, self.click_count, collapsed) {
+                        if release_copies_selection(from_chrome, self.click_count, collapsed) {
                             self.copy_selection();
                         }
                     }
@@ -1132,6 +1232,40 @@ impl App {
         let bytes = input::paste(&text, bracketed);
         self.write_input(&bytes);
     }
+}
+
+/// Number of profiles that own a numbered `Ctrl+Shift+<digit>` shortcut.
+///
+/// Mirrors [`digit_profile`]: those rows name a key the window listens for, and
+/// a further profile would name one nothing binds.
+const PROFILE_SHORTCUTS: usize = 5;
+
+/// The rows of the `⌄` dropdown: one per profile, then the window commands.
+///
+/// The shortcut column is the key that actually reaches the row, so a profile
+/// past [`PROFILE_SHORTCUTS`] leaves it empty instead of naming a key that
+/// opens nothing.
+fn menu_items(config: &Config) -> Vec<MenuItem> {
+    let mut items: Vec<MenuItem> = crate::profiles::profiles(config)
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            let shortcut = if index < PROFILE_SHORTCUTS {
+                format!("Ctrl+Shift+{}", index + 1)
+            } else {
+                String::new()
+            };
+            MenuItem::profile(index, &profile.name, &shortcut)
+        })
+        .collect();
+    items.push(MenuItem::fixed(MenuAction::Settings, "Settings", "Ctrl+,"));
+    items.push(MenuItem::fixed(
+        MenuAction::CommandPalette,
+        "Command palette",
+        "Ctrl+Shift+P",
+    ));
+    items.push(MenuItem::fixed(MenuAction::About, "About", ""));
+    items
 }
 
 /// What a press inside the tab strip asks the app to do.
@@ -1642,11 +1776,11 @@ fn should_copy_on_release(click_count: u8, collapsed: bool) -> bool {
 
 /// Whether a local release copies the selection.
 ///
-/// A release whose press the tab strip consumed is chrome, not a selection
-/// gesture: it must not copy a selection that was already on screen before the
-/// click, even though that selection is still non-collapsed.
-fn release_copies_selection(from_strip: bool, click_count: u8, collapsed: bool) -> bool {
-    !from_strip && should_copy_on_release(click_count, collapsed)
+/// A release whose press window chrome consumed (the tab strip or the menu) is
+/// not a selection gesture: it must not copy a selection that was already on
+/// screen before the click, even though that selection is still non-collapsed.
+fn release_copies_selection(from_chrome: bool, click_count: u8, collapsed: bool) -> bool {
+    !from_chrome && should_copy_on_release(click_count, collapsed)
 }
 
 fn mods_from(modifiers: ModifiersState) -> Mods {
@@ -2111,6 +2245,64 @@ mod tests {
         assert_eq!(
             strip_action(Some(TabHit::Chevron), 0),
             StripAction::OpenMenu
+        );
+    }
+
+    fn six_profiles() -> Config {
+        let mut text = String::new();
+        for index in 1..=6 {
+            text.push_str(&format!(
+                "[[profiles]]\nname = \"Profile {index}\"\nprogram = \"shell{index}.exe\"\n"
+            ));
+        }
+        Config::from_toml_str(&text).expect("the profiles must parse")
+    }
+
+    #[test]
+    fn the_menu_lists_a_row_per_profile_then_the_window_commands() {
+        let items = menu_items(&six_profiles());
+        assert_eq!(items.len(), 6 + 3);
+        assert_eq!(items[0].action, MenuAction::Profile(0));
+        assert_eq!(items[0].label, "Profile 1");
+        assert_eq!(items[5].action, MenuAction::Profile(5));
+        assert_eq!(
+            (
+                items[6].action,
+                items[6].label.as_str(),
+                items[6].shortcut.as_str()
+            ),
+            (MenuAction::Settings, "Settings", "Ctrl+,")
+        );
+        assert_eq!(
+            (
+                items[7].action,
+                items[7].label.as_str(),
+                items[7].shortcut.as_str()
+            ),
+            (
+                MenuAction::CommandPalette,
+                "Command palette",
+                "Ctrl+Shift+P"
+            )
+        );
+        assert_eq!(
+            (
+                items[8].action,
+                items[8].label.as_str(),
+                items[8].shortcut.as_str()
+            ),
+            (MenuAction::About, "About", "")
+        );
+    }
+
+    #[test]
+    fn only_the_first_five_profiles_name_a_shortcut() {
+        let items = menu_items(&six_profiles());
+        assert_eq!(items[0].shortcut, "Ctrl+Shift+1");
+        assert_eq!(items[4].shortcut, "Ctrl+Shift+5");
+        assert_eq!(
+            items[5].shortcut, "",
+            "a sixth profile has no shortcut, so its row must not invent one"
         );
     }
 
