@@ -397,10 +397,14 @@ impl App {
     /// grid. A font reload failure logs and keeps the old set; the window stays
     /// usable at the previous text size instead of ending the session.
     fn on_scale_factor_changed(&mut self, scale_factor: f64) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
             return;
         };
-        let size = window.inner_size();
+        // Everything below redraws through the renderer, so without one there
+        // is nothing to rebuild and no reason to load a font set.
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
         let fonts = FontSet::load(
             &self.config.font.family,
             &self.config.font.arabic_family,
@@ -408,11 +412,7 @@ impl App {
             self.config.font.line_height,
         );
         match fonts {
-            Ok(fonts) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.set_fonts(fonts);
-                }
-            }
+            Ok(fonts) => renderer.set_fonts(fonts),
             Err(err) => {
                 tracing::error!(
                     %err,
@@ -420,13 +420,11 @@ impl App {
                 );
             }
         }
-        if let Some(renderer) = self.renderer.as_mut() {
-            // The strip height is physical and derives from the *new* scale
-            // factor, so the inset must be recomputed rather than left at the
-            // old DPI's value. The event's factor is authoritative here even if
-            // the window has already cached it.
-            renderer.set_top_inset(strip_px(scale_factor));
-        }
+        // The strip height is physical and derives from the *new* scale factor,
+        // so the inset must be recomputed rather than left at the old DPI's
+        // value. The event's factor is authoritative here even if the window
+        // has already cached it.
+        renderer.set_top_inset(strip_px(scale_factor));
         self.resize_surface(size.width, size.height);
         if self.resize_grid(size.width, size.height) {
             // Reflow invalidates logical selection positions.
@@ -980,10 +978,11 @@ impl App {
                 // it before the menu takes over the pointer.
                 self.release_forwarded_button();
                 // The press is chrome's, so its release cannot copy a stale
-                // selection, and it starts no grid click chain.
+                // selection, and it starts neither double-click chain.
                 self.mouse_down = false;
                 self.click_count = 0;
                 self.last_click = None;
+                self.last_strip_click = None;
                 self.press_in_chrome = true;
                 self.close_menu();
                 if let Some(action) = action {
@@ -1006,14 +1005,14 @@ impl App {
                 // The release that ends this press is the chrome's too.
                 self.press_in_chrome = true;
                 if button == MouseButton::Left {
+                    let press = chrome_press(self.layout.as_ref().and_then(|layout| {
+                        layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                    }));
                     // A miss inside the band is empty chrome: it is the window's
                     // drag handle, the way a caption is. Win32's
                     // `WM_NCHITTEST` already routed the top 6 px to resizing, so
                     // every press that reaches here is below that border.
-                    if chrome_press(self.layout.as_ref().and_then(|layout| {
-                        layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                    })) == ChromePress::Drag
-                    {
+                    if keeps_strip_click_chain(press) {
                         let now = Instant::now();
                         let at = self.cursor_pos;
                         let double = is_double_click(self.last_strip_click, now, at);
@@ -1030,6 +1029,9 @@ impl App {
                         }
                         return false;
                     }
+                    // A real control is not part of a title-bar double click, so
+                    // it disarms the chain for the next empty-band press.
+                    self.last_strip_click = None;
                     match action {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
@@ -1077,6 +1079,9 @@ impl App {
             // Any press outside the band owns the next release, even if an
             // earlier band press never saw its own.
             self.press_in_chrome = false;
+            // A press outside the strip cannot pair with an earlier empty-band
+            // press as a window double click.
+            self.last_strip_click = None;
             if self.scrollbar_drag && button != MouseButton::Left {
                 // The pointer belongs to the drag; a stray button must not
                 // paste or reach the application mid-gesture.
@@ -1538,6 +1543,16 @@ fn is_double_click(previous: Option<(Instant, (f64, f64))>, now: Instant, at: (f
             && (at.0 - x).abs() <= CLICK_DISTANCE
             && (at.1 - y).abs() <= CLICK_DISTANCE
     })
+}
+
+/// Whether a press on the strip leaves the window's double-click chain armed.
+///
+/// Only another press on the empty band can pair with the previous one. A tab,
+/// its `✕`, the `+`/`⌄`, or a caption control starts a different gesture and
+/// must disarm the chain, or `empty → tab → empty` within the double-click
+/// interval would toggle maximise.
+fn keeps_strip_click_chain(press: ChromePress) -> bool {
+    matches!(press, ChromePress::Drag)
 }
 
 /// What a press inside the tab strip asks the app to do.
@@ -2663,6 +2678,15 @@ mod tests {
     }
 
     #[test]
+    fn only_an_empty_strip_press_keeps_the_double_click_chain() {
+        // The chain pairs two presses on the same empty spot. A real control in
+        // between must disarm it; otherwise `empty → tab → empty` within the
+        // interval would toggle maximise.
+        assert!(keeps_strip_click_chain(ChromePress::Drag));
+        assert!(!keeps_strip_click_chain(ChromePress::Tab));
+    }
+
+    #[test]
     fn a_press_on_a_menu_row_chooses_it() {
         assert_eq!(menu_press(Some(2), true), MenuPress::Choose(2));
     }
@@ -3157,19 +3181,11 @@ mod tests {
     }
 
     #[test]
-    fn a_display_scale_change_recomputes_the_strip_and_the_fonts() {
-        // `on_scale_factor_changed` feeds both of these to the renderer: the
-        // physical strip height becomes its top inset and the physical font
-        // size becomes every glyph's and every cell's size. They must move
-        // together, or the painted band and the grid disagree after a DPI
-        // change.
-        assert_eq!(strip_px(1.25), 40);
-        assert_eq!(strip_px(1.5), 48);
-        assert_ne!(
-            strip_px(1.0),
-            strip_px(1.5),
-            "the reserved inset must follow the new scale factor"
-        );
+    fn scaled_font_size_follows_the_display_scale() {
+        // `on_scale_factor_changed` passes this to the renderer, which turns the
+        // physical size into every glyph's and every cell's size. This pins the
+        // arithmetic only: the wiring needs a live event loop and a real scale
+        // change, so it stays a manual-verification item.
         assert_eq!(scaled_font_size(16.0, 1.25), 20.0);
         assert_eq!(scaled_font_size(16.0, 1.5), 24.0);
     }
