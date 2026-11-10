@@ -64,6 +64,9 @@ pub struct App {
     modifiers: ModifiersState,
     selection: Option<Selection>,
     mouse_down: bool,
+    // The press starting the current gesture was the tab strip's, so its
+    // release must not copy a selection or otherwise reach the grid.
+    press_in_strip: bool,
     click_count: u8,
     last_click: Option<(Instant, f64, f64)>,
     // Button forwarded to a mouse-reporting application, if any. Local text
@@ -96,6 +99,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             selection: None,
             mouse_down: false,
+            press_in_strip: false,
             click_count: 0,
             last_click: None,
             app_mouse_button: None,
@@ -651,6 +655,8 @@ impl App {
                 self.mouse_down = false;
                 self.click_count = 0;
                 self.last_click = None;
+                // The release that ends this press is the strip's too.
+                self.press_in_strip = true;
                 if button == MouseButton::Left {
                     match action {
                         StripAction::Select(index) => {
@@ -681,6 +687,9 @@ impl App {
         }
 
         if state == ElementState::Pressed {
+            // Any press outside the band owns the next release, even if an
+            // earlier band press never saw its own.
+            self.press_in_strip = false;
             if self.scrollbar_drag && button != MouseButton::Left {
                 // The pointer belongs to the drag; a stray button must not
                 // paste or reach the application mid-gesture.
@@ -812,24 +821,30 @@ impl App {
             };
             self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
-        } else if self.scrollbar_drag && button == MouseButton::Left {
-            self.scrollbar_drag = false;
-            let (x, y) = self.cursor_pos;
-            self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
-            return false;
-        } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
-            // Route by the state captured at press time: a forwarded press is
-            // released even when Shift or the mouse mode changed mid-gesture.
-            self.send_mouse(input::MouseEventKind::Release, Some(tracked));
-            self.mouse_down = false;
-            return false;
         } else {
-            self.mouse_down = false;
-            if button == MouseButton::Left && self.config.selection.copy_on_select {
-                if let Some(selection) = &self.selection {
-                    let collapsed = selection.anchor == selection.focus;
-                    if should_copy_on_release(self.click_count, collapsed) {
-                        self.copy_selection();
+            // Any release ends the press, so the band's claim on it dies here
+            // whichever branch handles the event.
+            let from_strip = std::mem::take(&mut self.press_in_strip);
+            if self.scrollbar_drag && button == MouseButton::Left {
+                self.scrollbar_drag = false;
+                let (x, y) = self.cursor_pos;
+                self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
+                return false;
+            } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+                // Route by the state captured at press time: a forwarded press
+                // is released even when Shift or the mouse mode changed
+                // mid-gesture.
+                self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+                self.mouse_down = false;
+                return false;
+            } else {
+                self.mouse_down = false;
+                if button == MouseButton::Left && self.config.selection.copy_on_select {
+                    if let Some(selection) = &self.selection {
+                        let collapsed = selection.anchor == selection.focus;
+                        if release_copies_selection(from_strip, self.click_count, collapsed) {
+                            self.copy_selection();
+                        }
                     }
                 }
             }
@@ -1464,6 +1479,15 @@ fn should_copy_on_release(click_count: u8, collapsed: bool) -> bool {
     click_count >= 2 || !collapsed
 }
 
+/// Whether a local release copies the selection.
+///
+/// A release whose press the tab strip consumed is chrome, not a selection
+/// gesture: it must not copy a selection that was already on screen before the
+/// click, even though that selection is still non-collapsed.
+fn release_copies_selection(from_strip: bool, click_count: u8, collapsed: bool) -> bool {
+    !from_strip && should_copy_on_release(click_count, collapsed)
+}
+
 fn mods_from(modifiers: ModifiersState) -> Mods {
     Mods {
         ctrl: modifiers.control_key(),
@@ -1842,6 +1866,19 @@ mod tests {
     #[test]
     fn collapsed_double_click_copies() {
         assert!(should_copy_on_release(2, true));
+    }
+
+    #[test]
+    fn a_strip_release_never_copies_an_older_selection() {
+        // The band starts no selection, so its release is not a selection
+        // gesture even when a non-collapsed selection is still on screen.
+        assert!(!release_copies_selection(true, 1, false));
+        assert!(!release_copies_selection(true, 2, false));
+
+        // A local release keeps today's copy-on-select decision.
+        assert!(release_copies_selection(false, 1, false));
+        assert!(release_copies_selection(false, 2, true));
+        assert!(!release_copies_selection(false, 1, true));
     }
 
     #[test]
