@@ -790,10 +790,12 @@ impl App {
             // anywhere else dismisses the panel. Neither reaches the strip or
             // the grid.
             if let Some(menu) = self.menu.as_ref() {
-                let action = menu
-                    .hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                    .and_then(|index| menu.items.get(index))
-                    .map(|item| item.action);
+                let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                let press = menu_press(menu.hit(x, y), menu.rect.contains(x, y));
+                let action = match press {
+                    MenuPress::Choose(index) => menu.items.get(index).map(|item| item.action),
+                    MenuPress::Dismiss => None,
+                };
                 // A forwarded button belongs to the tab that owns it; balance
                 // it before the menu takes over the pointer.
                 if let Some(tracked) = release_button(self.app_mouse_button.take()) {
@@ -1297,6 +1299,29 @@ fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
     }
 }
 
+/// What a press with the dropdown open asks the app to do.
+///
+/// The panel owns the pointer while it is open, so a press outside it only
+/// dismisses; a press inside that lands on a row runs that row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuPress {
+    Choose(usize),
+    Dismiss,
+}
+
+/// Maps a press against the open panel to its action. `hit` is the row under
+/// the pointer and `inside` says whether the panel itself was hit.
+///
+/// A press outside the panel dismisses even when a stale row index is supplied:
+/// leaving the panel always wins over whatever it last hovered.
+fn menu_press(hit: Option<usize>, inside: bool) -> MenuPress {
+    match (hit, inside) {
+        (_, false) => MenuPress::Dismiss,
+        (Some(index), true) => MenuPress::Choose(index),
+        (None, true) => MenuPress::Dismiss,
+    }
+}
+
 /// What a keyboard shortcut asks the tab strip to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabAction {
@@ -1556,9 +1581,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_cursor_moved(position.x, position.y)
             }
             WindowEvent::CursorLeft { .. } => {
-                // The pointer is off the window, so no tab is hovered either.
+                // The pointer is off the window, so neither the strip nor a
+                // menu row is hovered.
                 self.set_hovered_tab(None);
                 self.set_scrollbar_hover(false);
+                if let Some(menu) = self.menu.as_mut() {
+                    if menu.hovered.take().is_some() {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.on_mouse(state, button) {
@@ -2232,6 +2265,26 @@ mod tests {
         // Nothing sits under the pointer in the band, so the press stays the
         // strip's and never becomes a grid event.
         assert_eq!(strip_action(None, 0), StripAction::Ignore);
+    }
+
+    #[test]
+    fn a_press_on_a_menu_row_chooses_it() {
+        assert_eq!(menu_press(Some(2), true), MenuPress::Choose(2));
+    }
+
+    #[test]
+    fn a_press_inside_the_panel_but_between_rows_dismisses() {
+        assert_eq!(menu_press(None, true), MenuPress::Dismiss);
+    }
+
+    #[test]
+    fn a_press_outside_the_panel_always_dismisses() {
+        assert_eq!(menu_press(None, false), MenuPress::Dismiss);
+        assert_eq!(
+            menu_press(Some(1), false),
+            MenuPress::Dismiss,
+            "leaving the panel wins over a stale row index"
+        );
     }
 
     #[test]

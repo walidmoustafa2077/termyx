@@ -61,18 +61,20 @@ pub struct MenuLayout {
 }
 
 impl MenuLayout {
-    /// Anchored under `anchor`, kept inside the window: the dropdown opens
-    /// downward unless that would run past the bottom edge, in which case it
-    /// flips above the anchor. The right edge is pulled in when the anchor sits
-    /// near the window's edge.
+    /// Anchored under `anchor`, kept inside the window on both axes: the
+    /// dropdown opens downward unless that would run past the bottom edge, in
+    /// which case it flips above the anchor. The right edge is pulled in when
+    /// the anchor sits near the window's edge, and the panel shrinks to the
+    /// window when the window is narrower than it.
+    ///
+    /// When neither side can hold the whole menu, the panel is pinned directly
+    /// under the strip — never over it, or a row would steal the chevron — and
+    /// only the rows that fit entirely are laid out. Dropped rows are absent
+    /// from `rows`, so `hit` cannot find them.
     ///
     /// `anchor` is the strip's chevron, so its height carries the DPI scale the
     /// strip was laid out at. Deriving the factor from it keeps the dropdown in
     /// step with the scaled chrome without a fifth argument.
-    ///
-    /// A window narrower than the menu shrinks the panel to the window width;
-    /// one shorter than the menu pins it to the top edge, where the window
-    /// clips the rows that do not fit.
     pub fn new(anchor: Rect, items: Vec<MenuItem>, window_width: f32, window_height: f32) -> Self {
         let k = anchor.h / TAB_STRIP_HEIGHT;
         let width = (MENU_WIDTH * k).min(window_width.max(0.0));
@@ -90,18 +92,20 @@ impl MenuLayout {
         } else {
             0.0
         };
-        let height = items.len() as f32 * row_height + 2.0 * padding + rule_gap;
+        let full_height = items.len() as f32 * row_height + 2.0 * padding + rule_gap;
         let x = (anchor.x + anchor.w - width).clamp(0.0, (window_width - width).max(0.0));
-        let mut y = anchor.y + anchor.h + gap;
-        if y + height > window_height {
-            y = anchor.y - gap - height;
-        }
-        let y = y.clamp(0.0, (window_height - height).max(0.0));
-        let rect = Rect {
-            x,
-            y,
-            w: width,
-            h: height,
+
+        let below = anchor.y + anchor.h + gap;
+        let above = anchor.y - gap - full_height;
+        let y = if below + full_height <= window_height {
+            below
+        } else if above >= 0.0 {
+            above
+        } else {
+            // Neither side holds the whole menu. Pin it under the strip and
+            // keep only the rows that fit; the window never clips a row that
+            // `hit` can still reach.
+            (anchor.y + anchor.h).max(0.0)
         };
 
         let mut rows = Vec::with_capacity(items.len());
@@ -109,10 +113,16 @@ impl MenuLayout {
         let mut row_y = y + padding;
         let mut seen_command = false;
         for item in &items {
-            let is_profile = matches!(item.action, MenuAction::Profile(_));
-            if !is_profile && !seen_command {
+            let needs_rule = !matches!(item.action, MenuAction::Profile(_)) && !seen_command;
+            let top = if needs_rule { row_y + rule_gap } else { row_y };
+            // A row is kept whole: one that would hang over the window's bottom
+            // edge is dropped, along with every row after it.
+            if top + row_height + padding > window_height {
+                break;
+            }
+            if needs_rule {
                 separators.push(row_y);
-                row_y += rule_gap;
+                row_y = top;
                 seen_command = true;
             }
             rows.push(Rect {
@@ -123,9 +133,15 @@ impl MenuLayout {
             });
             row_y += row_height;
         }
+        let height = (row_y + padding - y).clamp(0.0, (window_height - y).max(0.0));
 
         Self {
-            rect,
+            rect: Rect {
+                x,
+                y,
+                w: width,
+                h: height,
+            },
             rows,
             items,
             separators,
@@ -158,6 +174,20 @@ mod tests {
         ]
     }
 
+    fn nine_items() -> Vec<MenuItem> {
+        let mut items: Vec<MenuItem> = (0..6)
+            .map(|index| MenuItem::profile(index, &format!("Profile {index}"), ""))
+            .collect();
+        items.push(MenuItem::fixed(MenuAction::Settings, "Settings", "Ctrl+,"));
+        items.push(MenuItem::fixed(
+            MenuAction::CommandPalette,
+            "Command palette",
+            "Ctrl+Shift+P",
+        ));
+        items.push(MenuItem::fixed(MenuAction::About, "About", ""));
+        items
+    }
+
     #[test]
     fn the_menu_hangs_below_its_anchor_and_keeps_its_top_edge() {
         let anchor = Rect {
@@ -174,14 +204,21 @@ mod tests {
 
     #[test]
     fn a_menu_wider_than_the_window_is_shoved_inside() {
+        // The window is narrower than the panel, so only the shrink branch can
+        // keep it on screen.
+        let window_width = 200.0;
         let anchor = Rect {
-            x: 780.0,
+            x: 180.0,
             y: 0.0,
             w: 32.0,
             h: 32.0,
         };
-        let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
-        assert!(menu.rect.x + menu.rect.w <= 800.0);
+        let menu = MenuLayout::new(anchor, items(), window_width, 600.0);
+        assert_eq!(menu.rect.x, 0.0, "the panel is pulled to the left edge");
+        assert!(
+            menu.rect.w <= window_width,
+            "the panel must shrink to the window width"
+        );
     }
 
     #[test]
@@ -212,6 +249,16 @@ mod tests {
             h: 32.0,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
+        assert_eq!(
+            menu.rows.len(),
+            menu.items.len(),
+            "every item gets exactly one row"
+        );
+        assert_eq!(
+            menu.items[2].action,
+            MenuAction::Settings,
+            "row 2 belongs to the third item"
+        );
         let row = menu.rows[2];
         assert_eq!(
             menu.hit(row.x + 4.0, row.y + 4.0),
@@ -270,6 +317,74 @@ mod tests {
         assert_eq!(
             menu.hit(menu.rows[3].x + 4.0, menu.rows[3].y + 4.0),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn a_short_window_keeps_the_panel_and_its_rows_inside() {
+        // 200 px cannot hold a 9-row panel (300 px) below or above the strip,
+        // so the panel is pinned under the strip and only whole rows are kept.
+        let anchor = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 32.0,
+            h: 32.0,
+        };
+        let menu = MenuLayout::new(anchor, nine_items(), 800.0, 200.0);
+        assert!(
+            menu.rect.y + menu.rect.h <= 200.0,
+            "the panel must not leave the window's bottom edge"
+        );
+        assert!(
+            menu.rows.len() < menu.items.len(),
+            "rows that would hang over the edge are dropped"
+        );
+        for (index, row) in menu.rows.iter().enumerate() {
+            assert!(
+                row.y + row.h <= 200.0,
+                "row {index} must fit entirely in the window"
+            );
+            assert!(
+                row.y >= anchor.y + anchor.h,
+                "row {index} must stay below the strip"
+            );
+            assert_eq!(
+                menu.hit(row.x + 4.0, row.y + 4.0),
+                Some(index),
+                "row {index} must still be reachable"
+            );
+        }
+        assert_eq!(
+            menu.hit(menu.rect.x + 4.0, 199.0),
+            None,
+            "a point past the last row is no row at all"
+        );
+    }
+
+    #[test]
+    fn a_middling_window_keeps_row_zero_below_the_strip() {
+        // 330 px still cannot hold the whole panel at once, but the pinned
+        // panel now covers most of the window. Row 0 must begin under the
+        // strip so a chevron press cannot land on a row.
+        let anchor = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 32.0,
+            h: 32.0,
+        };
+        let menu = MenuLayout::new(anchor, nine_items(), 800.0, 330.0);
+        assert!(
+            menu.rect.y >= anchor.y + anchor.h,
+            "the panel must not cover the strip"
+        );
+        assert!(
+            menu.rows[0].y >= anchor.y + anchor.h,
+            "the first row must stay below the strip"
+        );
+        assert_eq!(
+            menu.hit(anchor.x + 4.0, anchor.y + 4.0),
+            None,
+            "a chevron press must not resolve to a row"
         );
     }
 }

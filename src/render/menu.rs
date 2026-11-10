@@ -34,6 +34,13 @@ impl Renderer {
             if menu.hovered == Some(index) {
                 self.fill_rect(row.x, row.y, row.w, row.h, self.theme.menu_hover);
             }
+            // Measure the hint first: its width decides how much room the label
+            // may use, so a long shortcut cannot be painted over.
+            let shortcut_width = if item.shortcut.is_empty() {
+                None
+            } else {
+                Some(self.fonts().ui_width(&item.shortcut, ui_px))
+            };
             ui_text::draw_text(
                 self,
                 &item.label,
@@ -41,12 +48,11 @@ impl Renderer {
                 row.y + 9.0 * k,
                 ui_px,
                 foreground,
-                (row.w - 100.0 * k).max(0.0),
+                label_width(row.w, shortcut_width, k),
             );
-            if item.shortcut.is_empty() {
+            let Some(width) = shortcut_width else {
                 continue;
-            }
-            let width = self.fonts().ui_width(&item.shortcut, ui_px);
+            };
             ui_text::draw_text(
                 self,
                 &item.shortcut,
@@ -58,6 +64,20 @@ impl Renderer {
             );
         }
     }
+}
+
+/// Width the label may paint in, leaving the shortcut column clear.
+///
+/// `shortcut_width` is `None` for a row without a hint, which then only needs
+/// the panel's right inset. The label always keeps a positive width, even when
+/// the shortcut alone would eat the whole row.
+fn label_width(row_width: f32, shortcut_width: Option<f32>, k: f32) -> f32 {
+    let left = 26.0 * k;
+    let right = match shortcut_width {
+        Some(width) => width + 12.0 * k,
+        None => 4.0 * k,
+    };
+    (row_width - left - right).max(1.0)
 }
 
 #[cfg(test)]
@@ -174,6 +194,68 @@ mod tests {
             pixel_at(&renderer, menu.rect.x + 40.0, rule),
             renderer.theme.tab_border
         );
+    }
+
+    #[test]
+    fn a_long_shortcut_keeps_the_label_out_of_its_column() {
+        let mut renderer = crate::render::tests::default_renderer();
+        renderer.resize(600, 400);
+        let anchor = Rect {
+            x: 140.0,
+            y: 0.0,
+            w: 32.0,
+            h: 32.0,
+        };
+        let shortcut = "Ctrl+Shift+Alt+F12";
+        let menu = MenuLayout::new(
+            anchor,
+            vec![MenuItem::fixed(
+                MenuAction::Settings,
+                "Windows PowerShell",
+                shortcut,
+            )],
+            600.0,
+            400.0,
+        );
+        renderer.draw_menu(&menu, crate::fonts::UI_SIZE_PX);
+        let row = menu.rows[0];
+        let k = row.h / MENU_ROW_HEIGHT;
+        let shortcut_width = renderer
+            .fonts()
+            .ui_width(shortcut, crate::fonts::UI_SIZE_PX);
+        let label_width = label_width(row.w, Some(shortcut_width), k);
+        let label_right = row.x + 26.0 * k + label_width;
+        let shortcut_left = row.x + row.w - shortcut_width - 4.0 * k;
+        assert!(
+            label_right <= shortcut_left,
+            "the label's clip must end before the shortcut starts"
+        );
+        let gap = Rect {
+            x: label_right,
+            y: row.y,
+            w: shortcut_left - label_right,
+            h: row.h,
+        };
+        assert_eq!(
+            ink_in(&renderer, gap),
+            0,
+            "a long shortcut must not be painted over by the label"
+        );
+        let column = Rect {
+            x: shortcut_left,
+            y: row.y,
+            w: shortcut_width,
+            h: row.h,
+        };
+        assert!(
+            ink_in(&renderer, column) > 0,
+            "the shortcut still paints in its own column"
+        );
+    }
+
+    #[test]
+    fn a_shortcut_wider_than_the_row_leaves_the_label_some_room() {
+        assert_eq!(label_width(100.0, Some(200.0), 1.0), 1.0);
     }
 
     fn left_half(row: Rect) -> Rect {
