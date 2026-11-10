@@ -63,18 +63,35 @@ impl TabSlots {
         }
     }
 
-    /// Removes the active slot and activates the neighbour that takes its
-    /// place: the one to the right, else the one to the left.
-    pub fn remove_active(&mut self) -> Option<SessionId> {
-        let index = self.active?;
+    /// Removes the slot at `index`. The active slot stays active unless it was
+    /// the one removed, in which case the neighbour that takes its place
+    /// becomes active.
+    pub fn remove(&mut self, index: usize) -> Option<SessionId> {
+        if index >= self.ids.len() {
+            return None;
+        }
         let id = self.ids.remove(index);
         self.titles.remove(index);
-        self.active = if self.ids.is_empty() {
-            None
-        } else {
-            Some(index.min(self.ids.len() - 1))
-        };
+        match self.active {
+            Some(active) if active == index => {
+                self.active = if self.ids.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.ids.len() - 1))
+                };
+            }
+            Some(active) if active > index => self.active = Some(active - 1),
+            _ => {}
+        }
         Some(id)
+    }
+
+    /// Removes the active slot. Only the tests close without an index;
+    /// production closes by index so a background tab cannot steal the view.
+    #[cfg(test)]
+    pub fn remove_active(&mut self) -> Option<SessionId> {
+        let index = self.active?;
+        self.remove(index)
     }
 
     #[cfg(test)]
@@ -182,12 +199,22 @@ impl TabSet {
         Some(&mut self.sessions[index])
     }
 
-    pub fn remove_active(&mut self) -> Option<Session> {
-        let index = self.slots.active_index()?;
-        let id = self.slots.remove_active()?;
+    /// Removes the session at `index`. The tab on screen stays on screen unless
+    /// it was the one removed, so closing a background tab never steals the
+    /// view.
+    pub fn remove(&mut self, index: usize) -> Option<Session> {
+        let id = self.slots.remove(index)?;
         let session = self.sessions.remove(index);
         debug_assert_eq!(session.id, id);
         Some(session)
+    }
+
+    // The tests close whatever happens to be active; production always names
+    // the index it closes.
+    #[cfg(test)]
+    pub fn remove_active(&mut self) -> Option<Session> {
+        let index = self.slots.active_index()?;
+        self.remove(index)
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Session> {
@@ -259,6 +286,51 @@ mod tests {
         assert_eq!(slots.remove_active(), Some(1));
         assert_eq!(slots.active_index(), Some(0));
         assert_eq!(slots.remove_active(), Some(3));
+        assert_eq!(slots.active_index(), None);
+        assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn closing_a_background_slot_keeps_the_active_one() {
+        let mut slots = TabSlots::new();
+        slots.push(1);
+        slots.push(2);
+        slots.push(3);
+        slots.select(0);
+
+        // Closing a tab the window is not showing leaves the view alone.
+        assert_eq!(slots.remove(1), Some(2));
+        assert_eq!(slots.active_index(), Some(0));
+        assert_eq!(slots.ids(), vec![1, 3]);
+
+        // Removing a slot before the active one shifts it down with its id.
+        slots.select(1);
+        assert_eq!(slots.remove(0), Some(1));
+        assert_eq!(slots.active_index(), Some(0));
+        assert_eq!(slots.ids(), vec![3]);
+
+        // An index no slot has removes nothing.
+        assert_eq!(slots.remove(9), None);
+        assert_eq!(slots.ids(), vec![3]);
+    }
+
+    #[test]
+    fn closing_the_active_slot_activates_a_neighbour() {
+        let mut slots = TabSlots::new();
+        slots.push(1);
+        slots.push(2);
+        slots.push(3);
+        slots.select(1);
+
+        assert_eq!(slots.remove(1), Some(2));
+        assert_eq!(slots.active_index(), Some(1), "the slot to the right");
+        assert_eq!(slots.ids(), vec![1, 3]);
+
+        // The last slot falls back to the one on its left, and the empty set
+        // has no active slot at all.
+        assert_eq!(slots.remove(1), Some(3));
+        assert_eq!(slots.active_index(), Some(0));
+        assert_eq!(slots.remove(0), Some(1));
         assert_eq!(slots.active_index(), None);
         assert!(slots.is_empty());
     }

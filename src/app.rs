@@ -317,12 +317,16 @@ impl App {
             self.config.scrollback.lines,
             self.proxy.clone(),
         )?;
+        // A forwarded press belongs to the tab that owns it. Balance it before
+        // the new session becomes active, or the release would reach the wrong
+        // shell and leave the original one stuck down.
+        if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+            self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+        }
         self.tabs.push(session);
-        // The new tab is active, so a selection on the old grid is stale, and
-        // a `+` click arrives from a mouse handler that may still be mid-press.
+        // The new tab is active, so a selection on the old grid is stale.
         self.selection = None;
         self.mouse_down = false;
-        self.app_mouse_button = None;
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -330,15 +334,17 @@ impl App {
         Ok(())
     }
 
-    /// Closes the tab at `index` and shows the neighbour that takes its place.
+    /// Closes the tab at `index` and shows the neighbour that takes its place
+    /// only when the closed tab was the one on screen.
     ///
     /// Dropping the session closes its child through `PtySession::drop`.
     /// Returns whether the set is now empty: a window with no tab has nothing
     /// left to show, so the caller exits.
     fn close_tab(&mut self, index: usize) -> bool {
-        self.tabs.select(index);
-        let _ = self.tabs.remove_active();
+        let _ = self.tabs.remove(index);
         self.selection = None;
+        // The tab under the pointer may have moved with the removal.
+        self.hovered_tab = None;
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -346,13 +352,20 @@ impl App {
         self.tabs.is_empty()
     }
 
-    /// The strip control under a physical-pixel position, if any.
+    /// The strip action for a physical-pixel position, or `None` when the
+    /// pointer is outside the band and the grid owns the event.
     ///
     /// The layout is built from physical pixels (window width and the height
     /// the renderer reserved), and winit reports mouse positions in that same
     /// space, so the hit test needs no scaling here.
-    fn tab_hit(&self, x: f64, y: f64) -> Option<TabHit> {
-        self.layout.as_ref()?.hit(x as f32, y as f32)
+    fn strip_action_at(&self, x: f64, y: f64) -> Option<StripAction> {
+        let layout = self.layout.as_ref()?;
+        if !in_strip(y, layout.strip_h) {
+            return None;
+        }
+        // With no live tab nothing can be active, so no close can match.
+        let active = self.tabs.active_index().unwrap_or(usize::MAX);
+        Some(strip_action(layout.hit(x as f32, y as f32), active))
     }
 
     /// Paints `hovered` as the tab under the pointer, redrawing only when the
@@ -509,10 +522,10 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
-        // Only a tab body highlights; a pointer on the close button or the two
-        // buttons leaves the strip flat.
-        let hovered = match self.tab_hit(x, y) {
-            Some(TabHit::Tab(index)) => Some(index),
+        // Only something that selects a tab highlights: a press on the active
+        // tab's `✕` or on the two buttons leaves the strip flat.
+        let hovered = match self.strip_action_at(x, y) {
+            Some(StripAction::Select(index)) => Some(index),
             _ => None,
         };
         self.set_hovered_tab(hovered);
@@ -556,6 +569,14 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        // The strip is chrome: a wheel over it must not scroll the grid or
+        // reach a mouse-reporting application.
+        if self
+            .strip_action_at(self.cursor_pos.0, self.cursor_pos.1)
+            .is_some()
+        {
+            return;
+        }
         if self.app_mouse_mode().intersects(TermMode::MOUSE_MODE) && !self.modifiers.shift_key() {
             let (x, y) = match delta {
                 MouseScrollDelta::LineDelta(x, y) => (x, y),
@@ -616,32 +637,44 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
-            // The strip sits above the grid and owns its clicks: they must not
-            // reach the PTY, start a grid selection, grab the scrollbar, or
-            // paste over a tab, whichever button was pressed.
-            if let Some(hit) = self.tab_hit(self.cursor_pos.0, self.cursor_pos.1) {
-                if button != MouseButton::Left {
-                    return false;
+            // The whole band owns its presses, not just the controls: a miss on
+            // a tab must not paste, select, reach the PTY, or grab the
+            // scrollbar, whichever button was pressed.
+            if let Some(action) = self.strip_action_at(self.cursor_pos.0, self.cursor_pos.1) {
+                // A forwarded button belongs to the tab that owns it; balance
+                // it before the strip takes over the pointer.
+                if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+                    self.send_mouse(input::MouseEventKind::Release, Some(tracked));
                 }
-                match hit {
-                    TabHit::Tab(index) => {
-                        self.tabs.select(index);
-                        self.selection = None;
-                        self.rebuild_layout();
-                    }
-                    TabHit::Close(index) => return self.close_tab(index),
-                    TabHit::Plus => {
-                        let index = crate::profiles::default_profile_index(&self.config);
-                        if let Err(err) = self.new_tab(index) {
-                            tracing::warn!(%err, "could not open a tab");
+                // The band starts a click chain of its own, so the next grid
+                // click cannot pair with this one as a double click.
+                self.mouse_down = false;
+                self.click_count = 0;
+                self.last_click = None;
+                if button == MouseButton::Left {
+                    match action {
+                        StripAction::Select(index) => {
+                            self.tabs.select(index);
+                            self.selection = None;
+                            self.rebuild_layout();
                         }
+                        StripAction::Close(index) => return self.close_tab(index),
+                        StripAction::NewTab => {
+                            let index = crate::profiles::default_profile_index(&self.config);
+                            if let Err(err) = self.new_tab(index) {
+                                tracing::warn!(%err, "could not open a tab");
+                            }
+                        }
+                        // The dropdown is its own task; the click is still the
+                        // strip's, so it must not fall through to the terminal.
+                        StripAction::OpenMenu => {
+                            tracing::debug!("the profile menu is not open yet")
+                        }
+                        StripAction::Ignore => {}
                     }
-                    // The dropdown is its own task; the click is still the
-                    // strip's, so it must not fall through to the terminal.
-                    TabHit::Chevron => tracing::debug!("the profile menu is not open yet"),
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
                 return false;
             }
@@ -1016,6 +1049,40 @@ impl App {
         let bytes = input::paste(&text, bracketed);
         self.write_input(&bytes);
     }
+}
+
+/// What a press inside the tab strip asks the app to do.
+///
+/// The band owns every press in it, so a miss on a control is
+/// [`StripAction::Ignore`] and never becomes a grid event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripAction {
+    Select(usize),
+    Close(usize),
+    NewTab,
+    OpenMenu,
+    Ignore,
+}
+
+/// Maps a strip hit to its action. `hit` is `None` for a press on empty band.
+///
+/// Only the tab on screen paints a `✕`, so the invisible close target on a
+/// background tab is treated as a click on that tab's body instead of closing
+/// a running shell the user never saw.
+fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
+    match hit {
+        Some(TabHit::Tab(index)) => StripAction::Select(index),
+        Some(TabHit::Close(index)) if index == active => StripAction::Close(index),
+        Some(TabHit::Close(index)) => StripAction::Select(index),
+        Some(TabHit::Plus) => StripAction::NewTab,
+        Some(TabHit::Chevron) => StripAction::OpenMenu,
+        None => StripAction::Ignore,
+    }
+}
+
+/// Whether a physical y coordinate lies inside the strip band.
+fn in_strip(y: f64, strip_h: f32) -> bool {
+    y >= 0.0 && y < f64::from(strip_h)
 }
 
 /// Blink phase for a DECSCUSR blinking cursor. `deadline` is `None` while the
@@ -1826,6 +1893,51 @@ mod tests {
     fn a_click_below_the_strip_is_not_a_tab_hit() {
         let layout = crate::ui::tab_bar::TabBarLayout::new(800.0, 32.0, &["one"], |_| 80.0);
         assert!(layout.hit(10.0, 40.0).is_none());
+    }
+
+    #[test]
+    fn a_press_on_empty_strip_band_is_consumed_as_ignore() {
+        // Nothing sits under the pointer in the band, so the press stays the
+        // strip's and never becomes a grid event.
+        assert_eq!(strip_action(None, 0), StripAction::Ignore);
+    }
+
+    #[test]
+    fn the_strip_controls_map_to_their_actions() {
+        use crate::ui::tab_bar::TabHit;
+        assert_eq!(
+            strip_action(Some(TabHit::Tab(2)), 0),
+            StripAction::Select(2)
+        );
+        assert_eq!(strip_action(Some(TabHit::Plus), 0), StripAction::NewTab);
+        assert_eq!(
+            strip_action(Some(TabHit::Chevron), 0),
+            StripAction::OpenMenu
+        );
+    }
+
+    #[test]
+    fn only_the_visible_close_button_closes_its_tab() {
+        use crate::ui::tab_bar::TabHit;
+        assert_eq!(
+            strip_action(Some(TabHit::Close(1)), 1),
+            StripAction::Close(1),
+            "the active tab paints its close button, so the click closes it"
+        );
+        assert_eq!(
+            strip_action(Some(TabHit::Close(1)), 0),
+            StripAction::Select(1),
+            "a background tab's invisible close target is just its body"
+        );
+    }
+
+    #[test]
+    fn the_strip_band_ends_at_the_reserved_height() {
+        assert!(in_strip(0.0, 32.0));
+        assert!(in_strip(31.9, 32.0));
+        assert!(!in_strip(32.0, 32.0));
+        assert!(!in_strip(-0.1, 32.0));
+        assert!(!in_strip(0.0, 0.0));
     }
 
     #[test]

@@ -100,10 +100,20 @@ impl TabBarLayout {
                 w,
                 h: strip_h,
             };
+            // A tab narrower than its padding plus the glyph cannot host a
+            // close box inside itself: giving it one would bleed into the
+            // neighbour, and `hit` tests every close box before any body, so a
+            // click on that tab's edge would close the wrong shell. Drop the
+            // target instead; the whole narrow tab selects.
+            let close_w = if rect.w >= tab_padding + close_size {
+                close_size
+            } else {
+                0.0
+            };
             let close = Rect {
                 x: rect.x + rect.w - tab_padding - close_size,
                 y: (strip_h - close_size) / 2.0,
-                w: close_size,
+                w: close_w,
                 h: close_size,
             };
             tabs.push(TabRect { index, rect, close });
@@ -224,6 +234,24 @@ mod tests {
             layout.hit(layout.chevron.x + 4.0, 10.0),
             Some(TabHit::Chevron),
             "the chevron button must still be clickable"
+        );
+    }
+
+    #[test]
+    fn a_tab_too_narrow_for_a_close_box_has_no_close_target() {
+        // 60 tabs on a 600 px strip leave about 9 px each, well under the
+        // padding plus the glyph, so no tab can own a close box.
+        let titles: Vec<String> = (0..60).map(|index| format!("t{index}")).collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let layout = TabBarLayout::new(600.0, 32.0, &refs, fixed);
+        assert!(layout.tabs.iter().all(|tab| tab.close.w == 0.0));
+
+        // The right edge of the second tab is that tab, not a close on it or
+        // on its neighbour.
+        let second = layout.tabs[1].rect;
+        assert_eq!(
+            layout.hit(second.x + second.w - 1.0, 10.0),
+            Some(TabHit::Tab(1))
         );
     }
 
