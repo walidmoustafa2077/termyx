@@ -228,20 +228,25 @@ impl Renderer {
         for tab in layout.tabs.iter().skip(1) {
             self.fill_rect(tab.rect.x, 0.0, 1.0, layout.strip_h, self.theme.tab_border);
         }
-        // Only the active tab paints a `✕`; a square of its own while the tab
-        // is hovered makes it read as the button the hit test already treats it
-        // as.
-        if hover == Some(active) {
-            if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
-                self.fill_rect(
-                    tab.close.x,
-                    tab.close.y,
-                    tab.close.w,
-                    tab.close.h,
-                    self.theme.tab_hover,
-                );
-            }
+        self.draw_close_backdrop(layout, active, hover);
+    }
+
+    /// Paints the square behind the active tab's `✕` while that tab is
+    /// hovered, so the hit target reads as the button it already is.
+    fn draw_close_backdrop(&mut self, layout: &TabBarLayout, active: usize, hover: Option<usize>) {
+        if hover != Some(active) {
+            return;
         }
+        let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) else {
+            return;
+        };
+        self.fill_rect(
+            tab.close.x,
+            tab.close.y,
+            tab.close.w,
+            tab.close.h,
+            self.theme.tab_close_hover,
+        );
     }
 
     /// The 1 px line that closes the band against the grid.
@@ -844,7 +849,9 @@ mod tests {
     fn an_inactive_tab_title_is_dimmer_than_the_active_one() {
         let mut renderer = default_renderer();
         renderer.resize(600, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(600.0, 32.0, &["one", "two"], |_| 100.0);
+        // The same label on both tabs makes the glyph peaks identical, so only
+        // the title colour can explain a difference between them.
+        let layout = TabBarLayout::new(600.0, 32.0, &["one", "one"], |_| 100.0);
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
@@ -859,10 +866,21 @@ mod tests {
         };
         let active = brightest_red(&renderer, title_rect(0));
         let inactive = brightest_red(&renderer, title_rect(1));
+        // Both tabs paint the same glyph at the same offset, so the inactive
+        // peak reveals the coverage of the peak pixel; the active peak must then
+        // be that coverage of the foreground over the active tab's fill. If the
+        // active title fell back to the muted colour, its peak would land near
+        // the muted channel, not here.
+        let theme = &renderer.theme;
+        let muted = theme.indexed(8).r;
+        let coverage =
+            (inactive as f32 - theme.tab_bar.r as f32) / (muted as f32 - theme.tab_bar.r as f32);
+        assert!(coverage > 0.0, "the inactive title must leave some ink");
+        let expected = blend(theme.tab_active.r, theme.foreground.r, coverage) as f32;
         assert!(
-            active > inactive,
-            "the active title must use the foreground ({active}) and an inactive \
-             one the muted ANSI colour ({inactive})"
+            (active as f32 - expected).abs() <= 2.0,
+            "the active title must paint the foreground over the active tab: \
+             expected about {expected}, got {active} (muted ink would peak near {muted})"
         );
     }
 
@@ -886,18 +904,26 @@ mod tests {
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
         let close = layout.tabs[0].close;
+        // A corner the `✕` glyph itself does not cover.
+        let square = (close.x + 1.0, close.y + 1.0);
 
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
-        assert_eq!(
-            count_color(&renderer, close, renderer.theme.tab_hover),
-            0,
+        assert_ne!(
+            pixel_at(&renderer, square.0, square.1),
+            renderer.theme.tab_close_hover,
             "the close button has no backdrop when the pointer is away"
         );
 
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(0));
-        assert!(
-            count_color(&renderer, close, renderer.theme.tab_hover) > 0,
-            "hovering the active tab must show the close button's backdrop"
+        assert_eq!(
+            pixel_at(&renderer, square.0, square.1),
+            renderer.theme.tab_close_hover,
+            "hovering the active tab must fill the square with its own colour"
+        );
+        assert_eq!(
+            count_color(&renderer, close, renderer.theme.tab_hover),
+            0,
+            "the square must not reuse the tab-body hover colour"
         );
     }
 
@@ -2146,6 +2172,10 @@ mod tests {
     /// behavior; run it in release:
     ///
     /// `cargo test --release full_frame_redraw -- --ignored --nocapture`
+    ///
+    /// The grid-only number is kept under its historical label; the gate that
+    /// decides pass/fail is the full frame, which also pays for the tab strip
+    /// and the dropdown a real frame can carry.
     #[test]
     #[ignore = "performance measurement; run with --release --ignored --nocapture"]
     fn full_frame_redraw_at_200x50_stays_within_budget() {
@@ -2157,10 +2187,13 @@ mod tests {
         let cell_w = renderer.fonts.cell_w;
         let cell_h = renderer.fonts.cell_h;
         let padding = renderer.padding();
-        assert!(renderer.resize(
-            cols as u32 * cell_w + 2 * padding,
-            rows as u32 * cell_h + 2 * padding
-        ));
+        let width = cols as u32 * cell_w + 2 * padding;
+        let height = rows as u32 * cell_h + 2 * padding + TAB_STRIP_HEIGHT as u32;
+        assert!(renderer.resize(width, height));
+        // A real window reserves the strip above the grid; without the inset the
+        // grid would start at the top edge and the measurement would skip the
+        // chrome's actual layout.
+        renderer.set_top_inset(TAB_STRIP_HEIGHT as u32);
 
         let text = "The quick brown fox jumps over the lazy dog. 0123456789 ";
         let line = RowSnapshot {
@@ -2193,21 +2226,66 @@ mod tests {
         };
         let maps = vec![VisualMap::identity(cols); rows];
 
+        let ui_px = crate::fonts::UI_SIZE_PX;
+        let layout = {
+            let fonts = renderer.fonts();
+            TabBarLayout::new(width as f32, TAB_STRIP_HEIGHT, &["one", "two"], |title| {
+                fonts.ui_width(title, ui_px)
+            })
+        };
+        let menu = {
+            use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
+            let items = vec![
+                MenuItem::fixed(MenuAction::Settings, "Settings", ""),
+                MenuItem::fixed(MenuAction::About, "About", ""),
+            ];
+            MenuLayout::new(layout.chevron, items, width as f32, height as f32)
+        };
+
         // Warm the glyph atlas so the measurement covers drawing, not discovery.
         renderer.draw(&snapshot, &maps, None);
+        renderer.draw_chrome(&layout, ui_px, 0, None);
+        renderer.draw_menu(&menu, ui_px);
 
         const FRAMES: usize = 40;
-        let mut samples = Vec::with_capacity(FRAMES);
+        let mut render_samples = Vec::with_capacity(FRAMES);
         for _ in 0..FRAMES {
             let start = Instant::now();
             renderer.draw(&snapshot, &maps, None);
-            samples.push(start.elapsed());
+            render_samples.push(start.elapsed());
         }
-        samples.sort_unstable();
-        let median = samples[FRAMES / 2];
-        let fastest = samples[0];
-        let slowest = samples[FRAMES - 1];
-        println!("full frame 200x50: median {median:?}, fastest {fastest:?}, slowest {slowest:?}");
+        render_samples.sort_unstable();
+        let render_median = render_samples[FRAMES / 2];
+        let fastest = render_samples[0];
+        let slowest = render_samples[FRAMES - 1];
+        println!(
+            "full frame 200x50: median {render_median:?}, fastest {fastest:?}, slowest {slowest:?}"
+        );
+
+        let mut frame_samples = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            let start = Instant::now();
+            renderer.draw(&snapshot, &maps, None);
+            renderer.draw_chrome(&layout, ui_px, 0, None);
+            frame_samples.push(start.elapsed());
+        }
+        frame_samples.sort_unstable();
+        let frame_median = frame_samples[FRAMES / 2];
+        let frame_fastest = frame_samples[0];
+        let frame_slowest = frame_samples[FRAMES - 1];
+        println!(
+            "full frame with chrome 200x50: median {frame_median:?}, fastest {frame_fastest:?}, \
+             slowest {frame_slowest:?}"
+        );
+
+        // One frame with the dropdown open covers the third painter a real
+        // frame can pay for.
+        let start = Instant::now();
+        renderer.draw(&snapshot, &maps, None);
+        renderer.draw_chrome(&layout, ui_px, 0, None);
+        renderer.draw_menu(&menu, ui_px);
+        println!("full frame with chrome and dropdown: {:?}", start.elapsed());
+
         // A shared CI box has scheduling spikes, so the fastest frame is the
         // honest measure of the renderer's own cost; the median has to hold too.
         assert!(
@@ -2215,8 +2293,12 @@ mod tests {
             "a 200x50 redraw took {fastest:?} at best, the budget is 8 ms"
         );
         assert!(
-            median < Duration::from_millis(8),
-            "a 200x50 redraw took {median:?} at the median, the budget is 8 ms"
+            render_median < Duration::from_millis(8),
+            "a 200x50 redraw took {render_median:?} at the median, the budget is 8 ms"
+        );
+        assert!(
+            frame_median < Duration::from_millis(8),
+            "a 200x50 frame with chrome took {frame_median:?} at the median, the budget is 8 ms"
         );
     }
 }

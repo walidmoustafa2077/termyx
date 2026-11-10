@@ -51,8 +51,10 @@ pub fn apply_dark_frame(_window: &winit::window::Window, _background: Rgb) {}
 /// Opens `path` with the platform's default handler.
 ///
 /// The child is not waited for: the opener outlives the call and the window
-/// must keep painting. A spawn failure is returned so the caller can log it,
-/// which is the only way a user with no file association learns about it.
+/// must keep painting. A spawn failure is returned so the caller can log it.
+/// A spawn itself usually succeeds even when no handler is installed: the
+/// shell then reports the missing association, which the user sees in its own
+/// message rather than in the terminal's log.
 #[cfg(target_os = "windows")]
 pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
     // `start` reads its first quoted argument as the window title, so the

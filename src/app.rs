@@ -159,19 +159,10 @@ impl App {
             fonts.ui_width(title, ui_px)
         });
         self.layout = Some(layout);
-        if self.menu.is_some() {
-            // The dropdown hangs off the chevron, which moves with the tabs and
-            // the window width; re-anchor an open menu instead of leaving it
-            // pointing at where the button used to be.
-            self.open_menu();
-        }
         // A keyboard switch or a new tab must rename the OS window, which an
         // OSC title alone cannot do once the opt-in is off. The layout rebuild
-        // is the one place every tab change passes through.
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        let titles = self.tabs.titles();
+        // is the one place every tab change passes through. winit has no title
+        // getter, so every resize re-applies it rather than comparing first.
         let active_title = self
             .tabs
             .active_index()
@@ -180,6 +171,12 @@ impl App {
             self.config.window.dynamic_title,
             active_title,
         ));
+        if self.menu.is_some() {
+            // The dropdown hangs off the chevron, which moves with the tabs and
+            // the window width; re-anchor an open menu instead of leaving it
+            // pointing at where the button used to be.
+            self.open_menu();
+        }
     }
 
     /// Opens the dropdown under the `⌄`, or closes it when it is already open.
@@ -732,12 +729,9 @@ impl App {
             }
             return;
         }
-        // Only something that selects a tab highlights: a press on the active
-        // tab's `✕` or on the two buttons leaves the strip flat.
-        let hovered = match self.strip_action_at(x, y) {
-            Some(StripAction::Select(index)) => Some(index),
-            _ => None,
-        };
+        // Only a tab body or the active tab's `✕` highlights; the two buttons
+        // leave the strip flat.
+        let hovered = hovered_tab(self.strip_action_at(x, y));
         self.set_hovered_tab(hovered);
         // Keep the scrollbar expanded for the whole drag, even when the pointer
         // slips off the thumb.
@@ -1327,11 +1321,13 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
             MenuItem::profile(index, &profile.name, &shortcut)
         })
         .collect();
-    items.push(MenuItem::fixed(MenuAction::Settings, "Settings", "Ctrl+,"));
+    // Neither row has a key binding, so neither may name one: an empty hint is
+    // truthful, a dead shortcut is not.
+    items.push(MenuItem::fixed(MenuAction::Settings, "Settings", ""));
     items.push(MenuItem::fixed(
         MenuAction::CommandPalette,
         "Command palette",
-        "Ctrl+Shift+P",
+        "",
     ));
     items.push(MenuItem::fixed(MenuAction::About, "About", ""));
     items
@@ -1363,6 +1359,18 @@ fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
         Some(TabHit::Plus) => StripAction::NewTab,
         Some(TabHit::Chevron) => StripAction::OpenMenu,
         None => StripAction::Ignore,
+    }
+}
+
+/// The tab the pointer must highlight for a strip action.
+///
+/// A hit on the active tab's `✕` is a close rather than a select, but the
+/// button sits inside its tab, so that tab is still the one under the pointer
+/// and must keep its hover. The `+`/`⌄` buttons belong to no tab.
+fn hovered_tab(action: Option<StripAction>) -> Option<usize> {
+    match action {
+        Some(StripAction::Select(index) | StripAction::Close(index)) => Some(index),
+        _ => None,
     }
 }
 
@@ -1567,8 +1575,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Title { session, title } => {
-                let (label_changed, window_title) = route_title(&mut self.tabs, session, &title);
-                if window_title {
+                let (label_changed, retitle) = route_title(&mut self.tabs, session, &title);
+                if retitle {
                     self.apply_title(&title);
                 }
                 // The strip paints every tab's label, so a background retitle
@@ -1582,8 +1590,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ResetTitle { session } => {
-                let (label_changed, window_title) = route_title(&mut self.tabs, session, "");
-                if window_title {
+                let (label_changed, retitle) = route_title(&mut self.tabs, session, "");
+                if retitle {
                     self.apply_title("");
                 }
                 if label_changed {
@@ -1749,14 +1757,14 @@ fn feed_session(tabs: &mut TabSet, session: SessionId, bytes: &[u8]) -> FeedOutc
 /// Routes one title event to the tab it names.
 ///
 /// The label always belongs to that tab, on screen or not; an id no session
-/// carries changes nothing. Returns `(label_changed, window_title)`: whether
+/// carries changes nothing. Returns `(label_changed, retitle)`: whether
 /// the stored label actually changed (the caller rebuilds and repaints only
 /// then), and whether the caller must also apply the title to the window,
 /// which is true only for the tab on screen.
 fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> (bool, bool) {
     let label_changed = tabs.set_title(session, title);
-    let window_title = tabs.active().is_some_and(|active| active.id == session);
-    (label_changed, window_title)
+    let retitle = tabs.active().is_some_and(|active| active.id == session);
+    (label_changed, retitle)
 }
 
 /// The OS window title for the tab on screen.
@@ -2404,7 +2412,7 @@ mod tests {
                 items[6].label.as_str(),
                 items[6].shortcut.as_str()
             ),
-            (MenuAction::Settings, "Settings", "Ctrl+,")
+            (MenuAction::Settings, "Settings", "")
         );
         assert_eq!(
             (
@@ -2412,11 +2420,7 @@ mod tests {
                 items[7].label.as_str(),
                 items[7].shortcut.as_str()
             ),
-            (
-                MenuAction::CommandPalette,
-                "Command palette",
-                "Ctrl+Shift+P"
-            )
+            (MenuAction::CommandPalette, "Command palette", "")
         );
         assert_eq!(
             (
@@ -2452,6 +2456,20 @@ mod tests {
             StripAction::Select(1),
             "a background tab's invisible close target is just its body"
         );
+    }
+
+    #[test]
+    fn the_active_tab_stays_hovered_over_its_close_button() {
+        assert_eq!(
+            hovered_tab(Some(StripAction::Close(1))),
+            Some(1),
+            "the close button sits inside its tab, so the backdrop must stay"
+        );
+        assert_eq!(hovered_tab(Some(StripAction::Select(0))), Some(0));
+        assert_eq!(hovered_tab(Some(StripAction::NewTab)), None);
+        assert_eq!(hovered_tab(Some(StripAction::OpenMenu)), None);
+        assert_eq!(hovered_tab(Some(StripAction::Ignore)), None);
+        assert_eq!(hovered_tab(None), None);
     }
 
     #[test]

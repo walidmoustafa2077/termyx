@@ -44,6 +44,10 @@ pub struct Theme {
     pub tab_bar: Rgb,
     pub tab_active: Rgb,
     pub tab_hover: Rgb,
+    /// The square behind the active tab's close button while the pointer is
+    /// over it. Lighter than the active tab so the button reads as pressed in,
+    /// not dug out.
+    pub tab_close_hover: Rgb,
     pub tab_border: Rgb,
     /// Dropdown panel. Fixed for now, in the strip's dark family; a light
     /// theme is out of scope until the whole theme can switch at once.
@@ -90,6 +94,7 @@ impl Theme {
             tab_bar: Rgb::new(12, 12, 12),
             tab_active: Rgb::new(31, 31, 31),
             tab_hover: Rgb::new(26, 26, 26),
+            tab_close_hover: Rgb::new(58, 58, 58),
             tab_border: Rgb::new(43, 43, 43),
             menu_background: Rgb::new(31, 31, 31),
             menu_hover: Rgb::new(43, 43, 43),
@@ -137,15 +142,20 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_palette_never_lets_hover_outshine_the_active_tab() {
+    fn the_tab_palette_orders_the_band_the_hover_and_the_close_button() {
         let theme = Theme::from_config(&crate::config::ThemeConfig::default());
         assert_eq!(theme.tab_bar, Rgb::new(12, 12, 12));
         assert_eq!(theme.tab_hover, Rgb::new(26, 26, 26));
         assert_eq!(theme.tab_active, Rgb::new(31, 31, 31));
+        assert_eq!(theme.tab_close_hover, Rgb::new(58, 58, 58));
         assert!(theme.tab_bar.r < theme.tab_hover.r);
         assert!(
             theme.tab_hover.r < theme.tab_active.r,
             "a hovered inactive tab must stay darker than the active tab"
+        );
+        assert!(
+            theme.tab_active.r < theme.tab_close_hover.r,
+            "the close button's square must lift off the tab it sits on"
         );
     }
 

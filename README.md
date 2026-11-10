@@ -96,8 +96,9 @@ session.
 - `Ctrl+Shift+T` opens a tab and `Ctrl+Shift+W` closes the active one.
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle forward and back.
 - `Ctrl+Shift+1` … `Ctrl+Shift+5` open the first five profiles directly.
-- The `⌄` menu lists every profile, then `Settings` (opens the config file),
-  `Command palette` (reserved for a later task), and `About`.
+- The `⌄` menu lists every profile, then `Settings` (opens the config file, or
+  its folder on a first run), `Command palette` (not available yet; the row
+  only logs), and `About`. No key opens `Settings` or the palette.
 
 `Ctrl+Shift+W` closes the shell in the active tab immediately; there is no
 confirmation and no undo.
