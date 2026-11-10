@@ -1,67 +1,5 @@
 //! Native window integration that winit does not expose.
 
-use crate::theme::Rgb;
-
-/// Rounds the native window's corners and paints its frame in the chrome's
-/// border colour.
-///
-/// Windows 11 draws a light 1-pixel border around every window and square
-/// corners on an undecorated one; against a dark terminal the border reads as a
-/// line above and below the content. Matching it to the strip's separator hides
-/// it without touching the client area, and the rounded preference matches the
-/// shape a decorated window has by default.
-#[cfg(target_os = "windows")]
-pub fn apply_dark_frame(window: &winit::window::Window, border: Rgb) {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    /// Corner shape of the window frame (`DwmSetWindowAttribute`).
-    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-    /// `DWMWCP_ROUND`: the system's small-corner preference.
-    const DWMWCP_ROUND: u32 = 2;
-    /// Border colour of the window frame (`DwmSetWindowAttribute`).
-    const DWMWA_BORDER_COLOR: u32 = 34;
-
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return;
-    };
-    // COLORREF layout is 0x00BBGGRR.
-    let color = u32::from(border.r) | u32::from(border.g) << 8 | u32::from(border.b) << 16;
-
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: *mut core::ffi::c_void,
-            attribute: u32,
-            value: *const core::ffi::c_void,
-            size: u32,
-        ) -> i32;
-    }
-
-    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
-    let size = std::mem::size_of::<u32>() as u32;
-    // SAFETY: `hwnd` comes from winit's live window handle and both values are
-    // plain `u32`s matching the attributes' documented size.
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &DWMWCP_ROUND as *const u32 as *const core::ffi::c_void,
-            size,
-        );
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &color as *const u32 as *const core::ffi::c_void,
-            size,
-        );
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn apply_dark_frame(_window: &winit::window::Window, _border: Rgb) {}
-
 /// One side or corner of the resize frame.
 ///
 /// The geometry helper below compiles on every platform so its tests can run
@@ -270,10 +208,14 @@ unsafe fn hit_test_edge(hwnd: Hwnd, lparam: Lparam) -> Option<Edge> {
 ///
 /// winit removes the non-client area of an undecorated window, so the style
 /// bits alone cannot make `DefWindowProc` report frame edges. This clears
-/// `WS_CAPTION` and `WS_POPUP`, restores `WS_THICKFRAME` with the system-menu
-/// and minimise/maximise bits (what the frame, snap and taskbar behaviour
-/// need), recomputes the frame without a title bar, and installs the subclass
-/// that answers the missing edge hit-test.
+/// `WS_POPUP` and restores `WS_CAPTION` with `WS_THICKFRAME` and the
+/// system-menu and minimise/maximise bits, recomputes the frame, and installs
+/// the subclass that answers the missing edge hit-test.
+///
+/// `WS_CAPTION` stays set on purpose even though the client area covers the
+/// whole window: it is what makes the Desktop Window Manager treat the window
+/// as a normal framed one, so it gets Windows Terminal's rounded corners,
+/// drop shadow and frame line without any `DwmSetWindowAttribute` call.
 #[cfg(target_os = "windows")]
 pub fn apply_custom_chrome(window: &winit::window::Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -325,7 +267,8 @@ pub fn apply_custom_chrome(window: &winit::window::Window) {
             "could not read the window style"
         );
     }
-    let style = (style & !(WS_POPUP | WS_CAPTION))
+    let style = (style & !WS_POPUP)
+        | WS_CAPTION
         | WS_THICKFRAME
         | WS_MINIMIZEBOX
         | WS_MAXIMIZEBOX

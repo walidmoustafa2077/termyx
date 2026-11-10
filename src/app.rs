@@ -320,7 +320,6 @@ impl App {
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
-        platform::apply_dark_frame(&window, theme.tab_border);
         let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
         renderer.set_top_inset(self.tab_strip_px());
 
@@ -1727,14 +1726,13 @@ fn strip_action(hit: Option<TabHit>) -> StripAction {
 
 /// The strip target the pointer must highlight for a strip action.
 ///
-/// A hit on any tab's `✕` is a close rather than a select, but the button sits
-/// inside its tab, so that tab is still the one under the pointer and must keep
-/// its hover. The `+`/`⌄` buttons highlight as themselves.
+/// A hit on any tab's `✕` is a close rather than a select, and WT paints that
+/// button's own hover pill instead of touching the tab body, so the two must
+/// stay distinct here. The `+`/`⌄` buttons highlight as themselves.
 fn strip_hover(action: Option<StripAction>) -> Option<StripHover> {
     match action {
-        Some(StripAction::Select(index) | StripAction::Close(index)) => {
-            Some(StripHover::Tab(index))
-        }
+        Some(StripAction::Select(index)) => Some(StripHover::Tab(index)),
+        Some(StripAction::Close(index)) => Some(StripHover::Close(index)),
         Some(StripAction::NewTab) => Some(StripHover::Plus),
         Some(StripAction::OpenMenu) => Some(StripHover::Chevron),
         Some(StripAction::MinimizeWindow) => Some(StripHover::Minimize),
@@ -3155,17 +3153,17 @@ mod tests {
         assert_eq!(after.hit(x, y), Some(TabHit::Close(1)));
         assert_eq!(
             hover_after_layout_change(&after, x as f64, y as f64),
-            Some(StripHover::Tab(1)),
-            "the pointer must re-hover the close target so its ✕ paints before a second click"
+            Some(StripHover::Close(1)),
+            "the pointer must re-hover the close target so its pill and ✕ paint before a second click"
         );
     }
 
     #[test]
-    fn the_active_tab_stays_hovered_over_its_close_button() {
+    fn the_close_button_is_its_own_hover_target() {
         assert_eq!(
             strip_hover(Some(StripAction::Close(1))),
-            Some(StripHover::Tab(1)),
-            "the close button sits inside its tab, so the backdrop must stay"
+            Some(StripHover::Close(1)),
+            "WT highlights the ✕ pill, not the tab body, so the two must differ"
         );
         assert_eq!(
             strip_hover(Some(StripAction::Select(0))),

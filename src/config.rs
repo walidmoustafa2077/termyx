@@ -220,7 +220,7 @@ impl Default for ThemeConfig {
             background: "#0c0c0c".into(),
             foreground: "#cccccc".into(),
             cursor: "#ffffff".into(),
-            selection: "#264f78".into(),
+            selection: "#ffffff".into(),
             black: "#0c0c0c".into(),
             red: "#c50f1f".into(),
             green: "#13a10e".into(),
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(c.theme.background, "#0c0c0c");
         assert_eq!(c.theme.foreground, "#cccccc");
         assert_eq!(c.theme.cursor, "#ffffff");
-        assert_eq!(c.theme.selection, "#264f78");
+        assert_eq!(c.theme.selection, "#ffffff");
         assert_eq!(c.theme.black, "#0c0c0c");
         assert_eq!(c.theme.red, "#c50f1f");
         assert_eq!(c.theme.green, "#13a10e");

@@ -143,8 +143,8 @@ mod windows {
 
     /// `SHGFI_ICON`: fill `SHFILEINFOW::h_icon`.
     const SHGFI_ICON: u32 = 0x0000_0100;
-    /// `SHGFI_LARGEICON`: ask for the 32 px shell icon rather than 16 px.
-    const SHGFI_LARGEICON: u32 = 0x0000_0000;
+    /// `SHGFI_SMALLICON`: ask for the 16 px shell icon, the size a tab shows.
+    const SHGFI_SMALLICON: u32 = 0x0000_0001;
     /// `BI_RGB`: no compression, so a 32 bpp buffer is straight BGRA.
     const BI_RGB: u32 = 0;
     /// `DIB_RGB_COLORS`: the palette is literal RGB values.
@@ -238,7 +238,11 @@ mod windows {
         fn DeleteObject(object: Handle) -> i32;
     }
 
-    /// Extracts `path`'s large shell icon as RGBA rows.
+    /// Extracts `path`'s 16 px shell icon as RGBA rows.
+    ///
+    /// The strip draws tab icons at 16 px, so asking the shell for the same
+    /// size Windows Terminal asks for keeps every pixel of the artist's work:
+    /// a 32 px icon scaled down to 16 would be resampled twice.
     pub(super) fn icon(path: &Path) -> Option<TabIcon> {
         let wide: Vec<u16> = path
             .as_os_str()
@@ -260,7 +264,7 @@ mod windows {
                 0,
                 &mut info,
                 std::mem::size_of::<ShFileInfoW>() as u32,
-                SHGFI_ICON | SHGFI_LARGEICON,
+                SHGFI_ICON | SHGFI_SMALLICON,
             )
         };
         if found == 0 || info.h_icon.is_null() {
@@ -494,6 +498,13 @@ mod tests {
             icon.size * icon.size * 4,
             "the icon must be one RGBA row per pixel"
         );
-        assert!(icon.size >= 16, "a shell icon must be at least 16 px");
+        assert_eq!(icon.size, 16, "the strip draws tab icons at 16 px");
+        // The mask-only icons carry no alpha channel; a fully transparent buffer
+        // would let the strip paint nothing at all.
+        let opaque = icon.rgba.chunks_exact(4).filter(|px| px[3] > 200).count();
+        assert!(
+            opaque > 0,
+            "a shell icon must have opaque pixels or the strip paints nothing"
+        );
     }
 }

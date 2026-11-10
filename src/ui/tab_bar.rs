@@ -111,12 +111,14 @@ pub enum TabHit {
 
 /// What the pointer is over in the strip band, for painting hover.
 ///
-/// A tab body (or its close button) is one target; the two buttons and the
-/// three window controls are their own, so a press on any can highlight
-/// without claiming a tab.
+/// The tab body and its close button are separate targets: WT leaves the tab
+/// body untouched under the pointer and highlights only the control being hit,
+/// so a press on `✕` must not read as a press on the tab. The two strip buttons
+/// and the three window controls are their own targets too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripHover {
     Tab(usize),
+    Close(usize),
     Plus,
     Chevron,
     Minimize,

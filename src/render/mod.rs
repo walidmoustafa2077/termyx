@@ -65,7 +65,7 @@ fn maximize_glyph(maximized: bool) -> &'static str {
 ///
 /// Split out of the painter so the hover/resting colour table is testable
 /// without reading pixels. Only the control under the pointer is filled: the
-/// close uses the accent red, the other two the strip's hover tone, and every
+/// close uses the accent red, the other two the control hover tone, and every
 /// resting glyph uses the inactive title colour.
 fn caption_colors(
     theme: &Theme,
@@ -77,7 +77,7 @@ fn caption_colors(
         if target == StripHover::CloseWindow {
             theme.caption_close_hover
         } else {
-            theme.tab_hover
+            theme.control_hover
         }
     });
     let glyph = if hovered {
@@ -86,6 +86,41 @@ fn caption_colors(
         theme.tab_title_inactive
     };
     (fill, glyph)
+}
+
+/// The hover pill WT draws under a strip control: 32x24 px, centred
+/// horizontally on the control and vertically on the 32 px tab body rather
+/// than the 40 px band, so it sits 4 px below the band's centre.
+fn hover_pill(layout: &TabBarLayout, rect: Rect) -> Rect {
+    let k = layout.strip_h / TAB_STRIP_HEIGHT;
+    Rect {
+        x: rect.x + (rect.w - 32.0 * k) / 2.0,
+        y: layout.strip_h / 2.0 - 8.0 * k,
+        w: 32.0 * k,
+        h: 24.0 * k,
+    }
+}
+
+/// What one grid row's runs need to pick their ink: the row's visual map, the
+/// logical selection, and the row index both are keyed on. Bundled because a
+/// run painter that took them separately would need eight arguments.
+struct RunRow<'a> {
+    maps: &'a [VisualMap],
+    selection: Option<&'a Selection>,
+    index: usize,
+}
+
+impl RunRow<'_> {
+    /// Whether the logical `cell` on this row falls inside the selection.
+    fn is_selected(&self, cell: usize) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        let Some(map) = self.maps.get(self.index) else {
+            return false;
+        };
+        selection.is_selected(self.index, cell, map.visual_of(cell), self.maps)
+    }
 }
 
 impl Renderer {
@@ -204,7 +239,17 @@ impl Renderer {
             };
             let rtl_base = maps.get(row).is_some_and(|map| map.rtl_base());
             for run in runs {
-                self.draw_shaped_run(run, line, row, cursor, rtl_base);
+                self.draw_shaped_run(
+                    run,
+                    line,
+                    RunRow {
+                        maps,
+                        selection,
+                        index: row,
+                    },
+                    cursor,
+                    rtl_base,
+                );
             }
         }
 
@@ -273,34 +318,23 @@ impl Renderer {
         self.fill_rect(0.0, 0.0, layout.width, layout.strip_h, self.theme.tab_bar);
     }
 
-    /// One fill per tab, then the active tab's outline, then the backdrop
-    /// behind a hovered close button.
+    /// One fill for the active tab, its outline, then the pill behind a
+    /// hovered close button.
     ///
     /// The tab body floats on the strip: WT insets it by 8 px at the top and
     /// rounds its top corners, so the band shows above it. Only the active tab
     /// gets a fill and an outline — its fill is the terminal background, which
     /// makes it read as a cut-out — while an inactive tab paints nothing at
-    /// all and lets the strip show through, exactly as WT does.
+    /// all, even under the pointer: WT highlights the control being hit, not
+    /// the tab card (measured: hovering a tab body changes no pixel).
     fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
-        let hovered = match hover {
-            Some(StripHover::Tab(index)) => Some(index),
-            _ => None,
-        };
         let radius = 6.0 * layout.strip_h / TAB_STRIP_HEIGHT;
-        for tab in &layout.tabs {
-            let color = if tab.index == active {
-                self.theme.tab_active
-            } else if hovered == Some(tab.index) {
-                self.theme.tab_hover
-            } else {
-                continue;
-            };
-            self.fill_round_top(tab.body, radius.min(tab.body.w / 2.0), color);
-        }
         if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
-            self.stroke_tab(tab.body, radius.min(tab.body.w / 2.0));
+            let radius = radius.min(tab.body.w / 2.0);
+            self.fill_round_top(tab.body, radius, self.theme.tab_active);
+            self.stroke_tab(tab.body, radius);
         }
-        self.draw_close_backdrop(layout, hovered);
+        self.draw_close_backdrop(layout, hover);
     }
 
     /// The 1 px `#292929` outline of the active tab: its top edge and both
@@ -320,11 +354,16 @@ impl Renderer {
         self.fill_rect(rect.x + rect.w - 1.0, rect.y + radius, 1.0, side, color);
     }
 
-    /// Paints the rounded square behind a `✕` while its tab is hovered, so the
-    /// hit target reads as the button it already is. The active tab shows the
-    /// glyph at rest; every tab shows the backdrop while under the pointer.
-    fn draw_close_backdrop(&mut self, layout: &TabBarLayout, hover: Option<usize>) {
-        let Some(index) = hover else {
+    /// The 32x24 pill behind a `✕` while the pointer is over the glyph.
+    ///
+    /// WT highlights the hit target, not the 16 px glyph box: measured as a
+    /// 32 px wide, 24 px tall rounded rect centred on the close glyph and
+    /// filled `#1A1A1A`, a faint scrim that reads as a recess on both the band
+    /// and the active tab. Only the pointer over the glyph shows it — hovering
+    /// elsewhere on the same tab changes no pixel — so the hover is matched
+    /// against [`StripHover::Close`], not against the tab.
+    fn draw_close_backdrop(&mut self, layout: &TabBarLayout, hover: Option<StripHover>) {
+        let Some(StripHover::Close(index)) = hover else {
             return;
         };
         let Some(tab) = layout.tabs.iter().find(|tab| tab.index == index) else {
@@ -333,10 +372,10 @@ impl Renderer {
         if tab.close.w <= 0.0 {
             return;
         }
-        let radius = 4.0 * layout.strip_h / TAB_STRIP_HEIGHT;
-        self.fill_round_top(
-            tab.close,
-            radius.min(tab.close.w / 2.0),
+        let pill = hover_pill(layout, tab.close);
+        self.fill_round_rect(
+            pill,
+            4.0 * layout.strip_h / TAB_STRIP_HEIGHT,
             self.theme.tab_close_hover,
         );
     }
@@ -379,10 +418,17 @@ impl Renderer {
             ("⌄", layout.chevron, StripHover::Chevron),
         ];
         for (glyph, rect, target) in buttons {
-            if hover == Some(target) {
-                self.fill_round_top(rect, 4.0 * k, self.theme.tab_hover);
+            let hovered = hover == Some(target);
+            let color = if hovered {
+                self.theme.control_hover_ink
+            } else {
+                foreground
+            };
+            if hovered {
+                let pill = hover_pill(layout, rect);
+                self.fill_round_rect(pill, 4.0 * k, self.theme.control_hover);
             }
-            ui_text::draw_text_centred(self, glyph, rect, ui_px, foreground);
+            ui_text::draw_text_centred(self, glyph, rect, ui_px, color);
         }
         // One separator only, at the `+`/`⌄` boundary. Measured `#3D3D3D`
         // there, so use `tab_separator`, not the tab's darker outline.
@@ -489,15 +535,19 @@ impl Renderer {
                 color,
                 title_width,
             );
-            let shows_close = tab.index == active || hover == Some(StripHover::Tab(tab.index));
+            let closes = hover == Some(StripHover::Close(tab.index));
+            let shows_close =
+                tab.index == active || closes || hover == Some(StripHover::Tab(tab.index));
             if shows_close && tab.close.w > 0.0 {
-                ui_text::draw_text_centred(
-                    self,
-                    "✕",
-                    tab.close,
-                    CLOSE_GLYPH_SIZE * k,
-                    self.theme.tab_close,
-                );
+                // The glyph brightens only while its own pill is shown: WT
+                // leaves the resting `✕` grey even when the tab body under the
+                // pointer is hovered.
+                let ink = if closes {
+                    self.theme.tab_close_hover_ink
+                } else {
+                    self.theme.tab_close
+                };
+                ui_text::draw_text_centred(self, "✕", tab.close, CLOSE_GLYPH_SIZE * k, ink);
             }
         }
     }
@@ -534,7 +584,7 @@ impl Renderer {
         &mut self,
         run: &shape::ShapedRun,
         line: &RowSnapshot,
-        row: usize,
+        row: RunRow<'_>,
         cursor: Option<(usize, usize, CursorShape)>,
         rtl_base: bool,
     ) {
@@ -544,7 +594,7 @@ impl Renderer {
         let top = self.grid_top();
         // Share one baseline across the primary and Arabic faces so Arabic
         // sits on the same line as Latin instead of floating above it.
-        let baseline = top + row as f32 * cell_h + self.fonts.line_ascent();
+        let baseline = top + row.index as f32 * cell_h + self.fonts.line_ascent();
         let units = run.units_per_em.max(1) as f32;
         let face_scale = if run.arabic {
             self.fonts.arabic.as_ref().map_or(1.0, |face| face.scale)
@@ -590,10 +640,19 @@ impl Renderer {
             }
             let (color, _) = self.cell_colors(first.style);
             let under_cursor = cursor.is_some_and(|(cursor_row, visual, shape)| {
-                shape == CursorShape::Block && cursor_row == row && cluster.slots.contains(&visual)
+                shape == CursorShape::Block
+                    && cursor_row == row.index
+                    && cluster.slots.contains(&visual)
             });
+            // WT inverts the glyphs against the selection band instead of
+            // tinting them, so a selected cluster switches to the band's
+            // contrast ink. Decided from the cluster's first cell: a cluster is
+            // one grapheme, and WT never splits one across the selection edge.
+            let selected = row.is_selected(cluster.cells.start);
             let color = if under_cursor {
                 self.theme.background
+            } else if selected {
+                self.theme.selection_text()
             } else {
                 color
             };
@@ -626,7 +685,7 @@ impl Renderer {
             if !run.arabic && cluster.text == "\u{2580}" {
                 self.fill_rect(
                     padding + slot_start as f32 * cell_w,
-                    top + row as f32 * cell_h,
+                    top + row.index as f32 * cell_h,
                     slot_w,
                     cell_h / 2.0,
                     color,
@@ -782,6 +841,29 @@ impl Renderer {
             rect.y + radius,
             rect.w,
             (rect.h - radius).max(0.0),
+            color,
+        );
+    }
+
+    /// Fills `rect` with all four corners rounded by `radius`, for the hover
+    /// pills that float inside the strip rather than sitting on its rule.
+    fn fill_round_rect(&mut self, rect: Rect, radius: f32, color: Rgb) {
+        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0).max(0.0);
+        let rows = radius.round() as i32;
+        for dy in 0..rows {
+            // Distance from the corner circle's centre to this row's middle.
+            let y = radius - dy as f32 - 0.5;
+            let inset = radius - (radius * radius - y * y).max(0.0).sqrt();
+            let width = (rect.w - 2.0 * inset).max(1.0);
+            self.fill_rect(rect.x + inset, rect.y + dy as f32, width, 1.0, color);
+            let bottom = rect.y + rect.h - 1.0 - dy as f32;
+            self.fill_rect(rect.x + inset, bottom, width, 1.0, color);
+        }
+        self.fill_rect(
+            rect.x,
+            rect.y + radius,
+            rect.w,
+            (rect.h - 2.0 * radius).max(0.0),
             color,
         );
     }
@@ -1216,19 +1298,47 @@ mod tests {
     }
 
     #[test]
-    fn hovering_the_active_tab_paints_a_backdrop_behind_the_close_button() {
+    fn hovering_a_tab_body_repaints_nothing() {
+        let mut renderer = default_renderer();
+        renderer.resize(600, 120);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(600.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        // Below the title ink and away from the icon and the close box.
+        let body = (layout.tabs[1].rect.x + 60.0, 34.0);
+
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        assert_eq!(pixel_at(&renderer, body.0, body.1), renderer.theme.tab_bar);
+
+        draw_chrome(
+            &mut renderer,
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Tab(1)),
+        );
+        assert_eq!(
+            pixel_at(&renderer, body.0, body.1),
+            renderer.theme.tab_bar,
+            "WT highlights the control under the pointer, not the tab body"
+        );
+    }
+
+    #[test]
+    fn hovering_the_close_glyph_paints_a_pill_wider_than_the_glyph_box() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         let close = layout.tabs[0].close;
-        // A corner the `✕` glyph itself does not cover.
-        let square = (close.x + 1.0, close.y + 1.0);
+        // Eight pixels left of the glyph box: inside WT's 32 px pill and
+        // outside the 16 px close box.
+        let left_of_glyph = (close.x - 4.0, close.y + 8.0);
+        // The pill's rounded corner, which must stay unpainted.
+        let pill_corner = (close.x - 8.0, 12.0);
 
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        assert_ne!(
-            pixel_at(&renderer, square.0, square.1),
-            renderer.theme.tab_close_hover,
-            "the close button has no backdrop when the pointer is away"
+        assert_eq!(
+            pixel_at(&renderer, left_of_glyph.0, left_of_glyph.1),
+            renderer.theme.tab_active
         );
 
         draw_chrome(
@@ -1236,17 +1346,22 @@ mod tests {
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
-            Some(StripHover::Tab(0)),
+            Some(StripHover::Close(0)),
         );
         assert_eq!(
-            pixel_at(&renderer, square.0, square.1),
+            pixel_at(&renderer, left_of_glyph.0, left_of_glyph.1),
             renderer.theme.tab_close_hover,
-            "hovering the active tab must fill the square with its own colour"
+            "the pill is centred on the glyph and eight pixels wider on each side"
         );
         assert_eq!(
-            count_color(&renderer, close, renderer.theme.tab_hover),
+            pixel_at(&renderer, pill_corner.0, pill_corner.1),
+            renderer.theme.tab_active,
+            "the pill's corners are rounded"
+        );
+        assert_eq!(
+            count_color(&renderer, close, renderer.theme.control_hover),
             0,
-            "the square must not reuse the tab-body hover colour"
+            "the close pill must not reuse the control hover tone"
         );
     }
 
@@ -1295,12 +1410,13 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
-        // The strip's hover fill is `#1f1f1f`; pin the literal, not the theme
+        // The control hover pill is `#3b3b3b`; pin the literal, not the theme
         // field, so a palette rename cannot silently drop it.
-        let hover = Rgb::new(0x1f, 0x1f, 0x1f);
-        // A corner inside the button, clear of the glyph inset and the rule.
-        let plus = (layout.plus.x + 2.0, 2.0);
-        let chevron = (layout.chevron.x + 2.0, 2.0);
+        let hover = Rgb::new(0x3b, 0x3b, 0x3b);
+        // Three pixels inside the pill's left edge, clear of the centred glyph
+        // and of the separator painted at the chevron's left border.
+        let plus = (layout.plus.x + 3.0, 24.0);
+        let chevron = (layout.chevron.x + 3.0, 24.0);
 
         draw_chrome(
             &mut renderer,
@@ -1559,7 +1675,7 @@ mod tests {
             "the hover fill must stop above the band rule"
         );
 
-        // The other two use the strip's own hover tone, and leaving the
+        // The other two use the control hover tone, and leaving the
         // controls clears their fill.
         draw_chrome(
             &mut renderer,
@@ -1570,8 +1686,8 @@ mod tests {
         );
         assert_eq!(
             pixel_at(&renderer, layout.minimize.x + 2.0, 2.0),
-            renderer.theme.tab_hover,
-            "a hovered minimise control uses the strip hover tone"
+            renderer.theme.control_hover,
+            "a hovered minimise control uses the control hover tone"
         );
         assert_eq!(
             pixel_at(&renderer, close.x + 2.0, 2.0),
@@ -1586,11 +1702,11 @@ mod tests {
         // and a hovered glyph must use. The close is the only red fill.
         let theme = Theme::from_config(&ThemeConfig::default());
         let table = [
-            (StripHover::Minimize, theme.tab_hover),
-            (StripHover::Maximize, theme.tab_hover),
+            (StripHover::Minimize, theme.control_hover),
+            (StripHover::Maximize, theme.control_hover),
             (StripHover::CloseWindow, theme.caption_close_hover),
         ];
-        assert_ne!(theme.caption_close_hover, theme.tab_hover);
+        assert_ne!(theme.caption_close_hover, theme.control_hover);
         for (target, hover_fill) in table {
             let (fill, glyph) = caption_colors(&theme, target, None);
             assert_eq!(fill, None, "a resting control paints no fill");
@@ -1612,7 +1728,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(100, 120);
         // 18 px per tab: narrower than the padding plus the close box, so the
-        // layout drops the target and the painter must drop the square and glyph
+        // layout drops the target and the painter must drop the pill and glyph
         // with it instead of bleeding into the neighbour.
         let layout = TabBarLayout::new(100.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         assert_eq!(layout.tabs[0].close.w, 0.0, "the layout must drop the box");
@@ -1621,7 +1737,7 @@ mod tests {
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
-            Some(StripHover::Tab(0)),
+            Some(StripHover::Close(0)),
         );
         let tab = layout.tabs[0].rect;
         assert_eq!(
@@ -1637,11 +1753,29 @@ mod tests {
     }
 
     #[test]
-    fn a_hovered_inactive_tab_uses_the_hover_colour() {
+    fn hovering_an_inactive_tab_shows_its_close_glyph() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        let close = layout.tabs[1].close;
+        // The inactive tab body is the bare band, so any ink in the close box is
+        // the glyph. Compared against the band rather than the ink colour
+        // because a 10 px glyph never fills a whole pixel.
+        let painted = |renderer: &Renderer| {
+            (0..close.h as u32).any(|dy| {
+                (0..close.w as u32).any(|dx| {
+                    pixel_at(renderer, close.x + dx as f32, close.y + dy as f32)
+                        != renderer.theme.tab_bar
+                })
+            })
+        };
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        assert!(
+            !painted(&renderer),
+            "an inactive tab hides its close glyph until the pointer arrives"
+        );
+
         draw_chrome(
             &mut renderer,
             &layout,
@@ -1649,12 +1783,14 @@ mod tests {
             0,
             Some(StripHover::Tab(1)),
         );
-        let tab = layout.tabs[1].rect;
-        // The right padding is clear of the title and, since tab 1 is not
-        // active, of any close glyph.
+        assert!(
+            painted(&renderer),
+            "hovering the tab must reveal its close glyph"
+        );
         assert_eq!(
-            pixel_at(&renderer, tab.x + tab.w - 4.0, 16.0),
-            renderer.theme.tab_hover
+            count_color(&renderer, close, renderer.theme.tab_close_hover_ink),
+            0,
+            "the glyph stays grey until the pointer is over the glyph itself"
         );
     }
 
@@ -1700,26 +1836,6 @@ mod tests {
             title_left + title_width,
             layout.tabs[0].close.x
         );
-    }
-
-    #[test]
-    fn an_inactive_tab_shows_its_close_glyph_only_when_hovered() {
-        let mut renderer = default_renderer();
-        renderer.resize(400, 120);
-        let layout =
-            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
-        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        let plain = pixel_at(&renderer, layout.tabs[1].close.x + 8.0, 16.0);
-        draw_chrome(
-            &mut renderer,
-            &layout,
-            crate::fonts::UI_SIZE_PX,
-            0,
-            Some(crate::ui::tab_bar::StripHover::Tab(1)),
-        );
-        let hovered = pixel_at(&renderer, layout.tabs[1].close.x + 3.0, 16.0);
-        assert_eq!(plain, renderer.theme.tab_bar);
-        assert_ne!(hovered, renderer.theme.tab_bar);
     }
 
     /// Ink bounding box inside `rect`, as `(left, top, right, bottom)` in
@@ -2575,6 +2691,48 @@ mod tests {
                 "slot {slot} selection state"
             );
         }
+    }
+
+    #[test]
+    fn selection_inverts_the_glyphs_against_the_band() {
+        let mut renderer = default_renderer();
+        let cell_w = renderer.fonts.cell_w;
+        let cell_h = renderer.fonts.cell_h;
+        renderer.resize(cell_w * 4, cell_h * 2);
+        let snapshot = row_snapshot(vec![Cell {
+            text: "M".into(),
+            width: 1,
+            style: Style::default(),
+        }]);
+        let mut selection = Selection::new(LogicalPos { row: 0, col: 0 });
+        selection.update(LogicalPos { row: 0, col: 0 });
+        let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
+        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.sync();
+
+        let width = renderer.pixmap.width() as usize;
+        let band = packed(renderer.theme.selection);
+        let left = renderer.padding();
+        let (mut banded, mut darkest) = (0, 255u8);
+        for y in renderer.padding()..renderer.padding() + cell_h {
+            for x in left..left + cell_w {
+                let pixel = renderer.pixels()[y as usize * width + x as usize];
+                if pixel == band {
+                    banded += 1;
+                } else {
+                    // Only the glyph can differ from the band inside the cell.
+                    darkest = darkest.min((pixel & 0xFF) as u8);
+                }
+            }
+        }
+        assert!(banded > 0, "the selection must fill the cell with the band");
+        // WT inverts the glyph against the band instead of tinting it, so the
+        // ink inside a selected cell is the band's contrast colour, not the
+        // cell's `#CCCCCC` foreground.
+        assert!(
+            darkest < 60,
+            "selected glyph ink must be dark on the white band, darkest {darkest}"
+        );
     }
 
     #[test]
