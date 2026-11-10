@@ -84,14 +84,14 @@ fn label_width(row_width: f32, shortcut_width: Option<f32>, k: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
-    use crate::ui::tab_bar::Rect;
+    use crate::ui::tab_bar::{Rect, TAB_STRIP_HEIGHT};
 
     fn menu() -> MenuLayout {
         let anchor = Rect {
             x: 140.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         MenuLayout::new(
             anchor,
@@ -204,7 +204,7 @@ mod tests {
             x: 140.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let shortcut = "Ctrl+Shift+Alt+F12";
         let menu = MenuLayout::new(

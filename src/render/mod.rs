@@ -259,7 +259,7 @@ impl Renderer {
         // The rule goes down after the buttons: a hovered button's fill starts
         // at the top of the strip, and painting it later would erase a window-
         // wide rule behind that button.
-        self.draw_band_rule(layout);
+        self.draw_band_rule(layout, active);
         // The caption controls paint last. Their hover fill stops one pixel
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
@@ -273,10 +273,13 @@ impl Renderer {
         self.fill_rect(0.0, 0.0, layout.width, layout.strip_h, self.theme.tab_bar);
     }
 
-    /// One fill per tab, then the outlines that tell them apart, then the
-    /// backdrop behind a hovered close button.
+    /// One fill per tab, then the active tab's outline, then the backdrop
+    /// behind a hovered close button.
     ///
-    /// Strokes run after every fill, or a later tab's fill would cover its
+    /// Only the tab the window shows is outlined: an inactive tab keeps the
+    /// strip's flat fill, so the raised tab is the only one with an edge and
+    /// no divider stands between the last tab and the `+` button. The stroke
+    /// runs after every fill, or a later tab's fill would cover its
     /// neighbour's right edge.
     fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
         let hovered = match hover {
@@ -294,14 +297,15 @@ impl Renderer {
             };
             self.fill_round_top(tab.rect, radius.min(tab.rect.w / 2.0), color);
         }
-        for tab in &layout.tabs {
+        if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
             self.stroke_tab(tab.rect, radius.min(tab.rect.w / 2.0));
         }
         self.draw_close_backdrop(layout, hovered);
     }
 
-    /// The 1 px `#2b2b2b` outline of one tab: its top edge and both sides. The
-    /// bottom stays open so the tab meets the strip's rule flush.
+    /// The 1 px `#2b2b2b` outline of the active tab: its top edge and both
+    /// sides. The bottom stays open so the tab meets the terminal flush, which
+    /// is what makes it read as a raised tab.
     fn stroke_tab(&mut self, rect: Rect, radius: f32) {
         let color = self.theme.tab_border;
         self.fill_rect(
@@ -338,14 +342,25 @@ impl Renderer {
     }
 
     /// The 1 px line that closes the band against the grid.
-    fn draw_band_rule(&mut self, layout: &TabBarLayout) {
-        self.fill_rect(
-            0.0,
-            layout.strip_h - 1.0,
-            layout.width,
-            1.0,
-            self.theme.tab_border,
-        );
+    ///
+    /// It runs under every tab except the active one: that tab's background
+    /// reaches the strip's bottom edge unbroken, which is how the reference
+    /// makes the selected tab merge into the terminal.
+    fn draw_band_rule(&mut self, layout: &TabBarLayout, active: usize) {
+        let y = layout.strip_h - 1.0;
+        let color = self.theme.tab_border;
+        let active_span = layout
+            .tabs
+            .iter()
+            .find(|tab| tab.index == active)
+            .map(|tab| (tab.rect.x, tab.rect.x + tab.rect.w));
+        match active_span {
+            Some((left, right)) => {
+                self.fill_rect(0.0, y, left, 1.0, color);
+                self.fill_rect(right, y, layout.width - right, 1.0, color);
+            }
+            None => self.fill_rect(0.0, y, layout.width, 1.0, color),
+        }
     }
 
     /// The `+` and `⌄` glyphs, centred in their buttons. A hovered button is
@@ -1101,7 +1116,8 @@ mod tests {
     fn the_active_tab_is_lighter_than_its_neighbour() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         let active = pixel_at(&renderer, layout.tabs[0].rect.x + 4.0, 16.0);
@@ -1115,7 +1131,7 @@ mod tests {
         renderer.resize(600, 120);
         // The same label on both tabs makes the glyph peaks identical, so only
         // the title colour can explain a difference between them.
-        let layout = TabBarLayout::new(600.0, 32.0, &["one", "one"], |_| 100.0);
+        let layout = TabBarLayout::new(600.0, TAB_STRIP_HEIGHT, &["one", "one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
@@ -1156,13 +1172,21 @@ mod tests {
     fn a_border_line_splits_adjacent_tabs() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let boundary = layout.tabs[1].rect.x;
+        // The active tab owns the outline, so its right edge is the last pixel
+        // before its neighbour; the inactive tab starts flush at `boundary`
+        // with no edge of its own.
+        assert_eq!(
+            pixel_at(&renderer, boundary - 1.0, 16.0),
+            renderer.theme.tab_border
+        );
         assert_eq!(
             pixel_at(&renderer, boundary, 16.0),
-            renderer.theme.tab_border,
-            "the boundary between two tabs must paint the separator colour"
+            renderer.theme.tab_bar,
+            "an inactive tab must not paint a divider of its own"
         );
     }
 
@@ -1170,7 +1194,7 @@ mod tests {
     fn hovering_the_active_tab_paints_a_backdrop_behind_the_close_button() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         let close = layout.tabs[0].close;
         // A corner the `✕` glyph itself does not cover.
         let square = (close.x + 1.0, close.y + 1.0);
@@ -1223,7 +1247,7 @@ mod tests {
     fn the_plus_button_paints_a_glyph() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let rect = layout.plus;
         let bar = renderer.theme.tab_bar;
@@ -1243,7 +1267,7 @@ mod tests {
     fn the_plus_and_chevron_fill_with_the_hover_tone() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         // The strip's hover fill is `#1f1f1f`; pin the literal, not the theme
         // field, so a palette rename cannot silently drop it.
         let hover = Rgb::new(0x1f, 0x1f, 0x1f);
@@ -1294,7 +1318,8 @@ mod tests {
         renderer.resize(400, 120);
         let sentinel = Rgb::new(255, 0, 255);
         renderer.pixmap.fill(sentinel.to_tiny());
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(
             &mut renderer,
             &layout,
@@ -1317,11 +1342,91 @@ mod tests {
     fn the_strip_ends_with_a_border_rule() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        // Under the `+`, clear of the active tab's open bottom edge and of the
+        // hover fill the button only paints under the pointer.
         assert_eq!(
-            pixel_at(&renderer, 0.0, layout.strip_h - 1.0),
+            pixel_at(&renderer, layout.plus.x + 1.0, layout.strip_h - 1.0),
             renderer.theme.tab_border
+        );
+    }
+
+    #[test]
+    fn the_active_tab_keeps_an_open_bottom_edge() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let tab = layout.tabs[0].rect;
+        // The reference tab is raised: top and both sides are stroked, but its
+        // bottom edge stays the tab's own fill so it merges into the terminal.
+        assert_eq!(
+            pixel_at(&renderer, tab.x + 40.0, tab.y),
+            renderer.theme.tab_border,
+            "the top edge must be stroked"
+        );
+        assert_eq!(
+            pixel_at(&renderer, tab.x, tab.y + 16.0),
+            renderer.theme.tab_border,
+            "the left edge must be stroked"
+        );
+        assert_eq!(
+            pixel_at(&renderer, tab.x + tab.w - 1.0, tab.y + 16.0),
+            renderer.theme.tab_border,
+            "the right edge must be stroked"
+        );
+        for x in tab.x as u32 + 1..(tab.x + tab.w) as u32 - 1 {
+            assert_eq!(
+                pixel_at(&renderer, x as f32, layout.strip_h - 1.0),
+                renderer.theme.tab_active,
+                "the active tab's bottom edge must not be stroked at column {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inactive_tab_has_no_outline_and_no_close_ink() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let inactive = &layout.tabs[1];
+        // No stroke anywhere on an inactive tab: it is flat strip colour.
+        for (x, y) in [
+            (inactive.rect.x + inactive.rect.w / 2.0, inactive.rect.y),
+            (inactive.rect.x, inactive.rect.y + 16.0),
+            (
+                inactive.rect.x + inactive.rect.w - 1.0,
+                inactive.rect.y + 16.0,
+            ),
+        ] {
+            assert_eq!(
+                pixel_at(&renderer, x, y),
+                renderer.theme.tab_bar,
+                "an inactive tab must not be outlined at ({x}, {y})"
+            );
+        }
+        // Its `✕` is only painted while the tab is hovered, so the close box
+        // holds nothing but the tab's own background.
+        assert_eq!(
+            count_color(&renderer, inactive.close, renderer.theme.tab_bar),
+            (inactive.close.w * inactive.close.h) as usize,
+            "an inactive, un-hovered close box must hold its background only"
+        );
+    }
+
+    #[test]
+    fn no_divider_stands_between_the_last_tab_and_the_plus() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        // Both tabs are inactive; Windows Terminal paints no rule between the
+        // strip and the `+` button, so that column is plain band.
+        assert_eq!(
+            pixel_at(&renderer, layout.plus.x - 1.0, 16.0),
+            renderer.theme.tab_bar
         );
     }
 
@@ -1329,7 +1434,7 @@ mod tests {
     fn the_strip_rule_survives_a_hovered_button() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(
             &mut renderer,
             &layout,
@@ -1380,7 +1485,7 @@ mod tests {
         // glyph's centre can be background for both faces.
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         let painted = |renderer: &mut Renderer, maximized: bool| {
             renderer.set_maximized(maximized);
             draw_chrome(renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
@@ -1405,7 +1510,7 @@ mod tests {
     fn a_hovered_caption_button_fills_and_leaves_the_band_rule() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(
             &mut renderer,
             &layout,
@@ -1481,7 +1586,7 @@ mod tests {
         // 18 px per tab: narrower than the padding plus the close box, so the
         // layout drops the target and the painter must drop the square and glyph
         // with it instead of bleeding into the neighbour.
-        let layout = TabBarLayout::new(100.0, 32.0, &["one", "two"], |_| 20.0);
+        let layout = TabBarLayout::new(100.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         assert_eq!(layout.tabs[0].close.w, 0.0, "the layout must drop the box");
         draw_chrome(
             &mut renderer,
@@ -1507,7 +1612,8 @@ mod tests {
     fn a_hovered_inactive_tab_uses_the_hover_colour() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(
             &mut renderer,
             &layout,
@@ -1528,7 +1634,7 @@ mod tests {
     fn the_active_tab_close_box_paints_ink() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
         let background = renderer.theme.tab_active;
@@ -1551,9 +1657,8 @@ mod tests {
         // far longer than the tab can hold.
         let layout = TabBarLayout::new(
             318.0,
-            32.0,
+            TAB_STRIP_HEIGHT,
             &["a very long tab title that cannot fit"],
-            |_| 200.0,
         );
         let tab = layout.tabs[0].rect;
         assert_eq!(tab.w, 92.0);
@@ -1572,13 +1677,14 @@ mod tests {
     fn an_inactive_tab_shows_its_close_glyph_only_when_hovered() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let plain = pixel_at(&renderer, layout.tabs[1].close.x + 8.0, 16.0);
         draw_chrome(
             &mut renderer,
             &layout,
-            12.0,
+            crate::fonts::UI_SIZE_PX,
             0,
             Some(crate::ui::tab_bar::StripHover::Tab(1)),
         );
@@ -1636,7 +1742,7 @@ mod tests {
     fn the_plus_glyph_is_vertically_centred() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         // The band rule crosses the button's last row; it is chrome, not glyph
         // ink, so measure the button without it.
@@ -1651,7 +1757,7 @@ mod tests {
     fn the_chevron_glyph_is_vertically_centred() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let button = crate::ui::tab_bar::Rect {
             h: layout.chevron.h - 1.0,
@@ -1664,7 +1770,7 @@ mod tests {
     fn the_close_glyph_is_vertically_centred() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         assert_centred(&renderer, layout.tabs[0].close, renderer.theme.tab_active);
     }
@@ -1673,7 +1779,7 @@ mod tests {
     fn the_close_glyph_is_painted_at_the_small_chrome_size() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
 
@@ -1717,7 +1823,7 @@ mod tests {
     fn the_close_glyph_uses_the_active_title_colour() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
         assert!(
@@ -1727,27 +1833,30 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_has_its_top_and_side_borders() {
+    fn only_the_active_tab_has_its_top_and_side_borders() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        // The second tab is the one the window shows, so the outline follows
+        // the active index rather than the leftmost tab.
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 1, None);
         let tab = layout.tabs[1].rect;
         let border = renderer.theme.tab_border;
         assert_eq!(
             pixel_at(&renderer, tab.x + 50.0, tab.y),
             border,
-            "the top edge must be stroked"
+            "the active tab's top edge must be stroked"
         );
         assert_eq!(
             pixel_at(&renderer, tab.x, 16.0),
             border,
-            "the left edge must be stroked"
+            "the active tab's left edge must be stroked"
         );
         assert_eq!(
             pixel_at(&renderer, tab.x + tab.w - 1.0, 16.0),
             border,
-            "the right edge must be stroked"
+            "the active tab's right edge must be stroked"
         );
     }
 
@@ -1755,7 +1864,8 @@ mod tests {
     fn a_tab_has_rounded_top_corners() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let tab = layout.tabs[0].rect;
         // The corner falls outside the rounded fill, so the band shows through
@@ -1773,7 +1883,8 @@ mod tests {
         renderer.resize(200, 120);
         // A strip too narrow to give either of two tabs its own icon slot:
         // each tab is 20 px wide while the icon alone wants 28.
-        let layout = crate::ui::tab_bar::TabBarLayout::new(242.0, 32.0, &["one", "two"], |_| 20.0);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(242.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let second = layout.tabs[1].rect;
         for y in 1..layout.strip_h as u32 - 1 {
@@ -1791,8 +1902,9 @@ mod tests {
     fn the_active_tab_paints_its_app_icon() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
+        let layout =
+            crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         // The icon slot starts 12 logical px into the tab and is 16 px square.
         let icon_pixel = pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0);
@@ -1812,7 +1924,7 @@ mod tests {
     fn a_tab_stamps_its_own_icon_instead_of_the_app_icon() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 100.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         // Solid red: no pixel of this can come from the bundled app icon.
         let red = crate::icon::TabIcon {
             rgba: [255, 0, 0, 255].repeat(16 * 16),
@@ -3024,12 +3136,7 @@ mod tests {
         let maps = vec![VisualMap::identity(cols); rows];
 
         let ui_px = crate::fonts::UI_SIZE_PX;
-        let layout = {
-            let fonts = renderer.fonts();
-            TabBarLayout::new(width as f32, TAB_STRIP_HEIGHT, &["one", "two"], |title| {
-                fonts.ui_width(title, ui_px)
-            })
-        };
+        let layout = TabBarLayout::new(width as f32, TAB_STRIP_HEIGHT, &["one", "two"]);
         let menu = {
             use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
             let items = vec![

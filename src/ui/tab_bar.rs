@@ -2,10 +2,19 @@
 //! one description of where every control sits.
 
 /// Height of the strip in logical pixels; the terminal grid starts below it.
-pub const TAB_STRIP_HEIGHT: f32 = 32.0;
-/// Widest a single tab grows before the title is clipped.
-pub const MAX_TAB_WIDTH: f32 = 220.0;
-/// Narrowest a tab shrinks to while the strip still has room.
+///
+/// 34 logical px is Windows Terminal's tab strip at 100 %, the band its 14 px
+/// tab text sits in.
+pub const TAB_STRIP_HEIGHT: f32 = 34.0;
+/// Widest a single tab grows; the equal share is capped here.
+pub const MAX_TAB_WIDTH: f32 = 240.0;
+/// The width below which the strip counts as crowded, pinned by the tests.
+///
+/// The layout applies no floor — Windows Terminal enforces only the
+/// [`MAX_TAB_WIDTH`] cap, and tabs shrink further when they must — so this is
+/// a reference value for the crowding assertions, not a limit the painter
+/// reads. Test-only so an unused production constant cannot drift.
+#[cfg(test)]
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width of the `+` and `⌄` buttons.
 pub const BUTTON_WIDTH: f32 = 32.0;
@@ -104,25 +113,22 @@ impl TabBarLayout {
     /// `k = strip_h / TAB_STRIP_HEIGHT` scales the whole layout and paint and
     /// hit-testing stay aligned at any DPI.
     ///
-    /// `width_of` measures a title at the UI font size, so a long title both
-    /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip
-    /// runs out of room.
-    ///
     /// The two buttons and the three window controls are reserved before any
-    /// tab is placed, and each tab may claim at most an equal share of what is
-    /// left after the drag gutter. A crowded strip therefore shrinks its tabs
-    /// (below [`MIN_TAB_WIDTH`] if it must) instead of pushing a control past
-    /// the window edge or swallowing the empty band that moves the window, so
-    /// `+`, `⌄` and the caption buttons stay clickable and the window stays
-    /// draggable.
-    pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
+    /// tab is placed, and every tab then claims the same share of what is left
+    /// after the drag gutter, capped at [`MAX_TAB_WIDTH`]. That is the equal
+    /// division Windows Terminal uses: a title never drives the width, so one
+    /// tab on a wide window takes the full 240 px.
+    ///
+    /// A crowded strip shrinks every tab below the 80 px reference width
+    /// instead of pushing a control past the window edge or swallowing the
+    /// empty band that moves the window, so `+`, `⌄` and the caption buttons
+    /// stay clickable and the window stays draggable.
+    pub fn new(width: f32, strip_h: f32, titles: &[&str]) -> Self {
         let strip_h = strip_h.max(0.0);
         let k = strip_h / TAB_STRIP_HEIGHT;
         let max_tab = MAX_TAB_WIDTH * k;
-        let min_tab = MIN_TAB_WIDTH * k;
         let close_size = CLOSE_SIZE * k;
         let tab_padding = TAB_PADDING * k;
-        let title_size = TITLE_SIZE * k;
         // A window narrower than the button pair shrinks both together, so the
         // strip always ends exactly at `width` and neither button is clipped.
         let buttons = (2.0 * BUTTON_WIDTH * k).min(width.max(0.0));
@@ -136,21 +142,22 @@ impl TabBarLayout {
         // visible even when every tab is at its cap.
         let gutter = (DRAG_GUTTER * k).min((width - buttons - caption).max(0.0));
         let available = (width - buttons - caption - gutter).max(0.0);
-        let cap = if titles.is_empty() {
+        // Equal division, capped. No floor: when the share drops below the
+        // 80 px reference width the strip is crowded and the smaller share is
+        // taken as it is, rather than overflowing the controls.
+        let tab_width = if titles.is_empty() {
             max_tab
         } else {
             (available / titles.len() as f32).min(max_tab)
         };
-        let floor = min_tab.min(cap);
 
         let mut tabs = Vec::with_capacity(titles.len());
         let mut x = 0.0;
-        for (index, title) in titles.iter().enumerate() {
-            let w = (width_of(title) + title_size).clamp(floor, cap);
+        for index in 0..titles.len() {
             let rect = Rect {
                 x,
                 y: 0.0,
-                w,
+                w: tab_width,
                 h: strip_h,
             };
             // A tab narrower than its padding plus the glyph cannot host a
@@ -170,7 +177,7 @@ impl TabBarLayout {
                 h: close_size,
             };
             tabs.push(TabRect { index, rect, close });
-            x += w;
+            x += tab_width;
         }
 
         let plus = Rect {
@@ -256,28 +263,43 @@ impl TabBarLayout {
 mod tests {
     use super::*;
 
-    fn fixed(_: &str) -> f32 {
-        100.0
-    }
-
     #[test]
     fn tabs_are_laid_out_left_to_right_and_are_capped() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], |_| 200.0);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
         assert_eq!(layout.tabs.len(), 3);
         assert!((layout.tabs[0].rect.x - 0.0).abs() < f32::EPSILON);
         assert!(layout.tabs[1].rect.x > layout.tabs[0].rect.x);
         assert!(layout.tabs[2].rect.x > layout.tabs[1].rect.x);
         assert!((layout.tabs[0].rect.w - MAX_TAB_WIDTH).abs() < f32::EPSILON);
-
-        // A title narrower than the cap hugs its own text plus the chrome.
-        let short = TabBarLayout::new(1200.0, 32.0, &["one"], |_| 30.0);
-        assert_eq!(short.tabs[0].rect.w, 30.0 + TITLE_SIZE);
     }
 
     #[test]
-    fn a_short_title_hugs_its_text() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one"], |_| 30.0);
-        assert_eq!(layout.tabs[0].rect.w, 30.0 + TITLE_SIZE);
+    fn a_single_tab_on_a_wide_window_is_the_reference_width() {
+        // Equal division, not title-driven: one tab on a 1200 px strip takes
+        // the full 240 px cap even though `one` is a very short title.
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        assert_eq!(layout.tabs[0].rect.w, MAX_TAB_WIDTH);
+    }
+
+    #[test]
+    fn every_tab_gets_the_same_share_until_the_cap() {
+        // Three tabs on 1200 px: `(1200 - 64 - 138 - 24) / 3` is above the
+        // cap, so all three are exactly the cap wide.
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
+        for tab in &layout.tabs {
+            assert_eq!(tab.rect.w, MAX_TAB_WIDTH);
+        }
+
+        // Six tabs divide the same room, so every tab is narrower and they
+        // share one width regardless of their titles.
+        let layout = TabBarLayout::new(
+            1200.0,
+            TAB_STRIP_HEIGHT,
+            &["a", "a much longer title", "c", "d", "e", "f"],
+        );
+        let first = layout.tabs[0].rect.w;
+        assert!(first < MAX_TAB_WIDTH);
+        assert!(layout.tabs.iter().all(|tab| tab.rect.w == first));
     }
 
     #[test]
@@ -289,7 +311,7 @@ mod tests {
 
     #[test]
     fn plus_and_chevron_sit_after_the_last_tab() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one"], fixed);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
         let tab_end = layout.tabs[0].rect.x + layout.tabs[0].rect.w;
         assert!(layout.plus.x >= tab_end);
         assert!(layout.chevron.x > layout.plus.x);
@@ -297,7 +319,7 @@ mod tests {
 
     #[test]
     fn hit_test_finds_tab_close_plus_and_chevron() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two"], fixed);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         let first = layout.tabs[0].rect;
         // the top RESIZE_BORDER px is the window's resize border
         assert_eq!(
@@ -323,7 +345,7 @@ mod tests {
 
     #[test]
     fn the_caption_buttons_are_pinned_to_the_right_edge() {
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 40.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         assert_eq!(layout.close_window.x + layout.close_window.w, layout.width);
         assert_eq!(layout.close_window.x, layout.maximize.x + layout.maximize.w);
         assert_eq!(layout.maximize.x, layout.minimize.x + layout.minimize.w);
@@ -342,7 +364,7 @@ mod tests {
         // `+`/`⌄` pair and the last tab stay clear of the controls. Without the
         // reservation the row would reach `width - 64` and paint under them.
         let titles: Vec<&str> = (0..10).map(|_| "one").collect();
-        let layout = TabBarLayout::new(1200.0, 32.0, &titles, |_| 100.0);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &titles);
         let last = layout.tabs.last().expect("a tab");
         assert!(layout.plus.x + layout.plus.w <= layout.minimize.x);
         assert!(layout.chevron.x + layout.chevron.w <= layout.minimize.x);
@@ -355,7 +377,7 @@ mod tests {
         // at the drag gutter, which itself ends exactly where the controls
         // begin, so the painted boundary is exact and not just ordered.
         let titles: Vec<&str> = (0..30).map(|_| "a long shell title").collect();
-        let layout = TabBarLayout::new(1162.0, 32.0, &titles, |_| 120.0);
+        let layout = TabBarLayout::new(1162.0, TAB_STRIP_HEIGHT, &titles);
         assert!(
             (layout.chevron.x + layout.chevron.w + DRAG_GUTTER - layout.minimize.x).abs() < 0.01,
             "the drag gutter must occupy exactly the space between `⌄` and the controls"
@@ -383,7 +405,7 @@ mod tests {
         // `MIN_TAB_WIDTH`, and the two buttons must still be reachable.
         let titles: Vec<String> = (0..20).map(|index| format!("tab {index}")).collect();
         let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
-        let layout = TabBarLayout::new(1200.0, 32.0, &refs, fixed);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &refs);
         assert_eq!(layout.tabs.len(), 20);
         assert!(
             layout.tabs[0].rect.w < MIN_TAB_WIDTH,
@@ -416,7 +438,7 @@ mod tests {
             .collect();
         let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
         for width in [1200.0, 1024.0] {
-            let layout = TabBarLayout::new(width, 32.0, &refs, |_| 180.0);
+            let layout = TabBarLayout::new(width, TAB_STRIP_HEIGHT, &refs);
             let gutter_left = layout.chevron.x + layout.chevron.w;
             assert!(
                 gutter_left + DRAG_GUTTER <= layout.minimize.x + 0.01,
@@ -437,7 +459,7 @@ mod tests {
         // padding plus the glyph, so no tab can own a close box.
         let titles: Vec<String> = (0..60).map(|index| format!("t{index}")).collect();
         let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
-        let layout = TabBarLayout::new(600.0, 32.0, &refs, fixed);
+        let layout = TabBarLayout::new(600.0, TAB_STRIP_HEIGHT, &refs);
         assert!(layout.tabs.iter().all(|tab| tab.close.w == 0.0));
 
         // The right edge of the second tab is that tab, not a close on it or
@@ -451,7 +473,7 @@ mod tests {
 
     #[test]
     fn the_gap_before_the_caption_buttons_is_empty_space() {
-        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 40.0);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         // The gap after the `⌄` — not after the `+`, which is still inside the
         // chevron at this width — is the empty band that doubles as the window's
         // drag handle.
@@ -464,7 +486,7 @@ mod tests {
     fn the_strip_is_a_single_row_of_the_requested_height() {
         // The strip height is physical and comes from the caller; a scaled
         // display passes 40 here and both the rects and the hit test follow.
-        let layout = TabBarLayout::new(1200.0, 40.0, &["one"], fixed);
+        let layout = TabBarLayout::new(1200.0, 40.0, &["one"]);
         let k = 40.0 / TAB_STRIP_HEIGHT;
         assert_eq!(layout.strip_h, 40.0);
         assert_eq!(layout.tabs[0].rect.y, 0.0);
@@ -479,7 +501,7 @@ mod tests {
     #[test]
     fn geometry_scales_with_the_strip_height() {
         let k = 48.0 / TAB_STRIP_HEIGHT;
-        let layout = TabBarLayout::new(1200.0, 48.0, &["one"], fixed);
+        let layout = TabBarLayout::new(1200.0, 48.0, &["one"]);
         let tab = &layout.tabs[0];
         assert_eq!(layout.plus.w, BUTTON_WIDTH * k);
         assert_eq!(layout.chevron.w, BUTTON_WIDTH * k);
@@ -491,10 +513,10 @@ mod tests {
         );
         assert_eq!(tab.close.y, (48.0 - CLOSE_SIZE * k) / 2.0);
 
-        // The title allowance scales with the em size, so the same label wants
-        // a wider tab in a taller strip.
-        let short = TabBarLayout::new(1200.0, 32.0, &["x"], fixed);
-        let tall = TabBarLayout::new(1200.0, 48.0, &["x"], fixed);
+        // The cap scales with the strip height, so the same strip gives a
+        // wider tab on a taller (higher-DPI) window.
+        let short = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["x"]);
+        let tall = TabBarLayout::new(1200.0, 48.0, &["x"]);
         assert!(tall.tabs[0].rect.w > short.tabs[0].rect.w);
     }
 }

@@ -67,7 +67,9 @@ const UI_FAMILY: &str = "Segoe UI";
 pub const UI_FONT_ID: u8 = u8::MAX;
 
 /// Chrome text size in logical pixels.
-pub(crate) const UI_SIZE_PX: f32 = 12.0;
+///
+/// 14 px is Windows Terminal's tab text at 100 %, inside its 34 px strip.
+pub(crate) const UI_SIZE_PX: f32 = 14.0;
 
 /// Converts an em size in pixels into the pixel-height scale `ab_glyph`
 /// expects. `PxScale` measures the font's ascent-to-descent height, not its

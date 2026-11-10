@@ -194,10 +194,10 @@ mod tests {
             x: 700.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
-        assert_eq!(menu.rect.y, 32.0 + MENU_GAP);
+        assert_eq!(menu.rect.y, TAB_STRIP_HEIGHT + MENU_GAP);
         assert!(menu.rect.x + menu.rect.w <= 700.0 + 32.0 + 0.5);
         assert_eq!(menu.rows.len(), 4);
     }
@@ -211,7 +211,7 @@ mod tests {
             x: 180.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), window_width, 600.0);
         assert_eq!(menu.rect.x, 0.0, "the panel is pulled to the left edge");
@@ -227,7 +227,7 @@ mod tests {
             x: 0.0,
             y: 560.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
         assert!(
@@ -246,7 +246,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
         assert_eq!(
@@ -274,7 +274,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
         let rule = menu.separators[0];
@@ -291,7 +291,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
         assert_eq!(menu.separators.len(), 1);
@@ -328,7 +328,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, nine_items(), 800.0, 200.0);
         assert!(
@@ -370,7 +370,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             w: 32.0,
-            h: 32.0,
+            h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, nine_items(), 800.0, 330.0);
         assert!(

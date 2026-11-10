@@ -159,7 +159,8 @@ impl App {
     }
 
     /// Rebuilds the strip geometry. Called after a resize, a tab change, or a
-    /// retitle, because a tab's width depends on every title in the strip.
+    /// retitle, because the strip's width and its tab count both feed the
+    /// layout.
     ///
     /// Both inputs are physical: the window width, and the strip height the
     /// renderer actually reserved above the grid (`top_inset`). Taking the
@@ -179,12 +180,8 @@ impl App {
             return;
         };
         let width = window.inner_size().width as f32;
-        let ui_px = UI_SIZE_PX * window.scale_factor() as f32;
         let titles = self.tabs.titles();
-        let fonts = renderer.fonts();
-        let layout = TabBarLayout::new(width, strip_h, &titles, |title| {
-            fonts.ui_width(title, ui_px)
-        });
+        let layout = TabBarLayout::new(width, strip_h, &titles);
         self.layout = Some(layout);
         // A keyboard switch or a new tab must rename the OS window, which an
         // OSC title alone cannot do once the opt-in is off. The layout rebuild
@@ -2420,7 +2417,8 @@ mod tests {
         // what keeps the window draggable when the tabs are crowded.
         use crate::ui::tab_bar::{TabBarLayout, DRAG_GUTTER};
 
-        let layout = TabBarLayout::new(800.0, 32.0, &["one", "two"], |_| 100.0);
+        let layout =
+            TabBarLayout::new(800.0, crate::ui::tab_bar::TAB_STRIP_HEIGHT, &["one", "two"]);
         assert_eq!(layout.close_window.x + layout.close_window.w, layout.width);
         assert!(
             layout.chevron.x + layout.chevron.w + DRAG_GUTTER <= layout.minimize.x + 0.01,
@@ -2758,14 +2756,22 @@ mod tests {
 
     #[test]
     fn a_click_on_the_plus_hit_is_recognised() {
-        let layout = crate::ui::tab_bar::TabBarLayout::new(800.0, 32.0, &["one", "two"], |_| 80.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(
+            800.0,
+            crate::ui::tab_bar::TAB_STRIP_HEIGHT,
+            &["one", "two"],
+        );
         let hit = layout.hit(layout.plus.x + 4.0, 10.0);
         assert_eq!(hit, Some(crate::ui::tab_bar::TabHit::Plus));
     }
 
     #[test]
     fn a_click_below_the_strip_is_not_a_tab_hit() {
-        let layout = crate::ui::tab_bar::TabBarLayout::new(800.0, 32.0, &["one"], |_| 80.0);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(
+            800.0,
+            crate::ui::tab_bar::TAB_STRIP_HEIGHT,
+            &["one"],
+        );
         assert!(layout.hit(10.0, 40.0).is_none());
     }
 
@@ -3110,9 +3116,14 @@ mod tests {
     #[test]
     fn a_stationary_pointer_re_hovers_the_tab_that_moves_under_it() {
         use crate::ui::tab_bar::{TabBarLayout, TabHit};
-        // Three 168 px tabs (100 px title + chrome); the pointer rests on the
-        // middle tab's `✕`.
-        let before = TabBarLayout::new(800.0, 32.0, &["one", "two", "three"], |_| 100.0);
+        // Three tabs at the 240 px cap; the pointer rests on the middle tab's
+        // `✕`. The window is wide enough that closing one leaves the other two
+        // at the same cap, so the third tab lands on the same geometry.
+        let before = TabBarLayout::new(
+            1200.0,
+            crate::ui::tab_bar::TAB_STRIP_HEIGHT,
+            &["one", "two", "three"],
+        );
         let close = before.tabs[1].close;
         let (x, y) = (close.x + 1.0, close.y + 1.0);
         assert_eq!(before.hit(x, y), Some(TabHit::Close(1)));
@@ -3120,7 +3131,11 @@ mod tests {
         // Closing that tab slides the third into the same geometry, close box
         // included, so the same pixel is still a close target. The hover has to
         // follow it, or the second click closes a tab whose `✕` never painted.
-        let after = TabBarLayout::new(800.0, 32.0, &["one", "three"], |_| 100.0);
+        let after = TabBarLayout::new(
+            1200.0,
+            crate::ui::tab_bar::TAB_STRIP_HEIGHT,
+            &["one", "three"],
+        );
         assert_eq!(after.hit(x, y), Some(TabHit::Close(1)));
         assert_eq!(
             hover_after_layout_change(&after, x as f64, y as f64),
@@ -3436,12 +3451,12 @@ mod tests {
 
     #[test]
     fn the_tab_strip_scales_once_with_the_window() {
-        // The strip is 32 logical pixels. `strip_px` is the only place that
+        // The strip is 34 logical pixels. `strip_px` is the only place that
         // converts, because the renderer, the surface, and the mouse
         // coordinates all work in physical pixels.
-        assert_eq!(strip_px(1.0), 32);
-        assert_eq!(strip_px(1.25), 40);
-        assert_eq!(strip_px(1.5), 48);
+        assert_eq!(strip_px(1.0), 34);
+        assert_eq!(strip_px(1.25), 43);
+        assert_eq!(strip_px(1.5), 51);
     }
 
     #[test]
