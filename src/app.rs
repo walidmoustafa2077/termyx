@@ -235,6 +235,9 @@ impl App {
             initial_window_size(self.config.window.width, self.config.window.height, monitor);
         let attributes = Window::default_attributes()
             .with_title(FALLBACK_TITLE)
+            // The strip is the title bar, so no caption row may sit above it.
+            // The title stays for the taskbar and Alt+Tab.
+            .with_decorations(false)
             .with_inner_size(LogicalSize::new(width, height));
         let attributes = match icon::window_icon() {
             Ok(icon) => attributes.with_window_icon(Some(icon)),
@@ -244,6 +247,9 @@ impl App {
             }
         };
         let window = Arc::new(event_loop.create_window(attributes)?);
+        // Removing the caption also drops the resize frame, Aero Snap and the
+        // shadow. Restore them before centring, which measures `outer_size`.
+        platform::apply_custom_chrome(&window);
         // Center on the primary monitor so the OS never places the window over
         // the taskbar or past the screen edge.
         if let Some(monitor) = event_loop.primary_monitor() {
@@ -2096,6 +2102,17 @@ mod tests {
         let (_, full) = grid_size(800, 600, 8, 16, padding, 0);
         let (_, with_strip) = grid_size(800, 600, 8, 16, padding, 32);
         assert_eq!(full - with_strip, 2);
+    }
+
+    #[test]
+    fn a_frameless_window_reserves_the_same_strip_as_a_framed_one() {
+        // The name records the invariant: removing the caption must not alter
+        // the reserved strip height, or the grid would jump by the caption's
+        // height. 32 logical pixels double to 64 at 2x and stay 32 at 1x.
+        use crate::ui::tab_bar::TAB_STRIP_HEIGHT;
+
+        assert_eq!(strip_px(2.0), 2 * TAB_STRIP_HEIGHT as u32);
+        assert_eq!(strip_px(1.0), TAB_STRIP_HEIGHT as u32);
     }
 
     #[test]
