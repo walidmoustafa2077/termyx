@@ -18,7 +18,7 @@ use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::ui::tab_bar::{
     Rect, StripHover, TabBarLayout, CLOSE_GLYPH_SIZE, TAB_ICON_GAP, TAB_ICON_SIZE, TAB_PADDING,
-    TAB_STRIP_HEIGHT, TITLE_SIZE,
+    TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
 };
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -264,7 +264,7 @@ impl Renderer {
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
         self.draw_caption_buttons(layout, ui_px, hover);
-        self.draw_titles(layout, ui_px, active, icons, hover);
+        self.draw_titles(layout, active, icons, hover);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -438,7 +438,6 @@ impl Renderer {
     fn draw_titles(
         &mut self,
         layout: &TabBarLayout,
-        ui_px: f32,
         active: usize,
         icons: &[Option<TabIcon>],
         hover: Option<StripHover>,
@@ -474,15 +473,19 @@ impl Renderer {
             } else {
                 self.theme.tab_title_inactive
             };
-            // 9 px below the body's top edge puts the 14 px ink on the line WT
-            // measured at y=20..29 inside the tab body.
-            let title_top = tab.body.y + 9.0 * k;
+            // The title is a size below the rest of the chrome: at `ui_px` its
+            // ink is 12 px tall and the tab reads visibly larger than the
+            // reference, whose title is a 10 px cap band.
+            let title_px = TAB_TITLE_SIZE * k;
+            // 8.5 px below the body's top edge centres that band on the line WT
+            // measured at y=20..29 inside the 32 px tab body.
+            let title_top = tab.body.y + 8.5 * k;
             ui_text::draw_text_ellipsis(
                 self,
                 title,
                 tab.rect.x + title_left,
                 title_top,
-                ui_px,
+                title_px,
                 color,
                 title_width,
             );

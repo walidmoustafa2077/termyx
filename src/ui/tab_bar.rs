@@ -52,6 +52,14 @@ pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 /// padding, the icon, the gap after the icon, the gap before the close box,
 /// the close box, and the right padding — `12 + 16 + 6 + 6 + 16 + 12`.
 pub const TITLE_SIZE: f32 = 68.0;
+/// Em size of a tab title at 100 % zoom, deliberately below the chrome size
+/// (`fonts::UI_SIZE_PX`, 14) the menus, buttons and caption glyphs use.
+///
+/// Windows Terminal's tab ink is a 10 px cap band (y=20..29 of a 32 px tab
+/// body); at 14 px our title ink stands 12 px tall and the tab reads 13 px
+/// wider than the reference. 12.5 keeps the width on the reference and the cap
+/// within a pixel of it.
+pub const TAB_TITLE_SIZE: f32 = 12.5;
 /// Left inset from the tab edge to the app icon.
 pub(crate) const TAB_PADDING: f32 = 12.0;
 /// Side of the square app icon every tab stamps at its left.
