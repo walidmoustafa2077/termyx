@@ -672,15 +672,24 @@ impl App {
                 tracing::info!("the command palette arrives in a later task");
             }
             MenuAction::About => {
-                rfd::MessageDialog::new()
-                    .set_title(FALLBACK_TITLE)
-                    .set_description(concat!(
-                        "Termyx ",
-                        env!("CARGO_PKG_VERSION"),
-                        "\n\nA Rust terminal with RTL support."
-                    ))
-                    .set_level(rfd::MessageLevel::Info)
-                    .show();
+                // `show()` blocks until the dialog closes. Run on the UI thread
+                // it would stop the event loop and the window would freeze, and
+                // Windows may not even paint the dialog. Building the whole
+                // dialog in the worker keeps every non-`Send` value on that
+                // thread; the handle is dropped right away, so the dialog
+                // outlives this press without being joined.
+                let spawned = std::thread::Builder::new()
+                    .name("about-dialog".into())
+                    .spawn(|| {
+                        rfd::MessageDialog::new()
+                            .set_title(FALLBACK_TITLE)
+                            .set_description(about_text())
+                            .set_level(rfd::MessageLevel::Info)
+                            .show();
+                    });
+                if let Err(err) = spawned {
+                    tracing::warn!(%err, "could not open the About dialog");
+                }
             }
         }
     }
@@ -1332,6 +1341,15 @@ impl App {
 /// Mirrors [`digit_profile`]: those rows name a key the window listens for, and
 /// a further profile would name one nothing binds.
 const PROFILE_SHORTCUTS: usize = 5;
+
+/// The body of the About dialog. Kept pure so the wording is testable without
+/// a window or an event loop.
+fn about_text() -> String {
+    format!(
+        "Termyx {}\n\nA Rust terminal with RTL support.",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// The rows of the `⌄` dropdown: one per profile, then the window commands.
 ///
@@ -2510,6 +2528,19 @@ mod tests {
                 items[8].shortcut.as_str()
             ),
             (MenuAction::About, "About", "")
+        );
+    }
+
+    #[test]
+    fn the_about_text_names_the_app_and_its_version() {
+        let text = about_text();
+        assert!(
+            text.contains("Termyx"),
+            "the dialog must say which app it describes, got {text:?}"
+        );
+        assert!(
+            text.contains(env!("CARGO_PKG_VERSION")),
+            "the dialog must show the version this build reports, got {text:?}"
         );
     }
 
