@@ -10,7 +10,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::config::{BidiConfig, Config};
@@ -453,7 +453,7 @@ impl App {
         self.blink.restart(Instant::now());
         // The tab shortcuts are chrome, not text: a key they claim must never
         // also reach the shell.
-        if let Some(action) = tab_shortcut(&event.logical_key, self.modifiers) {
+        if let Some(action) = tab_shortcut(&event, self.modifiers) {
             // Only cycling may auto-repeat: holding the new or close shortcut
             // would otherwise open or close a tab per key repeat.
             if event.repeat && !matches!(action, TabAction::Next | TabAction::Previous) {
@@ -561,16 +561,14 @@ impl App {
     }
 
     /// Shows the tab `delta` places from the active one, wrapping at both ends.
-    /// A single tab has nowhere to go, so the strip is left alone.
+    /// A lone tab has nowhere to go, so the strip is left alone.
     fn cycle_tab(&mut self, delta: isize) {
-        let count = self.tabs.len();
-        if count < 2 {
-            return;
-        }
         let Some(current) = self.tabs.active_index() else {
             return;
         };
-        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        let Some(next) = cycle_index(current, delta, self.tabs.len()) else {
+            return;
+        };
         self.tabs.select(next);
         // The keyboard switch paints the tab the same way a click does.
         self.selection = None;
@@ -1179,33 +1177,78 @@ enum TabAction {
 /// Shortcuts the window chrome owns. Kept free of `App` so the table can be
 /// tested without an event loop.
 ///
-/// Only the keys listed here belong to the strip: everything else, including
-/// the copy and paste shortcuts `on_key` handles later, falls through to the
-/// terminal.
-fn tab_shortcut(key: &Key, modifiers: ModifiersState) -> Option<TabAction> {
+/// Only the keys listed here are claimed. Everything else is left to the rest
+/// of `on_key`: the copy and paste shortcuts first, then the terminal.
+fn tab_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> Option<TabAction> {
+    shortcut_for(&event.logical_key, event.physical_key, modifiers)
+}
+
+/// The shortcut table itself.
+///
+/// Split from [`tab_shortcut`] because winit exposes no way to build a
+/// `KeyEvent` outside its own backends, so the table can only be tested over
+/// the key values an event carries.
+fn shortcut_for(
+    logical: &Key,
+    physical: PhysicalKey,
+    modifiers: ModifiersState,
+) -> Option<TabAction> {
+    // Alt and Super belong to the shell: `Ctrl+Alt+Shift+W` is `ESC ^W` to a
+    // TUI, not a window command.
+    if modifiers.alt_key() || modifiers.super_key() {
+        return None;
+    }
     let ctrl = modifiers.control_key();
     let shift = modifiers.shift_key();
-    match key {
-        Key::Named(NamedKey::Tab) if ctrl => Some(if shift {
+    if !ctrl {
+        return None;
+    }
+    if let Key::Named(NamedKey::Tab) = logical {
+        return Some(if shift {
             TabAction::Previous
         } else {
             TabAction::Next
-        }),
-        Key::Character(text) if ctrl && shift => {
-            // One digit names one of the first five profiles. Parsing the whole
-            // string, not its first byte, keeps a multi-scalar layout value
-            // from passing as a digit.
-            if let Ok(digit) = text.parse::<usize>() {
-                if text.len() == 1 && (1..=5).contains(&digit) {
-                    return Some(TabAction::SelectProfile(digit - 1));
-                }
-            }
-            match text.as_str() {
-                "T" | "t" => Some(TabAction::NewTab),
-                "W" | "w" => Some(TabAction::CloseTab),
-                _ => None,
-            }
-        }
+        });
+    }
+    if !shift {
+        return None;
+    }
+    // The digit is matched physically: Shift turns `2` into `@` on most
+    // layouts, and winit only removes Ctrl from the logical key, so the
+    // logical text cannot name the slot.
+    if let Some(index) = digit_profile(physical) {
+        return Some(TabAction::SelectProfile(index));
+    }
+    match logical {
+        Key::Character(text) => match text.as_str() {
+            "T" | "t" => Some(TabAction::NewTab),
+            "W" | "w" => Some(TabAction::CloseTab),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The slot `delta` places from `current`, wrapping at both ends.
+///
+/// `None` when there is nowhere to move: no slot at all, or a lone one. The
+/// caller reads that as "leave the strip alone" rather than repainting it.
+fn cycle_index(current: usize, delta: isize, count: usize) -> Option<usize> {
+    if count < 2 {
+        return None;
+    }
+    Some((current as isize + delta).rem_euclid(count as isize) as usize)
+}
+
+/// Zero-based profile index for a physical number key, or `None` past the
+/// fifth. Only the digits with a shortcut are listed, so `0` cannot underflow.
+fn digit_profile(physical: PhysicalKey) -> Option<usize> {
+    match physical {
+        PhysicalKey::Code(KeyCode::Digit1) => Some(0),
+        PhysicalKey::Code(KeyCode::Digit2) => Some(1),
+        PhysicalKey::Code(KeyCode::Digit3) => Some(2),
+        PhysicalKey::Code(KeyCode::Digit4) => Some(3),
+        PhysicalKey::Code(KeyCode::Digit5) => Some(4),
         _ => None,
     }
 }
@@ -2087,62 +2130,193 @@ mod tests {
     }
 
     #[test]
-    fn tab_shortcuts_are_recognised() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
+    fn new_tab_and_close_tab_shortcuts_are_recognised() {
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(
-            tab_shortcut(&Key::Character("T".into()), ctrl_shift),
+            shortcut_for(
+                &Key::Character("T".into()),
+                PhysicalKey::Code(KeyCode::KeyT),
+                ctrl_shift
+            ),
             Some(TabAction::NewTab)
         );
         assert_eq!(
-            tab_shortcut(&Key::Character("W".into()), ctrl_shift),
+            shortcut_for(
+                &Key::Character("W".into()),
+                PhysicalKey::Code(KeyCode::KeyW),
+                ctrl_shift
+            ),
             Some(TabAction::CloseTab)
         );
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_forwards_and_back() {
         assert_eq!(
-            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::CONTROL),
+            shortcut_for(
+                &Key::Named(NamedKey::Tab),
+                PhysicalKey::Code(KeyCode::Tab),
+                ModifiersState::CONTROL
+            ),
             Some(TabAction::Next)
         );
         assert_eq!(
-            tab_shortcut(
+            shortcut_for(
                 &Key::Named(NamedKey::Tab),
+                PhysicalKey::Code(KeyCode::Tab),
                 ModifiersState::CONTROL | ModifiersState::SHIFT
             ),
             Some(TabAction::Previous)
         );
+    }
+
+    #[test]
+    fn a_shifted_digit_selects_a_profile_by_its_physical_key() {
+        // Windows removes only Ctrl, so `Ctrl+Shift+2` arrives as `@`. The slot
+        // has to come from the physical key or the shortcut never fires.
         assert_eq!(
-            tab_shortcut(&Key::Character("2".into()), ctrl_shift),
+            shortcut_for(
+                &Key::Character("@".into()),
+                PhysicalKey::Code(KeyCode::Digit2),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
             Some(TabAction::SelectProfile(1))
         );
+    }
+
+    #[test]
+    fn a_logical_digit_still_selects_a_profile() {
+        // A layout whose shifted digit stays the digit reports it both ways.
         assert_eq!(
-            tab_shortcut(&Key::Character("t".into()), ModifiersState::empty()),
+            shortcut_for(
+                &Key::Character("2".into()),
+                PhysicalKey::Code(KeyCode::Digit2),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            Some(TabAction::SelectProfile(1))
+        );
+    }
+
+    #[test]
+    fn copy_and_paste_keys_stay_out_of_the_shortcut_table() {
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            shortcut_for(
+                &Key::Character("C".into()),
+                PhysicalKey::Code(KeyCode::KeyC),
+                ctrl_shift
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_for(
+                &Key::Character("V".into()),
+                PhysicalKey::Code(KeyCode::KeyV),
+                ctrl_shift
+            ),
             None
         );
     }
 
     #[test]
-    fn tab_shortcuts_leave_every_other_key_to_the_terminal() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
+    fn plain_and_shift_tab_stay_with_the_terminal() {
+        assert_eq!(
+            shortcut_for(
+                &Key::Named(NamedKey::Tab),
+                PhysicalKey::Code(KeyCode::Tab),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_for(
+                &Key::Named(NamedKey::Tab),
+                PhysicalKey::Code(KeyCode::Tab),
+                ModifiersState::SHIFT
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_first_five_digits_name_profiles() {
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        // The copy and paste shortcuts are older and must keep their keys.
-        assert_eq!(tab_shortcut(&Key::Character("C".into()), ctrl_shift), None);
-        assert_eq!(tab_shortcut(&Key::Character("V".into()), ctrl_shift), None);
-        // Plain Tab and Shift+Tab still belong to the shell.
+        // `0` must not underflow into a profile index.
         assert_eq!(
-            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+            shortcut_for(
+                &Key::Character("0".into()),
+                PhysicalKey::Code(KeyCode::Digit0),
+                ctrl_shift
+            ),
             None
         );
         assert_eq!(
-            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::empty()),
+            shortcut_for(
+                &Key::Character("6".into()),
+                PhysicalKey::Code(KeyCode::Digit6),
+                ctrl_shift
+            ),
             None
         );
-        // Only the five numbered slots have a profile shortcut, and `0` is not
-        // one of them: it must not underflow into a profile index.
-        assert_eq!(tab_shortcut(&Key::Character("0".into()), ctrl_shift), None);
-        assert_eq!(tab_shortcut(&Key::Character("6".into()), ctrl_shift), None);
         assert_eq!(
-            tab_shortcut(&Key::Character("5".into()), ctrl_shift),
+            shortcut_for(
+                &Key::Character("%".into()),
+                PhysicalKey::Code(KeyCode::Digit5),
+                ctrl_shift
+            ),
             Some(TabAction::SelectProfile(4))
         );
+    }
+
+    #[test]
+    fn alt_or_super_keeps_a_key_for_the_terminal() {
+        // `Ctrl+Alt+Shift+W` is `ESC ^W` to a TUI; the window must not eat it.
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            shortcut_for(
+                &Key::Character("W".into()),
+                PhysicalKey::Code(KeyCode::KeyW),
+                ctrl_shift | ModifiersState::ALT
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_for(
+                &Key::Named(NamedKey::Tab),
+                PhysicalKey::Code(KeyCode::Tab),
+                ModifiersState::CONTROL | ModifiersState::SUPER
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unmodified_text_is_not_a_shortcut() {
+        assert_eq!(
+            shortcut_for(
+                &Key::Character("t".into()),
+                PhysicalKey::Code(KeyCode::KeyT),
+                ModifiersState::empty()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cycling_wraps_at_both_ends() {
+        assert_eq!(cycle_index(1, 1, 3), Some(2));
+        assert_eq!(cycle_index(1, -1, 3), Some(0));
+        assert_eq!(cycle_index(2, 1, 3), Some(0));
+        assert_eq!(cycle_index(0, -1, 3), Some(2));
+        // A delta longer than one lap still lands inside the strip.
+        assert_eq!(cycle_index(0, 7, 3), Some(1));
+    }
+
+    #[test]
+    fn cycling_needs_more_than_one_tab() {
+        assert_eq!(cycle_index(0, 1, 0), None);
+        assert_eq!(cycle_index(0, 1, 1), None);
+        assert_eq!(cycle_index(0, -1, 1), None);
     }
 
     #[test]
