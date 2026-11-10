@@ -23,6 +23,24 @@ fn clean_title(title: &str) -> Option<String> {
     (!title.is_empty()).then(|| title.to_string())
 }
 
+/// Whether an OSC 0/2 title can label a tab.
+///
+/// ConPTY gives the child no title of its own, so a shell that never sets one
+/// leaves the executable path in the title. Windows Terminal hides that path
+/// behind the profile name; we drop the title and keep the profile name.
+pub fn title_is_usable(title: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() {
+        return false;
+    }
+    // `C:\...`, `\\?\C:\...` and `\\server\share\...` are program paths, not names.
+    let path_like = title.starts_with(r"\\")
+        || (title.len() >= 3
+            && title.as_bytes()[1] == b':'
+            && (title.as_bytes()[2] == b'\\' || title.as_bytes()[2] == b'/'));
+    !path_like
+}
+
 #[derive(Debug, Default)]
 pub struct TabSlots {
     ids: Vec<SessionId>,
@@ -101,11 +119,19 @@ impl TabSlots {
     /// Sets the title the slot with `id` shows, clearing it when `title` is
     /// blank. Returns whether the stored label actually changed, so a repeat
     /// of the same title costs no repaint.
+    ///
+    /// A title that is really a program path is ignored: ConPTY leaves the
+    /// executable path behind when the shell sets no title of its own.
     pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
         let Some(index) = self.ids.iter().position(|slot| *slot == id) else {
             return false;
         };
         let next = clean_title(title);
+        // A path is not a name, but a blank title must still clear the slot so
+        // the fallback can come back.
+        if next.is_some() && !title_is_usable(title) {
+            return false;
+        }
         let changed = self.titles[index] != next;
         self.titles[index] = next;
         changed
@@ -355,6 +381,17 @@ mod tests {
         assert_eq!(slots.titles(), vec!["build"]);
         slots.set_title(1, "  ");
         assert_eq!(slots.titles(), vec!["Termyx"]);
+    }
+
+    #[test]
+    fn a_conpty_executable_path_is_not_a_tab_title() {
+        assert!(!title_is_usable(r"C:\WINDOWS\System32\WindX"));
+        assert!(!title_is_usable(r"\\?\C:\Windows\System32\cmd.exe"));
+        assert!(!title_is_usable("   "));
+        assert!(!title_is_usable(""));
+        assert!(title_is_usable("Windows PowerShell"));
+        assert!(title_is_usable("OC | Next steps"));
+        assert!(title_is_usable("nvim src/app.rs"));
     }
 
     #[test]

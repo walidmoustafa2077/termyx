@@ -391,6 +391,8 @@ impl App {
         // shell and leave the original one stuck down.
         self.release_forwarded_button();
         self.tabs.push(session);
+        // The tab is named for the profile until the shell names itself.
+        self.tabs.set_title(id, &profile.name);
         // The new tab is active, so a selection on the old grid is stale.
         self.selection = None;
         self.mouse_down = false;

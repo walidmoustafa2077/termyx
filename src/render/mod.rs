@@ -20,6 +20,12 @@ use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
 
+/// The bundled app icon, kept as RGBA8 so each tab can be stamped from it.
+pub(crate) struct TabIcon {
+    rgba: Vec<u8>,
+    size: u32,
+}
+
 pub struct Renderer {
     pixmap: Pixmap,
     pixels: Vec<u32>,
@@ -34,12 +40,21 @@ pub struct Renderer {
     shape_warned: bool,
     /// Whether the pointer is over the scrollbar, which widens its thumb.
     scrollbar_hover: bool,
+    /// The bundled app icon, decoded once for every tab to stamp from.
+    tab_icon: Option<TabIcon>,
 }
 
 impl Renderer {
     pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
         let pixmap = Pixmap::new(1, 1)
             .ok_or_else(|| anyhow::anyhow!("could not allocate the initial pixmap"))?;
+        let tab_icon = match crate::icon::rgba() {
+            Ok((rgba, size)) => Some(TabIcon { rgba, size }),
+            Err(error) => {
+                tracing::warn!(%error, "no tab icon; the strip will draw without one");
+                None
+            }
+        };
         Ok(Self {
             pixmap,
             pixels: vec![0],
@@ -51,6 +66,7 @@ impl Renderer {
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
             scrollbar_hover: false,
+            tab_icon,
         })
     }
 
@@ -287,20 +303,30 @@ impl Renderer {
 
     /// Tab titles, then the active tab's close glyph.
     ///
-    /// Inactive titles use the muted ANSI grey so the tab on screen reads as
-    /// the active one even when both tabs share a band.
+    /// Every tab stamps the app icon before its title, so the strip identifies
+    /// the shell at a glance. Inactive titles use the muted ANSI grey so the
+    /// tab on screen reads as the active one even when both tabs share a band.
     fn draw_titles(&mut self, layout: &TabBarLayout, ui_px: f32, active: usize) {
         // Insets from the tab edge to the glyph slot, and from the strip top
-        // to the top of the title's em box. The reserve on the right keeps the
-        // close button clear of the title. All of them are logical, so they
-        // scale with the strip just as the layout constants do.
+        // to the top of the title's em box. The layout reserves 12 logical px
+        // of left padding; the icon fills the gap that follows, and the
+        // reserve on the right keeps the close button clear of the title. All
+        // of them are logical, so they scale with the strip just as the layout
+        // constants do.
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let title_left = 34.0 * k;
+        let tab_padding = 12.0 * k;
+        let icon_size = 16.0 * k;
+        let title_left = tab_padding + icon_size + 6.0 * k;
         let title_top = 9.0 * k;
         let close_reserve = 24.0 * k;
         let foreground = self.theme.foreground;
         let muted = self.theme.indexed(8);
         for tab in &layout.tabs {
+            if let Some(icon) = self.tab_icon.as_ref() {
+                let icon_x = tab.rect.x + tab_padding;
+                let icon_y = (layout.strip_h - icon_size) / 2.0;
+                blit_tab_icon(&mut self.pixmap, icon, icon_x, icon_y, icon_size);
+            }
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
             let title_width = (tab.rect.w - title_left - close_reserve).max(0.0);
             let color = if tab.index == active {
@@ -738,6 +764,67 @@ fn blit_scaled(
 
 const SUBPIXELS: u32 = 3;
 
+/// Stamps `icon` into `pixmap` as a `size` px square at `(x, y)`, box-averaging
+/// each source block so a 256 px icon stays smooth at 16 px.
+///
+/// Free rather than a method: the icon is stored on the renderer, and reading
+/// it through `&self` while the pixmap needs `&mut self` cannot borrow-check.
+fn blit_tab_icon(pixmap: &mut Pixmap, icon: &TabIcon, x: f32, y: f32, size: f32) {
+    let side = size.round().max(1.0) as u32;
+    let src = icon.size.max(1);
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let dst_x = x.round() as i32;
+    let dst_y = y.round() as i32;
+    let data = pixmap.data_mut();
+    for row in 0..side {
+        let py = dst_y + row as i32;
+        if py < 0 || py >= height {
+            continue;
+        }
+        // The blocks partition the source, and the slot is a small fraction of
+        // the icon, so every block holds at least one row and column.
+        let sy0 = (row * src / side) as usize;
+        let sy1 = (((row + 1) * src / side).max(row * src / side + 1)).min(src) as usize;
+        for col in 0..side {
+            let px = dst_x + col as i32;
+            if px < 0 || px >= width {
+                continue;
+            }
+            let sx0 = (col * src / side) as usize;
+            let sx1 = (((col + 1) * src / side).max(col * src / side + 1)).min(src) as usize;
+            // Average premultiplied colour so fully transparent pixels do not
+            // darken the edge they are blended into.
+            let mut channels = [0u32; 3];
+            let mut alpha = 0u32;
+            let mut count = 0u32;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let index = (sy * src as usize + sx) * 4;
+                    let a = u32::from(icon.rgba[index + 3]);
+                    for (channel, value) in channels.iter_mut().zip(&icon.rgba[index..index + 3]) {
+                        *channel += u32::from(*value) * a;
+                    }
+                    alpha += a;
+                    count += 1;
+                }
+            }
+            if alpha == 0 {
+                continue;
+            }
+            let coverage = (alpha + count / 2) / count;
+            if coverage == 0 {
+                continue;
+            }
+            let index = (py as usize * width as usize + px as usize) * 4;
+            for (offset, channel) in channels.iter().enumerate() {
+                data[index + offset] =
+                    blend_u8(data[index + offset], (channel / alpha) as u8, coverage);
+            }
+        }
+    }
+}
+
 // Pixels are premultiplied RGBA over an opaque background (alpha stays 255),
 // so blending only the colour channels is correct.
 fn blend(dst: u8, src: u8, alpha: f32) -> u8 {
@@ -1096,6 +1183,21 @@ mod tests {
         assert!(
             painted,
             "the active close button must paint its glyph over the tab"
+        );
+    }
+
+    #[test]
+    fn the_active_tab_paints_its_app_icon() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 100.0);
+        renderer.draw_chrome(&layout, 12.0, 0, None);
+
+        // The icon slot starts 12 logical px into the tab and is 16 px square.
+        let icon_pixel = pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0);
+        assert_ne!(
+            icon_pixel, renderer.theme.tab_active,
+            "the icon slot is empty"
         );
     }
 
