@@ -214,14 +214,19 @@ impl FontSet {
             .sum()
     }
 
-    /// The first symbol face that maps the first character of `text`, with the
-    /// face id (`2..`) and the resolved glyph.
-    pub fn symbol_for(&self, text: &str) -> Option<(u8, ab_glyph::GlyphId)> {
-        let ch = text.chars().next()?;
+    /// The first symbol face that maps `ch`, with the face id (`2..`) and the
+    /// resolved glyph.
+    pub fn symbol_for_char(&self, ch: char) -> Option<(u8, ab_glyph::GlyphId)> {
         self.symbols.iter().enumerate().find_map(|(index, face)| {
             let glyph = face.font.glyph_id(ch);
             (glyph.0 != 0).then_some(((index + 2) as u8, glyph))
         })
+    }
+
+    /// The first symbol face that maps the first character of `text`, with the
+    /// face id (`2..`) and the resolved glyph.
+    pub fn symbol_for(&self, text: &str) -> Option<(u8, ab_glyph::GlyphId)> {
+        self.symbol_for_char(text.chars().next()?)
     }
 }
 

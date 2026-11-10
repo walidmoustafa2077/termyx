@@ -83,7 +83,7 @@ impl Theme {
             ],
             tab_bar: Rgb::new(12, 12, 12),
             tab_active: Rgb::new(31, 31, 31),
-            tab_hover: Rgb::new(42, 42, 42),
+            tab_hover: Rgb::new(26, 26, 26),
             tab_border: Rgb::new(43, 43, 43),
         }
     }
@@ -126,5 +126,18 @@ mod tests {
         assert_eq!(theme.indexed(231), Rgb::new(255, 255, 255));
         assert_eq!(theme.indexed(232), Rgb::new(8, 8, 8));
         assert_eq!(theme.indexed(255), Rgb::new(238, 238, 238));
+    }
+
+    #[test]
+    fn the_tab_palette_never_lets_hover_outshine_the_active_tab() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        assert_eq!(theme.tab_bar, Rgb::new(12, 12, 12));
+        assert_eq!(theme.tab_hover, Rgb::new(26, 26, 26));
+        assert_eq!(theme.tab_active, Rgb::new(31, 31, 31));
+        assert!(theme.tab_bar.r < theme.tab_hover.r);
+        assert!(
+            theme.tab_hover.r < theme.tab_active.r,
+            "a hovered inactive tab must stay darker than the active tab"
+        );
     }
 }

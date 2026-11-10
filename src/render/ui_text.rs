@@ -4,7 +4,7 @@
 //! handful of short strings in one direction, so it walks the characters and
 //! asks the font for each advance.
 
-use ab_glyph::{Font, ScaleFont};
+use ab_glyph::{Font, GlyphId, ScaleFont};
 
 use crate::fonts::{em_px_scale, UI_FONT_ID};
 use crate::render::Renderer;
@@ -31,25 +31,22 @@ pub fn draw_text(
     let mut glyphs = Vec::new();
     let mut pen = x;
     let baseline = {
-        let Some((font, _index)) = renderer.fonts_face(UI_FONT_ID) else {
-            return 0.0;
-        };
+        let (font, _index) = renderer.fonts_face(UI_FONT_ID);
         let scaled = font.as_scaled(em_px_scale(font, px));
         for ch in text.chars() {
-            let id = font.glyph_id(ch);
-            let advance = scaled.h_advance(id);
+            let (face, id, advance) = glyph_for(renderer, ch, px);
             if pen + advance > x + max_width {
                 break;
             }
-            glyphs.push((id, advance));
+            glyphs.push((face, id, advance));
             pen += advance;
         }
         y + scaled.ascent()
     };
 
     pen = x;
-    for (id, advance) in glyphs {
-        if let Some(slot) = renderer.cache_get(UI_FONT_ID, id, px.round() as u32) {
+    for (face, id, advance) in glyphs {
+        if let Some(slot) = renderer.cache_get(face, id, px.round() as u32) {
             renderer.blit(slot, pen, baseline, color);
         }
         pen += advance;
@@ -57,10 +54,49 @@ pub fn draw_text(
     pen - x
 }
 
+/// Resolves the face id, glyph, and advance (in `px` em units) that will
+/// rasterize `ch`.
+///
+/// The UI face does not map every symbol the chrome draws (`✕`, `⌄`), and
+/// painting those with it would produce `.notdef` boxes. When it has no glyph,
+/// the same symbol-face lookup the grid uses picks a fallback, so the measured
+/// advance and the painted ink come from one face.
+fn glyph_for(renderer: &Renderer, ch: char, px: f32) -> (u8, GlyphId, f32) {
+    let (ui_font, _index) = renderer.fonts_face(UI_FONT_ID);
+    let ui_glyph = ui_font.glyph_id(ch);
+    let (face, glyph) = if ui_glyph.0 == 0 {
+        renderer
+            .fonts()
+            .symbol_for_char(ch)
+            .unwrap_or((UI_FONT_ID, ui_glyph))
+    } else {
+        (UI_FONT_ID, ui_glyph)
+    };
+    let (font, _index) = renderer.fonts_face(face);
+    let scaled = font.as_scaled(em_px_scale(font, px));
+    (face, glyph, scaled.h_advance(glyph))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fonts::UI_SIZE_PX;
+
+    #[test]
+    fn chrome_glyphs_resolve_to_a_face_that_maps_them() {
+        let renderer = crate::render::tests::default_renderer();
+        for ch in ['+', '✕', '⌄'] {
+            let (face, glyph, advance) = glyph_for(&renderer, ch, UI_SIZE_PX);
+            let (font, _index) = renderer.fonts_face(face);
+            assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");
+            assert_ne!(
+                font.glyph_id(ch).0,
+                0,
+                "face {face} must rasterize {ch:?}, not .notdef"
+            );
+            assert!(advance > 0.0, "{ch:?} must have a positive advance");
+        }
+    }
 
     #[test]
     fn text_is_clipped_to_the_available_width() {

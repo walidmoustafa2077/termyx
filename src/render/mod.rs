@@ -14,7 +14,7 @@ use crate::selection::Selection;
 use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
-use crate::ui::tab_bar::TabBarLayout;
+use crate::ui::tab_bar::{TabBarLayout, TAB_STRIP_HEIGHT};
 use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
@@ -198,8 +198,8 @@ impl Renderer {
             return;
         }
         let foreground = self.theme.foreground;
-        // The whole reserved band, not only the tab rects: grid ink from the
-        // previous frame must not survive in the strip.
+        // The reserved band is chrome, not grid: it gets its own colour across
+        // the full width, whichever tabs happen to sit on it.
         self.fill_rect(0.0, 0.0, width, height_px, self.theme.tab_bar);
         for tab in &layout.tabs {
             let color = if tab.index == active {
@@ -215,19 +215,21 @@ impl Renderer {
 
         // Inset from the tab edge to the glyph slot, and from the strip top to
         // the top of the title's em box. The reserve on the right keeps the
-        // close button clear of the title.
-        const TITLE_LEFT: f32 = 34.0;
-        const TITLE_TOP: f32 = 9.0;
-        const CLOSE_RESERVE: f32 = 24.0;
-        const BUTTON_INSET_X: f32 = 9.0;
-        const BUTTON_TOP: f32 = 6.0;
-        let button_width = crate::ui::tab_bar::BUTTON_WIDTH;
+        // close button clear of the title. All of them are logical, so they
+        // scale with the strip just as the layout constants do.
+        let k = height_px / TAB_STRIP_HEIGHT;
+        let title_left = 34.0 * k;
+        let title_top = 9.0 * k;
+        let close_reserve = 24.0 * k;
+        let button_inset_x = 9.0 * k;
+        let button_top = 6.0 * k;
+        let button_width = layout.plus.w;
 
         ui_text::draw_text(
             self,
             "+",
-            layout.plus.x + BUTTON_INSET_X,
-            BUTTON_TOP,
+            layout.plus.x + button_inset_x,
+            button_top,
             ui_px,
             foreground,
             button_width,
@@ -235,8 +237,8 @@ impl Renderer {
         ui_text::draw_text(
             self,
             "⌄",
-            layout.chevron.x + BUTTON_INSET_X,
-            BUTTON_TOP,
+            layout.chevron.x + button_inset_x,
+            button_top,
             ui_px,
             foreground,
             button_width,
@@ -244,12 +246,12 @@ impl Renderer {
 
         for tab in &layout.tabs {
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
-            let title_width = (tab.rect.w - TITLE_LEFT - CLOSE_RESERVE).max(0.0);
+            let title_width = (tab.rect.w - title_left - close_reserve).max(0.0);
             ui_text::draw_text(
                 self,
                 title,
-                tab.rect.x + TITLE_LEFT,
-                TITLE_TOP,
+                tab.rect.x + title_left,
+                title_top,
                 ui_px,
                 foreground,
                 title_width,
@@ -258,8 +260,8 @@ impl Renderer {
                 ui_text::draw_text(
                     self,
                     "✕",
-                    tab.close.x + 3.0,
-                    tab.close.y + 1.0,
+                    tab.close.x + 3.0 * k,
+                    tab.close.y + 1.0 * k,
                     ui_px,
                     foreground,
                     tab.close.w,
@@ -532,8 +534,8 @@ impl Renderer {
     }
 
     /// Font data for a glyph-cache face id.
-    pub(crate) fn fonts_face(&self, id: u8) -> Option<(&ab_glyph::FontVec, u32)> {
-        Some(self.fonts.font_for_id(id))
+    pub(crate) fn fonts_face(&self, id: u8) -> (&ab_glyph::FontVec, u32) {
+        self.fonts.font_for_id(id)
     }
 
     pub(crate) fn cache_get(&mut self, font: u8, id: GlyphId, size_px: u32) -> Option<GlyphSlot> {
@@ -801,17 +803,82 @@ mod tests {
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
         let rect = layout.plus;
-        let background = renderer.theme.background;
+        let bar = renderer.theme.tab_bar;
         let border = renderer.theme.tab_border;
-        // The bottom rule runs through the button rect, so ignore anything the
-        // chrome palette already explains and look for glyph ink.
+        // The band behind the button is its own colour, not the terminal
+        // background; ignore the bottom rule that crosses the rect too.
         let painted = (0..rect.w as u32).any(|dx| {
             (0..rect.h as u32).any(|dy| {
                 let pixel = pixel_at(&renderer, rect.x + dx as f32, rect.y + dy as f32);
-                pixel != background && pixel != border
+                pixel != bar && pixel != border
             })
         });
         assert!(painted);
+    }
+
+    #[test]
+    fn the_strip_band_leaves_no_unpainted_pixel() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let sentinel = Rgb::new(255, 0, 255);
+        renderer.pixmap.fill(sentinel.to_tiny());
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(1));
+        for y in 0..layout.strip_h as u32 {
+            for x in 0..layout.width as u32 {
+                assert_ne!(
+                    pixel_at(&renderer, x as f32, y as f32),
+                    sentinel,
+                    "the strip must paint every pixel at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_strip_ends_with_a_border_rule() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        assert_eq!(
+            pixel_at(&renderer, 0.0, layout.strip_h - 1.0),
+            renderer.theme.tab_border
+        );
+    }
+
+    #[test]
+    fn a_hovered_inactive_tab_uses_the_hover_colour() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(1));
+        let tab = layout.tabs[1].rect;
+        // The right padding is clear of the title and, since tab 1 is not
+        // active, of any close glyph.
+        assert_eq!(
+            pixel_at(&renderer, tab.x + tab.w - 4.0, 16.0),
+            renderer.theme.tab_hover
+        );
+    }
+
+    #[test]
+    fn the_active_tab_close_box_paints_ink() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let close = layout.tabs[0].close;
+        let background = renderer.theme.tab_active;
+        let painted = (0..close.h as u32).any(|dy| {
+            (0..close.w as u32).any(|dx| {
+                pixel_at(&renderer, close.x + dx as f32, close.y + dy as f32) != background
+            })
+        });
+        assert!(
+            painted,
+            "the active close button must paint its glyph over the tab"
+        );
     }
 
     /// The pixmap pixel at a physical coordinate. Reads the pixmap rather than

@@ -61,19 +61,28 @@ pub struct TabBarLayout {
 }
 
 impl TabBarLayout {
-    /// `strip_h` is already physical: `App` scales the logical
-    /// [`TAB_STRIP_HEIGHT`] once and passes the result here, so this module
-    /// never multiplies by a DPI factor.
+    /// `strip_h` is already physical: `App` passes the height the renderer
+    /// reserved above the grid. Every constant below is logical
+    /// ([`TAB_STRIP_HEIGHT`] is the reference), so one factor
+    /// `k = strip_h / TAB_STRIP_HEIGHT` scales the whole layout and paint and
+    /// hit-testing stay aligned at any DPI.
     ///
     /// `width_of` measures a title at the UI font size, so a long title both
     /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip
     /// runs out of room.
     pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
         let strip_h = strip_h.max(0.0);
-        let available = (width - 2.0 * BUTTON_WIDTH).max(MIN_TAB_WIDTH);
+        let k = strip_h / TAB_STRIP_HEIGHT;
+        let max_tab = MAX_TAB_WIDTH * k;
+        let min_tab = MIN_TAB_WIDTH * k;
+        let button_width = BUTTON_WIDTH * k;
+        let close_size = CLOSE_SIZE * k;
+        let tab_padding = TAB_PADDING * k;
+        let title_size = TITLE_SIZE * k;
+        let available = (width - 2.0 * button_width).max(min_tab);
         let wanted: Vec<f32> = titles
             .iter()
-            .map(|title| (width_of(title) + TITLE_SIZE).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH))
+            .map(|title| (width_of(title) + title_size).clamp(min_tab, max_tab))
             .collect();
         let total: f32 = wanted.iter().sum();
         let scale = if total > available && total > 0.0 {
@@ -85,7 +94,7 @@ impl TabBarLayout {
         let mut tabs = Vec::with_capacity(titles.len());
         let mut x = 0.0;
         for (index, wanted) in wanted.iter().enumerate() {
-            let w = (wanted * scale).max(MIN_TAB_WIDTH.min(available));
+            let w = (wanted * scale).max(min_tab.min(available));
             let rect = Rect {
                 x,
                 y: 0.0,
@@ -93,10 +102,10 @@ impl TabBarLayout {
                 h: strip_h,
             };
             let close = Rect {
-                x: rect.x + rect.w - TAB_PADDING - CLOSE_SIZE,
-                y: (strip_h - CLOSE_SIZE) / 2.0,
-                w: CLOSE_SIZE,
-                h: CLOSE_SIZE,
+                x: rect.x + rect.w - tab_padding - close_size,
+                y: (strip_h - close_size) / 2.0,
+                w: close_size,
+                h: close_size,
             };
             tabs.push(TabRect { index, rect, close });
             x += w;
@@ -105,13 +114,13 @@ impl TabBarLayout {
         let plus = Rect {
             x,
             y: 0.0,
-            w: BUTTON_WIDTH,
+            w: button_width,
             h: strip_h,
         };
         let chevron = Rect {
-            x: plus.x + BUTTON_WIDTH,
+            x: plus.x + button_width,
             y: 0.0,
-            w: BUTTON_WIDTH,
+            w: button_width,
             h: strip_h,
         };
         Self {
@@ -199,11 +208,36 @@ mod tests {
         // The strip height is physical and comes from the caller; a scaled
         // display passes 40 here and both the rects and the hit test follow.
         let layout = TabBarLayout::new(1200.0, 40.0, &["one"], fixed);
+        let k = 40.0 / TAB_STRIP_HEIGHT;
         assert_eq!(layout.strip_h, 40.0);
         assert_eq!(layout.tabs[0].rect.y, 0.0);
         assert_eq!(layout.tabs[0].rect.h, 40.0);
         assert_eq!(layout.plus.h, 40.0);
+        assert_eq!(layout.plus.w, BUTTON_WIDTH * k);
+        assert_eq!(layout.tabs[0].close.w, CLOSE_SIZE * k);
         assert_eq!(layout.hit(10.0, 39.0), Some(TabHit::Tab(0)));
         assert_eq!(layout.hit(10.0, 40.0), None);
+    }
+
+    #[test]
+    fn geometry_scales_with_the_strip_height() {
+        let k = 48.0 / TAB_STRIP_HEIGHT;
+        let layout = TabBarLayout::new(1200.0, 48.0, &["one"], fixed);
+        let tab = &layout.tabs[0];
+        assert_eq!(layout.plus.w, BUTTON_WIDTH * k);
+        assert_eq!(layout.chevron.w, BUTTON_WIDTH * k);
+        assert_eq!(tab.close.w, CLOSE_SIZE * k);
+        assert_eq!(tab.close.h, CLOSE_SIZE * k);
+        assert_eq!(
+            tab.close.x,
+            tab.rect.x + tab.rect.w - TAB_PADDING * k - CLOSE_SIZE * k
+        );
+        assert_eq!(tab.close.y, (48.0 - CLOSE_SIZE * k) / 2.0);
+
+        // The title allowance scales with the em size, so the same label wants
+        // a wider tab in a taller strip.
+        let short = TabBarLayout::new(1200.0, 32.0, &["x"], fixed);
+        let tall = TabBarLayout::new(1200.0, 48.0, &["x"], fixed);
+        assert!(tall.tabs[0].rect.w > short.tabs[0].rect.w);
     }
 }

@@ -129,14 +129,15 @@ impl App {
     /// Rebuilds the strip geometry. Called after a resize and after opening a
     /// tab, because a tab's width depends on every title in the strip.
     ///
-    /// Both inputs are physical: the window width and the strip height come
-    /// from `tab_strip_px`, and titles are measured at the already-scaled
-    /// chrome em size.
+    /// Both inputs are physical: the window width, and the strip height the
+    /// renderer actually reserved above the grid (`top_inset`). Taking the
+    /// height from the field the grid uses keeps the painted band and the
+    /// reserved inset the same number after a DPI change.
     fn rebuild_layout(&mut self) {
-        let strip_h = self.tab_strip_px() as f32;
         let Some(renderer) = self.renderer.as_ref() else {
             return;
         };
+        let strip_h = renderer.top_inset() as f32;
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -1016,24 +1017,23 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Title { session, title } => {
                 // The label belongs to its tab whether or not that tab is on
-                // screen; only the active tab also names the window.
+                // screen; only the active tab also names the window and
+                // changes a visible pixel, so only that case repaints.
                 if route_title(&mut self.tabs, session, &title) {
                     self.apply_title(&title);
-                }
-                // Every tab's width depends on every label, including one on a
-                // background tab.
-                self.rebuild_layout();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                    self.rebuild_layout();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             UserEvent::ResetTitle { session } => {
                 if route_title(&mut self.tabs, session, "") {
                     self.apply_title("");
-                }
-                self.rebuild_layout();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                    self.rebuild_layout();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             UserEvent::ClipboardStore(text) => {
