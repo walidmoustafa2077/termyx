@@ -85,12 +85,16 @@ impl TabSlots {
     }
 
     /// Sets the title the slot with `id` shows, clearing it when `title` is
-    /// blank.
-    pub fn set_title(&mut self, id: SessionId, title: &str) {
+    /// blank. Returns whether the stored label actually changed, so a repeat
+    /// of the same title costs no repaint.
+    pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
         let Some(index) = self.ids.iter().position(|slot| *slot == id) else {
-            return;
+            return false;
         };
-        self.titles[index] = clean_title(title);
+        let next = clean_title(title);
+        let changed = self.titles[index] != next;
+        self.titles[index] = next;
+        changed
     }
 
     /// The labels of every slot, with the fallback for untitled ones.
@@ -203,8 +207,8 @@ impl TabSet {
         self.sessions.iter_mut().find(|session| session.id == id)
     }
 
-    pub fn set_title(&mut self, id: SessionId, title: &str) {
-        self.slots.set_title(id, title);
+    pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
+        self.slots.set_title(id, title)
     }
 }
 

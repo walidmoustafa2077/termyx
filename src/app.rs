@@ -1016,11 +1016,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Title { session, title } => {
-                // The label belongs to its tab whether or not that tab is on
-                // screen; only the active tab also names the window and
-                // changes a visible pixel, so only that case repaints.
-                if route_title(&mut self.tabs, session, &title) {
+                let (label_changed, window_title) = route_title(&mut self.tabs, session, &title);
+                if window_title {
                     self.apply_title(&title);
+                }
+                // The strip paints every tab's label, so a background retitle
+                // also needs a fresh layout and a repaint; an unchanged label
+                // needs neither.
+                if label_changed {
                     self.rebuild_layout();
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -1028,8 +1031,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ResetTitle { session } => {
-                if route_title(&mut self.tabs, session, "") {
+                let (label_changed, window_title) = route_title(&mut self.tabs, session, "");
+                if window_title {
                     self.apply_title("");
+                }
+                if label_changed {
                     self.rebuild_layout();
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -1172,11 +1178,14 @@ fn feed_session(tabs: &mut TabSet, session: SessionId, bytes: &[u8]) -> FeedOutc
 /// Routes one title event to the tab it names.
 ///
 /// The label always belongs to that tab, on screen or not; an id no session
-/// carries changes nothing. Returns whether the caller must also apply the
-/// title to the window, which is true only for the tab on screen.
-fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> bool {
-    tabs.set_title(session, title);
-    tabs.active().is_some_and(|active| active.id == session)
+/// carries changes nothing. Returns `(label_changed, window_title)`: whether
+/// the stored label actually changed (the caller rebuilds and repaints only
+/// then), and whether the caller must also apply the title to the window,
+/// which is true only for the tab on screen.
+fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> (bool, bool) {
+    let label_changed = tabs.set_title(session, title);
+    let window_title = tabs.active().is_some_and(|active| active.id == session);
+    (label_changed, window_title)
 }
 
 fn grid_size(
@@ -1806,8 +1815,8 @@ mod tests {
     #[test]
     fn a_background_title_labels_its_tab_but_not_the_window() {
         // `App` needs a live event loop, so the routing decision is pinned
-        // through `route_title`: its return value is exactly the condition
-        // `user_event` uses to rename the window.
+        // through `route_title`: its first flag repaints the strip and its
+        // second renames the window.
         let mut tabs = TabSet::new();
         let background = tabs.next_id();
         let shown = tabs.next_id();
@@ -1816,24 +1825,54 @@ mod tests {
 
         // A background tab's label lands on that tab and only that tab, and
         // the window keeps its name.
-        assert!(!route_title(&mut tabs, background, "build"));
+        let (changed, window) = route_title(&mut tabs, background, "build");
+        assert!(changed, "a new background label must repaint the strip");
+        assert!(!window);
         assert_eq!(tabs.titles(), vec!["build", FALLBACK_TITLE]);
 
         // The tab on screen names both its label and the window.
-        assert!(route_title(&mut tabs, shown, "tests"));
+        let (changed, window) = route_title(&mut tabs, shown, "tests");
+        assert!(changed);
+        assert!(window);
         assert_eq!(tabs.titles(), vec!["build", "tests"]);
 
         // Resetting either tab clears just that label back to the fallback;
         // only the tab on screen may reset the window name.
-        assert!(!route_title(&mut tabs, background, ""));
+        let (changed, window) = route_title(&mut tabs, background, "");
+        assert!(changed);
+        assert!(!window);
         assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, "tests"]);
-        assert!(route_title(&mut tabs, shown, ""));
+        let (changed, window) = route_title(&mut tabs, shown, "");
+        assert!(changed);
+        assert!(window);
         assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, FALLBACK_TITLE]);
 
         // A late title from a closed tab changes no label and never names the
         // window.
         let closed = tabs.next_id();
-        assert!(!route_title(&mut tabs, closed, "ghost"));
+        let (changed, window) = route_title(&mut tabs, closed, "ghost");
+        assert!(!changed);
+        assert!(!window);
         assert_eq!(tabs.titles(), vec![FALLBACK_TITLE, FALLBACK_TITLE]);
+    }
+
+    #[test]
+    fn a_repeated_title_costs_nothing_but_a_new_one_repaints() {
+        let mut tabs = TabSet::new();
+        let background = tabs.next_id();
+        let shown = tabs.next_id();
+        tabs.push(test_session(background));
+        tabs.push(test_session(shown));
+
+        let (changed, window) = route_title(&mut tabs, background, "build");
+        assert!(
+            changed,
+            "a background tab's new label must request a repaint"
+        );
+        assert!(!window, "a background tab must not rename the window");
+
+        let (changed, window) = route_title(&mut tabs, background, "build");
+        assert!(!changed, "a repeated label must cost no rebuild or repaint");
+        assert!(!window);
     }
 }
