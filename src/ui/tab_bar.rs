@@ -3,9 +3,17 @@
 
 /// Height of the strip in logical pixels; the terminal grid starts below it.
 ///
-/// 34 logical px is Windows Terminal's tab strip at 100 %, the band its 14 px
-/// tab text sits in.
-pub const TAB_STRIP_HEIGHT: f32 = 34.0;
+/// Windows Terminal 1.24 at 100 % paints a 39 px strip plus a 1 px rule, 40 in
+/// total, and its tab text is 14 px. This constant is the 100 % reference for
+/// the whole layout scale `k = strip_h / TAB_STRIP_HEIGHT`: changing it does
+/// not scale the tab width, the caption width, or the font, it only makes the
+/// band itself taller.
+pub const TAB_STRIP_HEIGHT: f32 = 40.0;
+/// Strip px WT leaves above a tab.
+///
+/// The tab is 32 px tall and floats on the 40 px band, so 8 px of strip shows
+/// above it and the tab reads as a rounded card rather than a full-height cell.
+pub const TAB_TOP_INSET: f32 = 8.0;
 /// Widest a single tab grows; the equal share is capped here.
 pub const MAX_TAB_WIDTH: f32 = 240.0;
 /// The width below which the strip counts as crowded, pinned by the tests.
@@ -60,7 +68,12 @@ impl Rect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabRect {
     pub index: usize,
+    /// The full-band cell, `y = 0`, `h = strip_h`, that `hit` claims so a
+    /// click in the 8 px of strip above a tab still selects that tab.
     pub rect: Rect,
+    /// The painted tab body, inset by [`TAB_TOP_INSET`] so it floats on the
+    /// strip; everything the tab draws is positioned relative to this.
+    pub body: Rect,
     pub close: Rect,
 }
 
@@ -160,6 +173,15 @@ impl TabBarLayout {
                 w: tab_width,
                 h: strip_h,
             };
+            // WT floats a 32 px tab on its 40 px band: 8 logical px of strip
+            // stay above it. The body, not `rect`, is what the painter fills
+            // and strokes, and the close box centres on it.
+            let body = Rect {
+                x: rect.x,
+                y: TAB_TOP_INSET * k,
+                w: rect.w,
+                h: (strip_h - TAB_TOP_INSET * k).max(0.0),
+            };
             // A tab narrower than its padding plus the glyph cannot host a
             // close box inside itself: giving it one would bleed into the
             // neighbour, and `hit` tests every close box before any body, so a
@@ -172,11 +194,18 @@ impl TabBarLayout {
             };
             let close = Rect {
                 x: rect.x + rect.w - tab_padding - close_size,
-                y: (strip_h - close_size) / 2.0,
+                // Centred on the tab body, not the strip: WT's `✕` sits in
+                // the middle of the visible card.
+                y: body.y + (body.h - close_size) / 2.0,
                 w: close_w,
                 h: close_size,
             };
-            tabs.push(TabRect { index, rect, close });
+            tabs.push(TabRect {
+                index,
+                rect,
+                body,
+                close,
+            });
             x += tab_width;
         }
 
@@ -485,17 +514,43 @@ mod tests {
     #[test]
     fn the_strip_is_a_single_row_of_the_requested_height() {
         // The strip height is physical and comes from the caller; a scaled
-        // display passes 40 here and both the rects and the hit test follow.
-        let layout = TabBarLayout::new(1200.0, 40.0, &["one"]);
-        let k = 40.0 / TAB_STRIP_HEIGHT;
-        assert_eq!(layout.strip_h, 40.0);
+        // display passes 44 here and both the rects and the hit test follow.
+        let layout = TabBarLayout::new(1200.0, 44.0, &["one"]);
+        let k = 44.0 / TAB_STRIP_HEIGHT;
+        assert_eq!(layout.strip_h, 44.0);
         assert_eq!(layout.tabs[0].rect.y, 0.0);
-        assert_eq!(layout.tabs[0].rect.h, 40.0);
-        assert_eq!(layout.plus.h, 40.0);
+        assert_eq!(layout.tabs[0].rect.h, 44.0);
+        assert_eq!(layout.plus.h, 44.0);
         assert_eq!(layout.plus.w, BUTTON_WIDTH * k);
         assert_eq!(layout.tabs[0].close.w, CLOSE_SIZE * k);
-        assert_eq!(layout.hit(10.0, 39.0), Some(TabHit::Tab(0)));
-        assert_eq!(layout.hit(10.0, 40.0), None);
+        assert_eq!(layout.hit(10.0, 43.0), Some(TabHit::Tab(0)));
+        assert_eq!(layout.hit(10.0, 44.0), None);
+    }
+
+    #[test]
+    fn a_tab_floats_on_the_band_with_an_eight_pixel_inset() {
+        // At 100 % the tab body is 32 px tall on the 40 px band, leaving 8 px
+        // of strip above it; `rect` still claims the full band for hit testing.
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        let tab = &layout.tabs[0];
+        assert_eq!(tab.rect.y, 0.0);
+        assert_eq!(tab.rect.h, 40.0);
+        assert_eq!(tab.body.y, 8.0);
+        assert_eq!(tab.body.h, 32.0);
+        assert_eq!(tab.body.w, tab.rect.w);
+    }
+
+    #[test]
+    fn a_click_in_the_strip_above_a_tab_still_selects_it() {
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        // 3 px down is strip above the tab body, but inside the tab's full-band
+        // `rect`, so it selects the tab rather than falling through.
+        assert_eq!(
+            layout.hit(layout.tabs[0].rect.x + 4.0, 3.0),
+            Some(TabHit::Tab(0))
+        );
+        // The `+` button's own band above its glyph is still the button.
+        assert_eq!(layout.hit(layout.plus.x + 4.0, 3.0), Some(TabHit::Plus));
     }
 
     #[test]
@@ -511,7 +566,19 @@ mod tests {
             tab.close.x,
             tab.rect.x + tab.rect.w - TAB_PADDING * k - CLOSE_SIZE * k
         );
-        assert_eq!(tab.close.y, (48.0 - CLOSE_SIZE * k) / 2.0);
+        assert_eq!(tab.body.y, TAB_TOP_INSET * k);
+        assert_eq!(tab.body.h, 48.0 - TAB_TOP_INSET * k);
+        // The close box centres on the body, so it stays visually in the middle
+        // of the card the user sees.
+        assert_eq!(
+            tab.close.y,
+            tab.body.y + (tab.body.h - CLOSE_SIZE * k) / 2.0
+        );
+        assert_eq!(
+            tab.close.y + tab.close.h / 2.0,
+            tab.body.y + tab.body.h / 2.0,
+            "the close box's vertical centre must equal the body's centre"
+        );
 
         // The cap scales with the strip height, so the same strip gives a
         // wider tab on a taller (higher-DPI) window.

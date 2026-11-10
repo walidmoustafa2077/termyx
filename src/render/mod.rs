@@ -276,36 +276,36 @@ impl Renderer {
     /// One fill per tab, then the active tab's outline, then the backdrop
     /// behind a hovered close button.
     ///
-    /// Only the tab the window shows is outlined: an inactive tab keeps the
-    /// strip's flat fill, so the raised tab is the only one with an edge and
-    /// no divider stands between the last tab and the `+` button. The stroke
-    /// runs after every fill, or a later tab's fill would cover its
-    /// neighbour's right edge.
+    /// The tab body floats on the strip: WT insets it by 8 px at the top and
+    /// rounds its top corners, so the band shows above it. Only the active tab
+    /// gets a fill and an outline — its fill is the terminal background, which
+    /// makes it read as a cut-out — while an inactive tab paints nothing at
+    /// all and lets the strip show through, exactly as WT does.
     fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
         let hovered = match hover {
             Some(StripHover::Tab(index)) => Some(index),
             _ => None,
         };
-        let radius = 8.0 * layout.strip_h / TAB_STRIP_HEIGHT;
+        let radius = 6.0 * layout.strip_h / TAB_STRIP_HEIGHT;
         for tab in &layout.tabs {
             let color = if tab.index == active {
                 self.theme.tab_active
             } else if hovered == Some(tab.index) {
                 self.theme.tab_hover
             } else {
-                self.theme.tab_bar
+                continue;
             };
-            self.fill_round_top(tab.rect, radius.min(tab.rect.w / 2.0), color);
+            self.fill_round_top(tab.body, radius.min(tab.body.w / 2.0), color);
         }
         if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
-            self.stroke_tab(tab.rect, radius.min(tab.rect.w / 2.0));
+            self.stroke_tab(tab.body, radius.min(tab.body.w / 2.0));
         }
         self.draw_close_backdrop(layout, hovered);
     }
 
-    /// The 1 px `#2b2b2b` outline of the active tab: its top edge and both
+    /// The 1 px `#292929` outline of the active tab: its top edge and both
     /// sides. The bottom stays open so the tab meets the terminal flush, which
-    /// is what makes it read as a raised tab.
+    /// is what makes it read as a cut-out rather than a card.
     fn stroke_tab(&mut self, rect: Rect, radius: f32) {
         let color = self.theme.tab_border;
         self.fill_rect(
@@ -363,8 +363,13 @@ impl Renderer {
         }
     }
 
-    /// The `+` and `⌄` glyphs, centred in their buttons. A hovered button is
-    /// filled with the strip's `#1f1f1f` tone before its glyph goes down.
+    /// The `+` and `⌄` glyphs, centred in their buttons, with WT's 1 px
+    /// divider at each button's left edge.
+    ///
+    /// WT draws `#3D3D3D` before `+` and a slightly darker `#2D2D2D` before
+    /// `⌄`; here that is `tab_separator` and `tab_border`, three units apart and
+    /// visually indistinguishable. The dividers go down after the hover fill so
+    /// a hovered button keeps its edge.
     fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32, hover: Option<StripHover>) {
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let foreground = self.theme.foreground;
@@ -374,9 +379,16 @@ impl Renderer {
         ];
         for (glyph, rect, target) in buttons {
             if hover == Some(target) {
-                self.fill_round_top(rect, 4.0 * k, self.theme.tab_active);
+                self.fill_round_top(rect, 4.0 * k, self.theme.tab_hover);
             }
             ui_text::draw_text_centred(self, glyph, rect, ui_px, foreground);
+        }
+        let dividers = [
+            (layout.plus.x, self.theme.tab_separator),
+            (layout.chevron.x, self.theme.tab_border),
+        ];
+        for (x, color) in dividers {
+            self.fill_rect(x, 0.0, 1.0, layout.strip_h, color);
         }
     }
 
@@ -434,7 +446,6 @@ impl Renderer {
         let tab_padding = TAB_PADDING * k;
         let icon_size = TAB_ICON_SIZE * k;
         let title_left = (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
-        let title_top = 9.0 * k;
         for tab in &layout.tabs {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
@@ -446,7 +457,9 @@ impl Renderer {
                 .filter(|_| tab.rect.w >= tab_padding + icon_size);
             if let Some(icon) = icon {
                 let icon_x = tab.rect.x + tab_padding;
-                let icon_y = (layout.strip_h - icon_size) / 2.0;
+                // Content is positioned on the tab body, not the band: WT's
+                // icon sits centred in its 32 px card.
+                let icon_y = tab.body.y + (tab.body.h - icon_size) / 2.0;
                 blit_tab_icon(&mut self.pixmap, icon, icon_x, icon_y, icon_size);
             }
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
@@ -458,6 +471,9 @@ impl Renderer {
             } else {
                 self.theme.tab_title_inactive
             };
+            // 9 px below the body's top edge puts the 14 px ink on the line WT
+            // measured at y=20..29 inside the tab body.
+            let title_top = tab.body.y + 9.0 * k;
             ui_text::draw_text_ellipsis(
                 self,
                 title,
@@ -474,7 +490,7 @@ impl Renderer {
                     "✕",
                     tab.close,
                     CLOSE_GLYPH_SIZE * k,
-                    self.theme.tab_title,
+                    self.theme.tab_close,
                 );
             }
         }
@@ -1113,15 +1129,18 @@ mod tests {
     }
 
     #[test]
-    fn the_active_tab_is_lighter_than_its_neighbour() {
+    fn the_active_tab_is_the_body_colour_while_its_neighbour_is_the_band() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
-        let active = pixel_at(&renderer, layout.tabs[0].rect.x + 4.0, 16.0);
-        let inactive = pixel_at(&renderer, layout.tabs[1].rect.x + 4.0, 16.0);
+        // Both probes sit inside the tab body, below the rounded top corners.
+        let active = pixel_at(&renderer, layout.tabs[0].body.x + 4.0, 16.0);
+        let inactive = pixel_at(&renderer, layout.tabs[1].body.x + 4.0, 16.0);
+        assert_eq!(active, renderer.theme.tab_active);
+        assert_eq!(inactive, renderer.theme.tab_bar);
         assert_ne!(active, inactive);
     }
 
@@ -1136,11 +1155,11 @@ mod tests {
 
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let title_rect = |index: usize| {
-            let tab = layout.tabs[index].rect;
+            let tab = &layout.tabs[index];
             crate::ui::tab_bar::Rect {
-                x: tab.x + 34.0 * k,
-                y: 9.0 * k,
-                w: (tab.w - 34.0 * k - 24.0 * k).max(0.0),
+                x: tab.body.x + 34.0 * k,
+                y: tab.body.y + 9.0 * k,
+                w: (tab.body.w - 34.0 * k - 24.0 * k).max(0.0),
                 h: 16.0 * k,
             }
         };
@@ -1252,12 +1271,14 @@ mod tests {
         let rect = layout.plus;
         let bar = renderer.theme.tab_bar;
         let border = renderer.theme.tab_border;
-        // The band behind the button is its own colour, not the terminal
-        // background; ignore the bottom rule that crosses the rect too.
+        let separator = renderer.theme.tab_separator;
+        // The band behind the button is its own colour, and the rect carries a
+        // divider and the bottom rule; ignore all three so only glyph ink can
+        // make the assertion pass.
         let painted = (0..rect.w as u32).any(|dx| {
             (0..rect.h as u32).any(|dy| {
                 let pixel = pixel_at(&renderer, rect.x + dx as f32, rect.y + dy as f32);
-                pixel != bar && pixel != border
+                pixel != bar && pixel != border && pixel != separator
             })
         });
         assert!(painted);
@@ -1358,7 +1379,7 @@ mod tests {
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        let tab = layout.tabs[0].rect;
+        let tab = layout.tabs[0].body;
         // The reference tab is raised: top and both sides are stroked, but its
         // bottom edge stays the tab's own fill so it merges into the terminal.
         assert_eq!(
@@ -1422,8 +1443,9 @@ mod tests {
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        // Both tabs are inactive; Windows Terminal paints no rule between the
-        // strip and the `+` button, so that column is plain band.
+        // Both tabs are inactive; WT puts a divider on the `+` button's own left
+        // edge, not in the band between the last tab and the button, so this
+        // column is plain band.
         assert_eq!(
             pixel_at(&renderer, layout.plus.x - 1.0, 16.0),
             renderer.theme.tab_bar
@@ -1602,7 +1624,7 @@ mod tests {
             "no backdrop may paint where there is no close target"
         );
         assert_eq!(
-            count_color(&renderer, tab, renderer.theme.tab_title),
+            count_color(&renderer, tab, renderer.theme.tab_close),
             0,
             "no glyph may paint where there is no close target"
         );
@@ -1744,9 +1766,12 @@ mod tests {
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        // The band rule crosses the button's last row; it is chrome, not glyph
-        // ink, so measure the button without it.
+        // The band rule crosses the button's last row and the divider runs down
+        // its first column; both are chrome, not glyph ink, so measure the
+        // button without them.
         let button = crate::ui::tab_bar::Rect {
+            x: layout.plus.x + 1.0,
+            w: layout.plus.w - 1.0,
             h: layout.plus.h - 1.0,
             ..layout.plus
         };
@@ -1760,6 +1785,8 @@ mod tests {
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let button = crate::ui::tab_bar::Rect {
+            x: layout.chevron.x + 1.0,
+            w: layout.chevron.w - 1.0,
             h: layout.chevron.h - 1.0,
             ..layout.chevron
         };
@@ -1820,16 +1847,25 @@ mod tests {
     }
 
     #[test]
-    fn the_close_glyph_uses_the_active_title_colour() {
+    fn the_close_glyph_uses_the_tab_close_grey() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
+        let peak = brightest_red(&renderer, close);
+        // WT paints the `✕` grey, never white. The peak may fall a little short
+        // of the token if no pixel reaches full coverage, so allow a few units
+        // below it but never above.
         assert!(
-            brightest_red(&renderer, close) > renderer.theme.foreground.r,
-            "the ✕ must share the active title's white, not the grid's #cccccc"
+            peak <= renderer.theme.tab_close.r + 1,
+            "the ✕ must not be brighter than the tab-close grey, got {peak}"
         );
+        assert!(
+            peak > renderer.theme.tab_bar.r,
+            "the ✕ must still stand out on the #0C0C0C tab, got {peak}"
+        );
+        assert!(renderer.theme.tab_close.r < renderer.theme.tab_title.r);
     }
 
     #[test]
@@ -1841,7 +1877,7 @@ mod tests {
         // The second tab is the one the window shows, so the outline follows
         // the active index rather than the leftmost tab.
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 1, None);
-        let tab = layout.tabs[1].rect;
+        let tab = layout.tabs[1].body;
         let border = renderer.theme.tab_border;
         assert_eq!(
             pixel_at(&renderer, tab.x + 50.0, tab.y),
@@ -1867,7 +1903,7 @@ mod tests {
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        let tab = layout.tabs[0].rect;
+        let tab = layout.tabs[0].body;
         // The corner falls outside the rounded fill, so the band shows through
         // instead of the active tab's own colour.
         assert_eq!(
@@ -1875,6 +1911,52 @@ mod tests {
             renderer.theme.tab_bar,
             "the top-left corner must be rounded away"
         );
+    }
+
+    #[test]
+    fn the_strip_matches_the_windows_terminal_measurements() {
+        let mut renderer = default_renderer();
+        renderer.resize(1200, 120);
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let theme = &renderer.theme;
+        let body = layout.tabs[0].body;
+        let centre_x = body.x + body.w / 2.0;
+
+        // (a) The band right of the tab is the strip fill, not the body colour.
+        assert_eq!(pixel_at(&renderer, 600.0, 10.0), theme.tab_bar);
+
+        // (b) The active tab is the terminal background: a cut-out in the band.
+        assert_eq!(
+            pixel_at(&renderer, centre_x, body.y + body.h / 2.0),
+            theme.tab_active
+        );
+        assert_eq!(theme.tab_active, theme.background);
+
+        // (c) 8 px of strip sit above the tab, so y=2 is band and the first row
+        // of the body is the tab colour.
+        assert_eq!(pixel_at(&renderer, centre_x, 2.0), theme.tab_bar);
+        assert_eq!(
+            pixel_at(&renderer, centre_x, body.y + 1.0),
+            theme.tab_active
+        );
+
+        // (d) The bounding box's top-left corner is rounded, so the band shows
+        // there; 10 px along the same row is the outline.
+        assert_eq!(pixel_at(&renderer, body.x, body.y), theme.tab_bar);
+        assert_eq!(pixel_at(&renderer, body.x + 10.0, body.y), theme.tab_border);
+
+        // (e) WT's 1 px dividers lift the buttons off the band.
+        assert_eq!(
+            pixel_at(&renderer, layout.plus.x, 10.0),
+            theme.tab_separator
+        );
+        assert_ne!(pixel_at(&renderer, layout.plus.x, 10.0), theme.tab_bar);
+        assert_eq!(
+            pixel_at(&renderer, layout.chevron.x, 10.0),
+            theme.tab_border
+        );
+        assert_ne!(pixel_at(&renderer, layout.chevron.x, 10.0), theme.tab_bar);
     }
 
     #[test]
@@ -1906,15 +1988,16 @@ mod tests {
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
-        // The icon slot starts 12 logical px into the tab and is 16 px square.
-        let icon_pixel = pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0);
+        // The icon slot starts 12 logical px into the tab and is 16 px square,
+        // centred in the 32 px body, so its middle row is y=24.
+        let icon_pixel = pixel_at(&renderer, layout.tabs[0].body.x + 20.0, 24.0);
         assert_ne!(
             icon_pixel, renderer.theme.tab_active,
             "the icon slot is empty"
         );
         // The inactive tab stamps the same icon over its own fill.
         assert_ne!(
-            pixel_at(&renderer, layout.tabs[1].rect.x + 20.0, 16.0),
+            pixel_at(&renderer, layout.tabs[1].body.x + 20.0, 24.0),
             renderer.theme.tab_bar,
             "every tab, not only the active one, carries the icon"
         );

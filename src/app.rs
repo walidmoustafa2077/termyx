@@ -3467,12 +3467,12 @@ mod tests {
 
     #[test]
     fn the_tab_strip_scales_once_with_the_window() {
-        // The strip is 34 logical pixels. `strip_px` is the only place that
+        // The strip is 40 logical pixels. `strip_px` is the only place that
         // converts, because the renderer, the surface, and the mouse
         // coordinates all work in physical pixels.
-        assert_eq!(strip_px(1.0), 34);
-        assert_eq!(strip_px(1.25), 43);
-        assert_eq!(strip_px(1.5), 51);
+        assert_eq!(strip_px(1.0), 40);
+        assert_eq!(strip_px(1.25), 50);
+        assert_eq!(strip_px(1.5), 60);
     }
 
     #[test]
