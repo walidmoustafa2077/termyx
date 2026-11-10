@@ -286,8 +286,9 @@ mod tests {
     fn hit_test_finds_tab_close_plus_and_chevron() {
         let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two"], fixed);
         let first = layout.tabs[0].rect;
+        // the top RESIZE_BORDER px is the window's resize border
         assert_eq!(
-            layout.hit(first.x + 4.0, first.y + 4.0),
+            layout.hit(first.x + 4.0, first.y + 8.0),
             Some(TabHit::Tab(0))
         );
         let close = layout.tabs[0].close;
@@ -323,21 +324,44 @@ mod tests {
 
     #[test]
     fn tabs_stop_before_the_caption_buttons() {
-        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], |_| 300.0);
+        // Ten tabs whose fair share is far below `MIN_TAB_WIDTH`: with the
+        // 138 px caption reservation the tab row ends at `width - 202`, so the
+        // `+`/`⌄` pair and the last tab stay clear of the controls. Without the
+        // reservation the row would reach `width - 64` and paint under them.
+        let titles: Vec<&str> = (0..10).map(|_| "one").collect();
+        let layout = TabBarLayout::new(1200.0, 32.0, &titles, |_| 100.0);
         let last = layout.tabs.last().expect("a tab");
         assert!(layout.plus.x + layout.plus.w <= layout.minimize.x);
-        assert!(last.rect.x + last.rect.w <= layout.plus.x);
+        assert!(layout.chevron.x + layout.chevron.w <= layout.minimize.x);
+        assert!(last.rect.x + last.rect.w <= layout.minimize.x);
     }
 
     #[test]
     fn the_caption_buttons_stay_reachable_on_a_crowded_strip() {
+        // 30 tabs of 32 px each fill exactly the 960 px left after the 138 px
+        // caption and 64 px button reservations at this width, so the painted
+        // boundary is exact and not just ordered.
         let titles: Vec<&str> = (0..30).map(|_| "a long shell title").collect();
-        let layout = TabBarLayout::new(1200.0, 32.0, &titles, |_| 120.0);
-        for rect in [layout.minimize, layout.maximize, layout.close_window] {
+        let layout = TabBarLayout::new(1162.0, 32.0, &titles, |_| 120.0);
+        assert_eq!(
+            layout.chevron.x + layout.chevron.w,
+            layout.minimize.x,
+            "the reserved `+`/`⌄` pair must end exactly where the controls begin"
+        );
+        assert!(layout.plus.x + layout.plus.w <= layout.minimize.x);
+        let last = layout.tabs.last().expect("a tab");
+        assert!(last.rect.x + last.rect.w <= layout.minimize.x);
+
+        let controls = [
+            (layout.minimize, TabHit::Minimize),
+            (layout.maximize, TabHit::Maximize),
+            (layout.close_window, TabHit::CloseWindow),
+        ];
+        for (rect, expected) in controls {
             assert!(rect.x >= 0.0 && rect.x + rect.w <= layout.width);
             // 8 px down clears the 6 px top resize border, which starts a
             // resize rather than a click; the button itself is full height.
-            assert!(layout.hit(rect.x + 8.0, rect.y + 8.0).is_some());
+            assert_eq!(layout.hit(rect.x + 8.0, rect.y + 8.0), Some(expected));
         }
     }
 
@@ -355,11 +379,13 @@ mod tests {
         );
         assert!(layout.plus.x + layout.plus.w <= layout.width);
         assert!(layout.chevron.x + layout.chevron.w <= layout.width);
+        // the top RESIZE_BORDER px is the window's resize border
         assert_eq!(
             layout.hit(layout.plus.x + 4.0, 10.0),
             Some(TabHit::Plus),
             "the plus button must still be clickable"
         );
+        // the top RESIZE_BORDER px is the window's resize border
         assert_eq!(
             layout.hit(layout.chevron.x + 4.0, 10.0),
             Some(TabHit::Chevron),

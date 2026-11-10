@@ -246,7 +246,13 @@ impl App {
             // The strip is the title bar, so no caption row may sit above it.
             // The title stays for the taskbar and Alt+Tab.
             .with_decorations(false)
-            .with_inner_size(LogicalSize::new(width, height));
+            .with_inner_size(LogicalSize::new(width, height))
+            // Below this width the caption controls (3 × 46) and the `+`/`⌄`
+            // pair (2 × 32) cannot all fit: the caption rects would overlap the
+            // painted buttons and `hit` would return a control for a click on
+            // the chevron. Floor the window at 320 × 200 so the strip always
+            // has the roughly 202 logical px those five controls need.
+            .with_min_inner_size(LogicalSize::new(320.0, 200.0));
         let attributes = match icon::window_icon() {
             Ok(icon) => attributes.with_window_icon(Some(icon)),
             Err(err) => {
@@ -782,7 +788,8 @@ impl App {
             }
             return;
         }
-        // A tab body, its `✕`, and the two buttons all highlight.
+        // A tab body, its `✕`, the two buttons and the three caption controls
+        // all highlight.
         let hover = strip_hover(self.strip_action_at(x, y));
         self.set_strip_hover(hover);
         // Keep the scrollbar expanded for the whole drag, even when the pointer
@@ -953,8 +960,10 @@ impl App {
                         // The dropdown is the strip's own layer; the click is
                         // still chrome's, so it must not reach the terminal.
                         StripAction::OpenMenu => self.toggle_menu(),
-                        // The window moves off the pointer, so nothing is
-                        // hovered any more; the redraw below paints it away.
+                        // The window moves out from under the pointer, but a
+                        // later `rebuild_layout` re-derives the hover from the
+                        // stale cursor position; this control stays highlighted
+                        // until the next `CursorMoved` corrects it.
                         StripAction::MinimizeWindow => {
                             if let Some(window) = &self.window {
                                 window.set_minimized(true);
@@ -2551,6 +2560,22 @@ mod tests {
         assert_eq!(
             strip_action(Some(TabHit::CloseWindow)),
             StripAction::CloseWindow
+        );
+    }
+
+    #[test]
+    fn the_caption_actions_map_to_their_hover_targets() {
+        assert_eq!(
+            strip_hover(Some(StripAction::MinimizeWindow)),
+            Some(StripHover::Minimize)
+        );
+        assert_eq!(
+            strip_hover(Some(StripAction::ToggleMaximize)),
+            Some(StripHover::Maximize)
+        );
+        assert_eq!(
+            strip_hover(Some(StripAction::CloseWindow)),
+            Some(StripHover::CloseWindow)
         );
     }
 

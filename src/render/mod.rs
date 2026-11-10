@@ -47,6 +47,33 @@ pub struct Renderer {
     tab_icon: Option<TabIcon>,
 }
 
+/// The fill and glyph colour for one caption control.
+///
+/// Split out of the painter so the hover/resting colour table is testable
+/// without reading pixels. Only the control under the pointer is filled: the
+/// close uses the accent red, the other two the strip's hover tone, and every
+/// resting glyph uses the inactive title colour.
+fn caption_colors(
+    theme: &Theme,
+    target: StripHover,
+    hover: Option<StripHover>,
+) -> (Option<Rgb>, Rgb) {
+    let hovered = hover == Some(target);
+    let fill = hovered.then(|| {
+        if target == StripHover::CloseWindow {
+            theme.caption_close_hover
+        } else {
+            theme.tab_hover
+        }
+    });
+    let glyph = if hovered {
+        theme.tab_title
+    } else {
+        theme.tab_title_inactive
+    };
+    (fill, glyph)
+}
+
 impl Renderer {
     pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
         let pixmap = Pixmap::new(1, 1)
@@ -345,20 +372,10 @@ impl Renderer {
             ("✕", layout.close_window, StripHover::CloseWindow),
         ];
         for (glyph, rect, target) in controls {
-            let hovered = hover == Some(target);
-            if hovered {
-                let fill = if target == StripHover::CloseWindow {
-                    self.theme.caption_close_hover
-                } else {
-                    self.theme.tab_hover
-                };
+            let (fill, color) = caption_colors(&self.theme, target, hover);
+            if let Some(fill) = fill {
                 self.fill_rect(rect.x, rect.y, rect.w, (rect.h - 1.0).max(0.0), fill);
             }
-            let color = if hovered {
-                self.theme.tab_title
-            } else {
-                self.theme.tab_title_inactive
-            };
             ui_text::draw_text_centred(self, glyph, rect, ui_px, color);
         }
     }
@@ -1331,6 +1348,33 @@ mod tests {
             renderer.theme.tab_bar,
             "the close fill must clear when the pointer leaves it"
         );
+    }
+
+    #[test]
+    fn caption_control_colours_follow_the_hover_state() {
+        // One row per control: hover fill, then the same token pair a resting
+        // and a hovered glyph must use. The close is the only red fill.
+        let theme = Theme::from_config(&ThemeConfig::default());
+        let table = [
+            (StripHover::Minimize, theme.tab_hover),
+            (StripHover::Maximize, theme.tab_hover),
+            (StripHover::CloseWindow, theme.caption_close_hover),
+        ];
+        assert_ne!(theme.caption_close_hover, theme.tab_hover);
+        for (target, hover_fill) in table {
+            let (fill, glyph) = caption_colors(&theme, target, None);
+            assert_eq!(fill, None, "a resting control paints no fill");
+            assert_eq!(glyph, theme.tab_title_inactive);
+
+            let (fill, glyph) = caption_colors(&theme, target, Some(target));
+            assert_eq!(fill, Some(hover_fill));
+            assert_eq!(glyph, theme.tab_title);
+
+            // Another target's hover must leave this control resting.
+            let (fill, glyph) = caption_colors(&theme, target, Some(StripHover::Tab(0)));
+            assert_eq!(fill, None);
+            assert_eq!(glyph, theme.tab_title_inactive);
+        }
     }
 
     #[test]
