@@ -2617,17 +2617,18 @@ mod tests {
 
     #[test]
     fn the_painted_chrome_reaches_the_window_edge_with_a_drag_gutter() {
-        // The caption controls are pinned to the right edge, and the `+`/`⌄`
-        // pair leaves at least one drag gutter before them: that empty band is
-        // what keeps the window draggable when the tabs are crowded.
+        // At the 320 px minimum window width the caption controls are pinned to
+        // the right edge and the two tabs leave exactly one drag gutter before
+        // them: that empty band is what keeps the window draggable when the
+        // strip is as tight as it can get.
         use crate::ui::tab_bar::{TabBarLayout, DRAG_GUTTER};
 
         let layout =
-            TabBarLayout::new(800.0, crate::ui::tab_bar::TAB_STRIP_HEIGHT, &["one", "two"]);
+            TabBarLayout::new(320.0, crate::ui::tab_bar::TAB_STRIP_HEIGHT, &["one", "two"]);
         assert_eq!(layout.close_window.x + layout.close_window.w, layout.width);
         assert!(
-            layout.chevron.x + layout.chevron.w + DRAG_GUTTER <= layout.minimize.x + 0.01,
-            "the drag gutter must be the minimum gap before the controls"
+            (layout.chevron.x + layout.chevron.w + DRAG_GUTTER - layout.minimize.x).abs() < 0.01,
+            "the drag gutter must be exactly the gap before the controls on a tight strip"
         );
     }
 

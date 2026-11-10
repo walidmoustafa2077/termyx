@@ -494,10 +494,11 @@ mod tests {
 
     #[test]
     fn tabs_stop_before_the_caption_buttons() {
-        // Ten tabs whose fair share is far below `MIN_TAB_WIDTH`: with the
-        // 138 px caption reservation the tab row ends at `width - 202`, so the
-        // `+`/`⌄` pair and the last tab stay clear of the controls. Without the
-        // reservation the row would reach `width - 64` and paint under them.
+        // Ten tabs whose fair share is far below `MIN_TAB_WIDTH`: the 138 px
+        // caption reservation, the 64 px `+`/`⌄` pair and the 24 px drag gutter
+        // leave the tab row ending at `width - 230`, so the last tab and both
+        // buttons stay clear of the controls. Without the reservation the row
+        // would paint under them.
         let titles: Vec<&str> = (0..10).map(|_| "one").collect();
         let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &titles);
         let last = layout.tabs.last().expect("a tab");

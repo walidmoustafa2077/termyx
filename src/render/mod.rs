@@ -2249,7 +2249,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(200, 120);
         // A strip too narrow to give either of two tabs its own icon slot:
-        // each tab is 20 px wide while the icon alone wants 28.
+        // each tab is 2 px wide while the icon inset and glyph alone want 26.
         let layout =
             crate::ui::tab_bar::TabBarLayout::new(242.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
