@@ -3,6 +3,7 @@
 mod atlas;
 mod glyph_cache;
 mod menu;
+mod tooltip;
 mod ui_text;
 
 use ab_glyph::GlyphId;
@@ -598,18 +599,33 @@ impl Renderer {
             // ink is 12 px tall and the tab reads visibly larger than the
             // reference, whose title is a 10 px cap band.
             let title_px = TAB_TITLE_SIZE * k;
-            // 8.5 px below the body's top edge centres that band on the line WT
-            // measured at y=20..29 inside the 32 px tab body.
-            let title_top = tab.body.y + 8.5 * k;
-            ui_text::draw_text_ellipsis(
-                self,
-                title,
-                tab.rect.x + title_left,
-                title_top,
-                title_px,
+            // 9 px below the body's top edge puts the cap band on the rows WT
+            // measured (21..29 inside the 32 px tab body) and keeps the outline
+            // on whole pixels, so the double pass below cannot blur it across a
+            // tenth row.
+            let title_top = tab.body.y + 9.0 * k;
+            // WinUI renders the tab header through DirectWrite's grayscale
+            // rasterizer, whose gamma darkening gives a measured 2 px stem where
+            // the same 12 px regular face here draws 1 px. The semibold cut is
+            // the closest weight this renderer can reach, and a second pass half
+            // a pixel across thickens the stem edges further without moving the
+            // advance or the clip. Measured, that lands 6 % above the
+            // reference's ink; one pass alone lands 29 % below it.
+            let style = ui_text::TextStyle {
+                face: crate::fonts::SEMIBOLD_FONT_ID,
+                px: title_px,
                 color,
-                title_width,
-            );
+            };
+            for dx in [0.0, 0.5 * k] {
+                ui_text::draw_text_ellipsis_in(
+                    self,
+                    title,
+                    tab.rect.x + title_left + dx,
+                    title_top,
+                    style,
+                    title_width,
+                );
+            }
             let closes = hover == Some(StripHover::Close(tab.index));
             let shows_close =
                 tab.index == active || closes || hover == Some(StripHover::Tab(tab.index));
@@ -3535,8 +3551,13 @@ mod tests {
         let menu = {
             use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
             let items = vec![
-                MenuItem::fixed(MenuAction::Settings, "Settings", ""),
-                MenuItem::fixed(MenuAction::About, "About", ""),
+                MenuItem::fixed(
+                    MenuAction::Settings,
+                    "Settings",
+                    "",
+                    crate::fonts::GLYPH_SETTINGS,
+                ),
+                MenuItem::fixed(MenuAction::About, "About", "", crate::fonts::GLYPH_HELP),
             ];
             MenuLayout::new(layout.chevron, items, width as f32, height as f32)
         };
@@ -3544,7 +3565,7 @@ mod tests {
         // Warm the glyph atlas so the measurement covers drawing, not discovery.
         renderer.draw(&snapshot, &maps, None);
         draw_chrome(&mut renderer, &layout, ui_px, 0, None);
-        renderer.draw_menu(&menu, ui_px);
+        renderer.draw_menu(&menu, &[]);
 
         const FRAMES: usize = 40;
         let mut render_samples = Vec::with_capacity(FRAMES);
@@ -3582,7 +3603,7 @@ mod tests {
         let start = Instant::now();
         renderer.draw(&snapshot, &maps, None);
         draw_chrome(&mut renderer, &layout, ui_px, 0, None);
-        renderer.draw_menu(&menu, ui_px);
+        renderer.draw_menu(&menu, &[]);
         println!("full frame with chrome and dropdown: {:?}", start.elapsed());
 
         // A shared CI box has scheduling spikes, so the fastest frame is the

@@ -3,13 +3,44 @@
 use crate::ui::tab_bar::{Rect, TAB_STRIP_HEIGHT};
 
 /// Width of the dropdown in logical pixels, at the strip's reference height.
-pub const MENU_WIDTH: f32 = 280.0;
+///
+/// Measured on Windows Terminal 1.24 at 100 % with the default profile set:
+/// the flyout panel spans 388 px. WinUI sizes the panel to its widest row, so a
+/// different profile list would move this number.
+pub const MENU_WIDTH: f32 = 388.0;
 /// Height of one row in logical pixels, at the strip's reference height.
-pub const MENU_ROW_HEIGHT: f32 = 32.0;
+///
+/// Measured: eight rows at a 33 px pitch, the same rhythm the default menu
+/// keeps through its group rule.
+pub const MENU_ROW_HEIGHT: f32 = 33.0;
 /// Inset of the panel around its rows, and the room a group rule gets.
-pub const MENU_PADDING: f32 = 4.0;
+pub const MENU_PADDING: f32 = 2.0;
 /// Space between the anchor's bottom edge and the panel.
+///
+/// Measured: the panel's top edge sits 2 px below the strip's rule, the row
+/// between them showing the drop shadow.
 pub const MENU_GAP: f32 = 2.0;
+/// Corner radius of the panel in logical pixels.
+pub const MENU_RADIUS: f32 = 8.0;
+/// Horizontal inset of a row's icon from the row's left edge.
+pub const MENU_ICON_INSET: f32 = 12.0;
+/// Size of the square a row's icon occupies.
+pub const MENU_ICON_SIZE: f32 = 16.0;
+/// Where a row's label starts, from the row's left edge.
+pub const MENU_LABEL_INSET: f32 = 42.0;
+/// Inset of a shortcut's right edge from the row's right edge.
+pub const MENU_RIGHT_INSET: f32 = 10.0;
+/// Horizontal inset of the hover pill inside its row.
+pub const MENU_HOVER_INSET: f32 = 2.0;
+/// Corner radius of the hover pill in logical pixels.
+pub const MENU_HOVER_RADIUS: f32 = 4.0;
+/// Inset of a group rule from the panel's left and right edges.
+pub const MENU_SEPARATOR_INSET: f32 = 8.0;
+/// Em size of a row's label and shortcut in logical pixels.
+///
+/// Measured: the label cap band is 10 rows tall, the same 12 px size as the tab
+/// title, not the 14 px chrome size the rows were drawn at before.
+pub const MENU_TEXT_PX: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
@@ -20,28 +51,49 @@ pub enum MenuAction {
     About,
 }
 
+/// What a row shows in its icon column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuIcon {
+    /// The shell program whose real icon the row shows. Carried as the program
+    /// name because only the window owns the icon cache, and it resolves the
+    /// bitmap after the menu's geometry exists.
+    Program(String),
+    /// A codepoint from the system icon face, for the rows that are commands
+    /// rather than shells.
+    Glyph(&'static str),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuItem {
     pub label: String,
     /// Right-aligned key hint; empty when the row has no shortcut.
     pub shortcut: String,
     pub action: MenuAction,
+    pub icon: MenuIcon,
+    /// Whether this is the profile `+` would open. Windows Terminal draws that
+    /// row semibold, so the weight is part of the model, not a paint-time
+    /// guess.
+    pub default: bool,
 }
 
 impl MenuItem {
-    pub fn profile(index: usize, label: &str, shortcut: &str) -> Self {
-        Self::new(MenuAction::Profile(index), label, shortcut)
+    pub fn profile(index: usize, label: &str, shortcut: &str, program: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            shortcut: shortcut.to_string(),
+            action: MenuAction::Profile(index),
+            icon: MenuIcon::Program(program.to_string()),
+            default: false,
+        }
     }
 
-    pub fn fixed(action: MenuAction, label: &str, shortcut: &str) -> Self {
-        Self::new(action, label, shortcut)
-    }
-
-    fn new(action: MenuAction, label: &str, shortcut: &str) -> Self {
+    pub fn fixed(action: MenuAction, label: &str, shortcut: &str, glyph: &'static str) -> Self {
         Self {
             label: label.to_string(),
             shortcut: shortcut.to_string(),
             action,
+            icon: MenuIcon::Glyph(glyph),
+            default: false,
         }
     }
 }
@@ -167,24 +219,40 @@ mod tests {
 
     fn items() -> Vec<MenuItem> {
         vec![
-            MenuItem::profile(0, "Windows PowerShell", "Ctrl+Shift+1"),
-            MenuItem::profile(1, "Command Prompt", "Ctrl+Shift+2"),
-            MenuItem::fixed(MenuAction::Settings, "Settings", "Ctrl+,"),
-            MenuItem::fixed(MenuAction::About, "About", ""),
+            MenuItem::profile(0, "Windows PowerShell", "Ctrl+Shift+1", "powershell"),
+            MenuItem::profile(1, "Command Prompt", "Ctrl+Shift+2", "cmd"),
+            MenuItem::fixed(
+                MenuAction::Settings,
+                "Settings",
+                "Ctrl+,",
+                crate::fonts::GLYPH_SETTINGS,
+            ),
+            MenuItem::fixed(MenuAction::About, "About", "", crate::fonts::GLYPH_HELP),
         ]
     }
 
     fn nine_items() -> Vec<MenuItem> {
         let mut items: Vec<MenuItem> = (0..6)
-            .map(|index| MenuItem::profile(index, &format!("Profile {index}"), ""))
+            .map(|index| MenuItem::profile(index, &format!("Profile {index}"), "", "powershell"))
             .collect();
-        items.push(MenuItem::fixed(MenuAction::Settings, "Settings", "Ctrl+,"));
+        items.push(MenuItem::fixed(
+            MenuAction::Settings,
+            "Settings",
+            "Ctrl+,",
+            crate::fonts::GLYPH_SETTINGS,
+        ));
         items.push(MenuItem::fixed(
             MenuAction::CommandPalette,
             "Command palette",
             "Ctrl+Shift+P",
+            crate::fonts::GLYPH_COMMAND_PALETTE,
         ));
-        items.push(MenuItem::fixed(MenuAction::About, "About", ""));
+        items.push(MenuItem::fixed(
+            MenuAction::About,
+            "About",
+            "",
+            crate::fonts::GLYPH_HELP,
+        ));
         items
     }
 
@@ -322,8 +390,8 @@ mod tests {
 
     #[test]
     fn a_short_window_keeps_the_panel_and_its_rows_inside() {
-        // 200 px cannot hold a 9-row panel (300 px) below or above the strip,
-        // so the panel is pinned under the strip and only whole rows are kept.
+        // 200 px cannot hold a 9-row panel below or above the strip, so the
+        // panel is pinned under the strip and only whole rows are kept.
         let anchor = Rect {
             x: 0.0,
             y: 0.0,
@@ -386,5 +454,25 @@ mod tests {
             None,
             "a chevron press must not resolve to a row"
         );
+    }
+
+    #[test]
+    fn the_row_carries_its_icon_and_its_default_weight() {
+        // The icon and the semibold weight are model data: the painter owns no
+        // profile list and cannot guess either.
+        let mut items = items();
+        items[0].default = true;
+        assert_eq!(
+            items[0].icon,
+            MenuIcon::Program("powershell".to_string()),
+            "a profile row shows the shell's own icon"
+        );
+        assert_eq!(
+            items[2].icon,
+            MenuIcon::Glyph(crate::fonts::GLYPH_SETTINGS),
+            "a command row shows an icon-face glyph"
+        );
+        assert!(items[0].default, "the row `+` opens is the default one");
+        assert!(!items[1].default, "only one row is the default");
     }
 }

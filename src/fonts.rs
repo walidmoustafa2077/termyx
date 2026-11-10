@@ -58,8 +58,26 @@ const SYMBOL_FALLBACKS: &[&str] = &[
 
 const SYMBOL_PROBES: &[char] = &['✕', '●', '❯', '\u{E0B0}', '\u{E000}'];
 
-/// Proportional family used for window chrome (tab titles, menu items).
-const UI_FAMILY: &str = "Segoe UI";
+/// Proportional families tried in order for window chrome (tab titles, menu
+/// items).
+///
+/// Windows Terminal's tab header sets no family of its own, so it inherits the
+/// WinUI theme font: `Segoe UI Variable Text` on Windows 11. Measured at 12 px,
+/// the classic `Segoe UI` here drew 1 px stems where WT's are 2 px, which is why
+/// the title read thinner than the real shell's.
+const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI"];
+
+/// Semibold proportional families tried in order for the menu's default row.
+///
+/// Windows Terminal draws the row of the profile that `+` would open semibold
+/// (measured on 1.24: 2–3 px stems against 1–2 px in the rows below), and the
+/// regular UI face cannot fake that weight. The variable family ships a single
+/// weight, so the lookup falls through to the classic family's semibold cut.
+const UI_SEMIBOLD_FAMILIES: &[&str] = &[
+    "Segoe UI Variable Text Semibold",
+    "Segoe UI Semibold",
+    "Segoe UI",
+];
 
 /// System icon families tried in order for the chrome's window controls.
 ///
@@ -85,6 +103,12 @@ pub const UI_FONT_ID: u8 = u8::MAX;
 /// be resolved through it.
 pub const ICON_FONT_ID: u8 = u8::MAX - 1;
 
+/// Reserved glyph-cache face id for the semibold proportional face.
+///
+/// Used only by the menu's default-profile row, the one Windows Terminal draws
+/// semibold; every other chrome string stays on [`UI_FONT_ID`].
+pub const SEMIBOLD_FONT_ID: u8 = u8::MAX - 2;
+
 /// Codepoints the chrome draws, all from the Windows icon face. Windows
 /// Terminal uses these exact glyphs, which is why its controls are not the
 /// text characters `—`, `□` and `✕` drawn here before.
@@ -94,6 +118,15 @@ pub(crate) const GLYPH_RESTORE: &str = "\u{E923}";
 pub(crate) const GLYPH_CLOSE: &str = "\u{E8BB}";
 pub(crate) const GLYPH_ADD: &str = "\u{E710}";
 pub(crate) const GLYPH_CHEVRON: &str = "\u{E70D}";
+
+/// Icon-face codepoints for the dropdown's fixed rows.
+///
+/// Windows Terminal's new-tab flyout shows a gear for Settings, a lightning
+/// bolt for the command palette and a question mark for About; these are the
+/// same glyphs from the same face.
+pub(crate) const GLYPH_SETTINGS: &str = "\u{E713}";
+pub(crate) const GLYPH_COMMAND_PALETTE: &str = "\u{E945}";
+pub(crate) const GLYPH_HELP: &str = "\u{E897}";
 
 /// Icon-face em size for the tab's own `✕`, in logical pixels.
 ///
@@ -153,6 +186,9 @@ pub struct FontSet {
     /// System icon face for the window controls; absent on systems without it,
     /// in which case those glyphs fall back to symbol faces.
     pub icons: Option<FontFace>,
+    /// Semibold proportional face for the menu's default-profile row; absent on
+    /// systems without it, in which case that row falls back to regular weight.
+    pub semibold: Option<FontFace>,
     pub symbols: Vec<FontFace>,
 }
 
@@ -186,6 +222,7 @@ impl FontSet {
         let arabic = load_arabic(&database, arabic_family);
         let ui = load_ui(&database);
         let icons = load_icons(&database);
+        let semibold = load_semibold(&database);
         let symbols = load_symbols(
             &database,
             family,
@@ -202,6 +239,7 @@ impl FontSet {
             arabic,
             ui,
             icons,
+            semibold,
             symbols,
         })
     }
@@ -223,8 +261,8 @@ impl FontSet {
 
     /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces,
     /// [`UI_FONT_ID`] the proportional chrome face, [`ICON_FONT_ID`] the
-    /// window-control icon face. Unknown ids and absent faces fall back to the
-    /// primary face.
+    /// window-control icon face, [`SEMIBOLD_FONT_ID`] its semibold weight.
+    /// Unknown ids and absent faces fall back to the primary face.
     pub fn font_for_id(&self, id: u8) -> (&FontVec, u32) {
         match id {
             0 => (&self.font, self.index),
@@ -241,6 +279,12 @@ impl FontSet {
             ICON_FONT_ID => self
                 .icons
                 .as_ref()
+                .map(|face| (&face.font, face.index))
+                .unwrap_or((&self.font, self.index)),
+            SEMIBOLD_FONT_ID => self
+                .semibold
+                .as_ref()
+                .or(self.ui.as_ref())
                 .map(|face| (&face.font, face.index))
                 .unwrap_or((&self.font, self.index)),
             id => self
@@ -279,6 +323,14 @@ impl FontSet {
         self.symbol_for_char(ch).unwrap_or((UI_FONT_ID, glyph))
     }
 
+    /// The glyph `face` maps `ch` to, or `None` when that face has no outline
+    /// for it: glyph 0 is `.notdef`, which would paint a box.
+    pub fn glyph_in(&self, face: u8, ch: char) -> Option<ab_glyph::GlyphId> {
+        let (font, _index) = self.font_for_id(face);
+        let glyph = font.glyph_id(ch);
+        (glyph.0 != 0).then_some(glyph)
+    }
+
     /// Width of `text` in the faces the chrome painter uses, at `px`.
     ///
     /// This follows [`FontSet::chrome_glyph`]'s per-character resolution, so an
@@ -288,9 +340,19 @@ impl FontSet {
     /// at, and already physical: the caller scales the logical `UI_SIZE_PX`
     /// once with the window's scale factor.
     pub fn ui_width(&self, text: &str, px: f32) -> f32 {
+        self.width_in(UI_FONT_ID, text, px)
+    }
+
+    /// Width of `text` at `px`, measured on `face` and falling back per
+    /// character to [`FontSet::chrome_glyph`] so a symbol still measures on the
+    /// face that paints it.
+    pub fn width_in(&self, face: u8, text: &str, px: f32) -> f32 {
         text.chars()
             .map(|ch| {
-                let (face, glyph) = self.chrome_glyph(ch);
+                let (face, glyph) = match self.glyph_in(face, ch) {
+                    Some(glyph) => (face, glyph),
+                    None => self.chrome_glyph(ch),
+                };
                 let (font, _index) = self.font_for_id(face);
                 font.as_scaled(em_px_scale(font, px)).h_advance(glyph)
             })
@@ -315,6 +377,16 @@ impl FontSet {
     /// fallback faces and sit at different heights inside the same line box.
     /// `None` when no character in `text` has a drawable outline.
     pub fn chrome_ink_bounds(&self, text: &str, px: f32) -> Option<(f32, f32, f32, f32)> {
+        self.ink_bounds_in(UI_FONT_ID, text, px)
+    }
+
+    /// The ink box of `text` at `px` on `face`, in the same frame as
+    /// [`FontSet::chrome_ink_bounds`].
+    ///
+    /// The baseline comes from the UI face rather than from `face`: the painter
+    /// anchors every chrome string to the UI line box, so measuring on any other
+    /// ascent would centre a semibold row a pixel off its neighbours.
+    pub fn ink_bounds_in(&self, face: u8, text: &str, px: f32) -> Option<(f32, f32, f32, f32)> {
         // The cache rasterizes at the rounded em size; measuring at the same
         // size keeps this box on the outline the blit paints.
         let size = px.round();
@@ -323,7 +395,10 @@ impl FontSet {
         let mut pen = 0.0;
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
         for ch in text.chars() {
-            let (face, glyph) = self.chrome_glyph(ch);
+            let (face, glyph) = match self.glyph_in(face, ch) {
+                Some(glyph) => (face, glyph),
+                None => self.chrome_glyph(ch),
+            };
             let (font, _index) = self.font_for_id(face);
             let scale = em_px_scale(font, size);
             let advance = font.as_scaled(scale).h_advance(glyph);
@@ -388,26 +463,81 @@ fn load_primary(database: &Database, family: &str) -> Result<(Vec<u8>, u32), Fon
         .ok_or(FontError::NoFont)
 }
 
-/// Loads the proportional window-chrome face, or `None` when the family is not
+/// Loads the proportional window-chrome face, or `None` when no family is
 /// installed so chrome text falls back to the primary monospace face.
 fn load_ui(database: &Database) -> Option<FontFace> {
-    let families = [Family::Name(UI_FAMILY)];
-    let query = Query {
-        families: &families,
-        weight: Weight::NORMAL,
-        stretch: Stretch::Normal,
-        style: Style::Normal,
-    };
-    let id = database.query(&query)?;
-    let (data, index) = database.with_face_data(id, |data, index| (data.to_vec(), index))?;
-    let font = FontVec::try_from_vec_and_index(data, index).ok()?;
-    tracing::debug!(family = UI_FAMILY, "proportional UI face loaded");
-    Some(FontFace {
-        font,
-        index,
-        family: UI_FAMILY.to_string(),
-        scale: 1.0,
-    })
+    load_proportional(
+        database,
+        UI_FAMILIES,
+        Weight::NORMAL,
+        "proportional UI face",
+    )
+}
+
+/// Loads the semibold proportional face for the menu's default row, or `None`
+/// when no semibold family is installed so that row stays regular.
+fn load_semibold(database: &Database) -> Option<FontFace> {
+    load_proportional(
+        database,
+        UI_SEMIBOLD_FAMILIES,
+        Weight::SEMIBOLD,
+        "semibold UI face",
+    )
+}
+
+/// Parses the first installed family in `families` into a face of at least
+/// `weight`.
+///
+/// Every proportional face is wanted for the same reason — chrome text should
+/// look like the WinUI theme font — so one loader keeps the fallback behaviour
+/// identical for the regular and the semibold weight.
+fn load_proportional(
+    database: &Database,
+    families: &[&str],
+    weight: Weight,
+    what: &str,
+) -> Option<FontFace> {
+    for family in families {
+        let list = [Family::Name(family)];
+        let query = Query {
+            families: &list,
+            weight,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        };
+        let Some(id) = database.query(&query) else {
+            continue;
+        };
+        // A family without the requested cut answers with its closest weight,
+        // which would win the lookup with a regular face. Skipping it lets the
+        // semibold search reach the family that actually has one.
+        if database
+            .face(id)
+            .is_some_and(|face| face.weight.0 < weight.0)
+        {
+            continue;
+        }
+        let Some((data, index)) = database.with_face_data(id, |data, index| (data.to_vec(), index))
+        else {
+            continue;
+        };
+        let Ok(font) = FontVec::try_from_vec_and_index(data, index) else {
+            continue;
+        };
+        tracing::debug!(family = *family, face = what, "proportional face loaded");
+        return Some(FontFace {
+            font,
+            index,
+            family: (*family).to_string(),
+            scale: 1.0,
+        });
+    }
+    tracing::warn!(
+        families = ?families,
+        face = what,
+        "no proportional face found; chrome text uses the monospace face"
+    );
+    None
 }
 
 /// Loads the system icon face the window controls are drawn from, or `None`
@@ -773,6 +903,55 @@ mod tests {
                 "the UI id must fall back to the primary face when the face is absent"
             ),
         }
+    }
+
+    #[test]
+    fn the_semibold_face_is_its_own_cache_id() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        match &fonts.semibold {
+            Some(face) => {
+                let (font, index) = fonts.font_for_id(SEMIBOLD_FONT_ID);
+                assert!(
+                    std::ptr::eq(font, &face.font),
+                    "the semibold id must not reuse the regular UI face"
+                );
+                assert_eq!(index, face.index);
+            }
+            None => {
+                let (fallback, _index) = fonts.font_for_id(SEMIBOLD_FONT_ID);
+                let (ui, _index) = fonts.font_for_id(UI_FONT_ID);
+                assert!(
+                    std::ptr::eq(fallback, ui),
+                    "without a semibold face the default row must fall back to the regular UI face"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_face_only_maps_the_characters_it_has_outlines_for() {
+        let Some(fonts) = load("Consolas") else {
+            return;
+        };
+        assert!(
+            fonts.glyph_in(UI_FONT_ID, 'M').is_some(),
+            "the UI face maps letters"
+        );
+        if fonts.icons.is_none() {
+            eprintln!("skipping: no icon face installed");
+            return;
+        }
+        assert!(
+            fonts.glyph_in(ICON_FONT_ID, 'M').is_none(),
+            "the icon face has no letters, so a menu label must never measure through it"
+        );
+        assert!(
+            (fonts.width_in(ICON_FONT_ID, "M", UI_SIZE_PX) - fonts.ui_width("M", UI_SIZE_PX)).abs()
+                < 0.01,
+            "a character a face lacks falls back to the face that paints it"
+        );
     }
 
     #[test]

@@ -11,6 +11,18 @@ use crate::render::Renderer;
 use crate::theme::Rgb;
 use crate::ui::tab_bar::Rect;
 
+/// The face, em size, and ink of one chrome string.
+///
+/// Bundled so a painter that also takes a position, a clip and the renderer
+/// stays inside clippy's argument limit, and so a caller can reuse one style
+/// for a label and its measurement.
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    pub face: u8,
+    pub px: f32,
+    pub color: Rgb,
+}
+
 /// Draws `text` at `(x, y)` — the top-left corner, not the baseline — and
 /// returns the width consumed, clipped to `max_width`.
 ///
@@ -27,15 +39,38 @@ pub fn draw_text(
     color: Rgb,
     max_width: f32,
 ) -> f32 {
+    draw_text_in(
+        renderer,
+        text,
+        x,
+        y,
+        TextStyle {
+            face: UI_FONT_ID,
+            px,
+            color,
+        },
+        max_width,
+    )
+}
+
+/// Draws `text` in `style`'s face and size at `(x, y)`, clipped to `max_width`.
+pub fn draw_text_in(
+    renderer: &mut Renderer,
+    text: &str,
+    x: f32,
+    y: f32,
+    style: TextStyle,
+    max_width: f32,
+) -> f32 {
     // Measure before painting: the advances borrow the face, while every blit
     // needs the renderer mutably, so the glyphs are copied out first.
     let mut glyphs = Vec::new();
     let mut pen = x;
     let baseline = {
         let (font, _index) = renderer.fonts_face(UI_FONT_ID);
-        let scaled = font.as_scaled(em_px_scale(font, px));
+        let scaled = font.as_scaled(em_px_scale(font, style.px));
         for ch in text.chars() {
-            let (face, id, advance) = glyph_for(renderer, ch, px);
+            let (face, id, advance) = glyph_for(renderer, style.face, ch, style.px);
             if pen + advance > x + max_width {
                 break;
             }
@@ -47,12 +82,38 @@ pub fn draw_text(
 
     pen = x;
     for (face, id, advance) in glyphs {
-        if let Some(slot) = renderer.cache_get(face, id, px.round() as u32) {
-            renderer.blit(slot, pen, baseline, color);
+        if let Some(slot) = renderer.cache_get(face, id, style.px.round() as u32) {
+            renderer.blit(slot, pen, baseline, style.color);
         }
         pen += advance;
     }
     pen - x
+}
+
+/// Draws `text` starting at `x` with the vertical centre of its ink on
+/// `centre_y`, clipped to `max_width`.
+///
+/// Menu rows are laid out by a row pitch, not by a line box, so their text is
+/// placed from the ink the eye sees: two rows of different families then share
+/// a centre row instead of drifting apart by their descents.
+pub fn draw_text_ink_centred(
+    renderer: &mut Renderer,
+    text: &str,
+    x: f32,
+    centre_y: f32,
+    style: TextStyle,
+    max_width: f32,
+) -> f32 {
+    let y = {
+        let fonts = renderer.fonts();
+        match fonts.ink_bounds_in(style.face, text, style.px) {
+            Some((_left, top, _right, bottom)) => centre_y - (top + bottom) / 2.0,
+            // Nothing measurable: fall back to the line box, which is what
+            // `draw_text` lays its `y` against.
+            None => centre_y - fonts.ui_line_height(style.px) / 2.0,
+        }
+    };
+    draw_text_in(renderer, text, x, y, style, max_width)
 }
 
 /// Draws `text` with its ink centred in `rect`, clipped to the rect's width.
@@ -94,11 +155,11 @@ pub fn draw_text_centred(
 ///
 /// Returns `text` unchanged when it already fits. A clip too narrow for the
 /// ellipsis itself yields an empty string: there is nothing honest to paint.
-fn elide(fonts: &FontSet, text: &str, px: f32, max_width: f32) -> String {
-    if fonts.ui_width(text, px) <= max_width {
+fn elide(fonts: &FontSet, face: u8, text: &str, px: f32, max_width: f32) -> String {
+    if fonts.width_in(face, text, px) <= max_width {
         return text.to_string();
     }
-    let ellipsis_width = fonts.ui_width("…", px);
+    let ellipsis_width = fonts.width_in(face, "…", px);
     let budget = max_width - ellipsis_width;
     if budget <= 0.0 {
         return String::new();
@@ -109,7 +170,7 @@ fn elide(fonts: &FontSet, text: &str, px: f32, max_width: f32) -> String {
     let mut width = 0.0;
     for ch in text.chars() {
         let mut utf8 = [0u8; 4];
-        let advance = fonts.ui_width(ch.encode_utf8(&mut utf8), px);
+        let advance = fonts.width_in(face, ch.encode_utf8(&mut utf8), px);
         if width + advance > budget {
             break;
         }
@@ -120,32 +181,50 @@ fn elide(fonts: &FontSet, text: &str, px: f32, max_width: f32) -> String {
     shortened
 }
 
-/// Draws `text` clipped to `max_width`, replacing the cut tail with `…`.
+/// Draws `text` ink-centred on `centre_y` and clipped to `max_width`,
+/// replacing the cut tail with `…`.
+pub fn draw_text_ellipsis_ink_centred(
+    renderer: &mut Renderer,
+    text: &str,
+    x: f32,
+    centre_y: f32,
+    style: TextStyle,
+    max_width: f32,
+) -> f32 {
+    let shortened = elide(renderer.fonts(), style.face, text, style.px, max_width);
+    draw_text_ink_centred(renderer, &shortened, x, centre_y, style, max_width)
+}
+
+/// Draws `text` in `style` clipped to `max_width`, replacing the cut tail with
+/// `…`.
 ///
 /// Tab titles come from the shell and are arbitrarily long; a hard clip hides
 /// the end of the name, which is the part a user navigates by.
-pub fn draw_text_ellipsis(
+pub fn draw_text_ellipsis_in(
     renderer: &mut Renderer,
     text: &str,
     x: f32,
     y: f32,
-    px: f32,
-    color: Rgb,
+    style: TextStyle,
     max_width: f32,
 ) -> f32 {
-    let shortened = elide(renderer.fonts(), text, px, max_width);
-    draw_text(renderer, &shortened, x, y, px, color, max_width)
+    let shortened = elide(renderer.fonts(), style.face, text, style.px, max_width);
+    draw_text_in(renderer, &shortened, x, y, style, max_width)
 }
 
 /// Resolves the face id, glyph, and advance (in `px` em units) that will
 /// rasterize `ch`.
 ///
-/// The UI face does not map every symbol the chrome draws (`✕`, `⌄`), and
-/// painting those with it would produce `.notdef` boxes. When it has no glyph,
-/// the same symbol-face lookup the grid uses picks a fallback, so the measured
-/// advance and the painted ink come from one face.
-fn glyph_for(renderer: &Renderer, ch: char, px: f32) -> (u8, GlyphId, f32) {
-    let (face, glyph) = renderer.fonts().chrome_glyph(ch);
+/// `face` wins when it maps `ch`; the menu's semibold rows need their own
+/// weight, and a regular face cannot paint semibold. When the face has no
+/// glyph, the same symbol-face lookup the grid uses picks a fallback, so the
+/// measured advance and the painted ink come from one face.
+fn glyph_for(renderer: &Renderer, face: u8, ch: char, px: f32) -> (u8, GlyphId, f32) {
+    let fonts = renderer.fonts();
+    let (face, glyph) = match fonts.glyph_in(face, ch) {
+        Some(glyph) => (face, glyph),
+        None => fonts.chrome_glyph(ch),
+    };
     let (font, _index) = renderer.fonts_face(face);
     let scaled = font.as_scaled(em_px_scale(font, px));
     (face, glyph, scaled.h_advance(glyph))
@@ -168,7 +247,7 @@ mod tests {
             crate::fonts::GLYPH_RESTORE,
         ] {
             let ch = glyph.chars().next().expect("a control glyph is one char");
-            let (face, id, advance) = glyph_for(&renderer, ch, UI_SIZE_PX);
+            let (face, id, advance) = glyph_for(&renderer, UI_FONT_ID, ch, UI_SIZE_PX);
             let (font, _index) = renderer.fonts_face(face);
             assert_ne!(id.0, 0, "the resolved glyph for {ch:?} must exist");
             assert_ne!(
@@ -252,13 +331,17 @@ mod tests {
         let mut renderer = crate::render::tests::default_renderer();
         renderer.resize(400, 120);
         let color = renderer.theme.foreground;
-        let width = draw_text_ellipsis(
+        let style = TextStyle {
+            face: UI_FONT_ID,
+            px: UI_SIZE_PX,
+            color,
+        };
+        let width = draw_text_ellipsis_in(
             &mut renderer,
             "a very long tab title that cannot fit",
             4.0,
             4.0,
-            UI_SIZE_PX,
-            color,
+            style,
             40.0,
         );
         assert!(width <= 40.0 + 0.01);
@@ -276,7 +359,12 @@ mod tests {
         renderer.resize(200, 60);
         let color = renderer.theme.foreground;
         let measured = renderer.fonts().ui_width("Tab", UI_SIZE_PX);
-        let width = draw_text_ellipsis(&mut renderer, "Tab", 2.0, 2.0, UI_SIZE_PX, color, 100.0);
+        let style = TextStyle {
+            face: UI_FONT_ID,
+            px: UI_SIZE_PX,
+            color,
+        };
+        let width = draw_text_ellipsis_in(&mut renderer, "Tab", 2.0, 2.0, style, 100.0);
         assert!(
             (width - measured).abs() < 0.01,
             "a title that fits must be painted whole, not shortened"
@@ -288,7 +376,7 @@ mod tests {
         let renderer = crate::render::tests::default_renderer();
         let fonts = renderer.fonts();
 
-        let whole = elide(fonts, "Tab", UI_SIZE_PX, 100.0);
+        let whole = elide(fonts, UI_FONT_ID, "Tab", UI_SIZE_PX, 100.0);
         assert_eq!(
             whole, "Tab",
             "a title that fits must come back untouched, with no ellipsis"
@@ -296,6 +384,7 @@ mod tests {
 
         let clipped = elide(
             fonts,
+            UI_FONT_ID,
             "a very long tab title that cannot fit",
             UI_SIZE_PX,
             40.0,
@@ -318,7 +407,7 @@ mod tests {
         let ellipsis_width = fonts.ui_width("…", UI_SIZE_PX);
         let narrow = ellipsis_width / 2.0;
         assert_eq!(
-            elide(fonts, "some title", UI_SIZE_PX, narrow),
+            elide(fonts, UI_FONT_ID, "some title", UI_SIZE_PX, narrow),
             "",
             "a clip narrower than the ellipsis must yield no text, not a panic or loop"
         );

@@ -90,13 +90,24 @@ pub struct Theme {
     /// [`Theme::tab_border`] instead, three units darker and visually
     /// indistinguishable.
     pub tab_separator: Rgb,
-    /// Dropdown panel. Fixed for now, in the strip's dark family; the panel
-    /// opens under the `#333333` band, so it sits at or above it in value or
-    /// the menu would read as a hole cut into the strip.
+    /// Dropdown panel, measured `#2C2C2C` on Windows Terminal 1.24. It sits a
+    /// step *below* the `#333333` band, unlike a first guess would suggest:
+    /// the panel is a recessed surface, not a raised one.
     pub menu_background: Rgb,
     /// The dropdown row under the pointer. One step above the panel, the same
     /// way [`Theme::control_hover`] sits above [`Theme::tab_active`].
     pub menu_hover: Rgb,
+    /// Rule between the dropdown's groups, measured `#3D3D3D`.
+    pub menu_separator: Rgb,
+    /// A row's right-aligned key hint, measured `#CFCFCF`: dimmer than the
+    /// label so the eye follows the names first.
+    pub menu_shortcut: Rgb,
+    /// Tooltip panel. Shares the flyout's recessed value so the two floating
+    /// surfaces read as one family.
+    pub tooltip_background: Rgb,
+    /// One-pixel edge around a tooltip. Without it the panel would merge into
+    /// a tab of the same colour behind it.
+    pub tooltip_border: Rgb,
 }
 
 impl Theme {
@@ -145,8 +156,12 @@ impl Theme {
             tab_title_inactive: Rgb::new(204, 204, 204),
             tab_border: Rgb::new(41, 41, 41),
             tab_separator: Rgb::new(61, 61, 61),
-            menu_background: Rgb::new(51, 51, 51),
+            menu_background: Rgb::new(44, 44, 44),
             menu_hover: Rgb::new(61, 61, 61),
+            menu_separator: Rgb::new(61, 61, 61),
+            menu_shortcut: Rgb::new(207, 207, 207),
+            tooltip_background: Rgb::new(44, 44, 44),
+            tooltip_border: Rgb::new(61, 61, 61),
         }
     }
 
@@ -261,17 +276,31 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_palette_lifts_the_panel_and_its_hovered_row() {
+    fn the_menu_palette_matches_the_measured_flyout() {
         let theme = Theme::from_config(&crate::config::ThemeConfig::default());
-        assert_eq!(theme.menu_background, Rgb::new(51, 51, 51));
+        assert_eq!(
+            theme.menu_background,
+            Rgb::new(44, 44, 44),
+            "the flyout panel is #2C2C2C"
+        );
         assert_eq!(theme.menu_hover, Rgb::new(61, 61, 61));
-        assert!(
-            theme.menu_background.r >= theme.tab_bar.r,
-            "the panel opens under the #333333 band, so it cannot sit below it"
+        assert_eq!(
+            theme.menu_separator,
+            Rgb::new(61, 61, 61),
+            "the group rule is #3D3D3D"
+        );
+        assert_eq!(
+            theme.menu_shortcut,
+            Rgb::new(207, 207, 207),
+            "shortcuts are dimmer than the labels"
         );
         assert!(
             theme.menu_hover.r > theme.menu_background.r,
             "a hovered row must stand out from the panel"
+        );
+        assert!(
+            theme.menu_shortcut.r < theme.tab_title.r,
+            "the key hint must not compete with the label"
         );
     }
 }

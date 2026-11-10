@@ -25,8 +25,9 @@ use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
-use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
-use crate::ui::tab_bar::{StripHover, TabBarLayout, TabHit};
+use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
+use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
+use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
 
 /// Upper bound on a single paste, in Unicode scalar values. A larger clipboard
@@ -54,6 +55,16 @@ const STRIP_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long the cursor stays visible or hidden while blinking.
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// A control the pointer is resting on, with the label its tooltip would show.
+struct TooltipHover {
+    text: String,
+    anchor: Rect,
+    since: Instant,
+    /// Set once the delay has elapsed and a repaint was asked for, so the
+    /// event loop does not queue one more redraw per later event.
+    shown: bool,
+}
+
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
@@ -72,6 +83,10 @@ pub struct App {
     /// What the pointer is over in the strip, painted as hover. The `+` and `⌄`
     /// buttons highlight too; empty band paints nothing.
     strip_hover: Option<StripHover>,
+    /// The control the pointer rests on and when it got there. A tooltip is
+    /// painted once the pointer has stayed on the same control long enough,
+    /// the way Windows Terminal's does.
+    tooltip_hover: Option<TooltipHover>,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     selection: Option<Selection>,
@@ -118,6 +133,7 @@ impl App {
             layout: None,
             menu: None,
             strip_hover: None,
+            tooltip_hover: None,
             clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
@@ -216,6 +232,8 @@ impl App {
     /// Builds the dropdown from the live profile list and anchors it under the
     /// chevron. Also called to re-anchor an open menu after the strip moves.
     fn open_menu(&mut self) {
+        // The panel covers the strip, so no tooltip may hang over it.
+        self.clear_tooltip();
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
@@ -597,6 +615,82 @@ impl App {
         }
     }
 
+    /// The label and anchor of the control under `(x, y)`, when it shows a
+    /// tooltip.
+    ///
+    /// Windows Terminal labels a tab with its title, the new-tab button, the
+    /// dropdown and the three caption controls; the empty band between them
+    /// carries nothing. While the menu is open it owns the pointer, so nothing
+    /// beneath it shows a tooltip.
+    fn tooltip_target(&self, x: f64, y: f64) -> Option<(String, Rect)> {
+        if self.menu.is_some() {
+            return None;
+        }
+        let layout = self.layout.as_ref()?;
+        if !in_strip(y, layout.strip_h) {
+            return None;
+        }
+        let hit = layout.hit(x as f32, y as f32)?;
+        Some(match hit {
+            TabHit::Tab(index) => (
+                layout.titles.get(index)?.clone(),
+                layout.tabs.get(index)?.rect,
+            ),
+            TabHit::Close(index) => ("Close tab".to_string(), layout.tabs.get(index)?.close),
+            TabHit::Plus => ("New tab".to_string(), layout.plus),
+            TabHit::Chevron => ("Open new tab menu".to_string(), layout.chevron),
+            TabHit::Minimize => ("Minimize".to_string(), layout.minimize),
+            TabHit::Maximize => (
+                if self
+                    .window
+                    .as_ref()
+                    .is_some_and(|window| window.is_maximized())
+                {
+                    "Restore".to_string()
+                } else {
+                    "Maximize".to_string()
+                },
+                layout.maximize,
+            ),
+            TabHit::CloseWindow => ("Close".to_string(), layout.close_window),
+        })
+    }
+
+    /// Starts, restarts, or keeps the tooltip delay for `target`.
+    ///
+    /// Moving between two pixels of the same control keeps the clock, so a
+    /// tooltip does not flicker as the pointer crosses a tab; a different
+    /// control starts over.
+    fn update_tooltip_hover(&mut self, target: Option<(String, Rect)>) {
+        let Some((text, anchor)) = target else {
+            self.clear_tooltip();
+            return;
+        };
+        if let Some(hover) = self.tooltip_hover.as_mut() {
+            if hover.text == text && hover.anchor == anchor {
+                return;
+            }
+        }
+        self.tooltip_hover = Some(TooltipHover {
+            text,
+            anchor,
+            since: Instant::now(),
+            shown: false,
+        });
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Drops the pending or visible tooltip, repainting when one was there.
+    fn clear_tooltip(&mut self) {
+        if self.tooltip_hover.take().is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// The parser of the tab the window shows.
     fn active_terminal(&mut self) -> Option<&mut Terminal> {
         Some(&mut self.tabs.active_mut()?.terminal)
@@ -609,6 +703,31 @@ impl App {
             .as_ref()
             .is_some_and(|window| window.is_maximized());
         let ui_px = UI_SIZE_PX * self.scale_factor() as f32;
+        // The dropdown shows one icon per profile row. Resolving a program's
+        // icon may call the shell API, so the programs are collected first and
+        // the bitmaps resolved before the renderer borrow starts; this also has
+        // to happen before the session borrow below, which pins the tabs.
+        let menu_programs: Vec<Option<String>> = self
+            .menu
+            .as_ref()
+            .map(|menu| {
+                menu.items
+                    .iter()
+                    .map(|item| match &item.icon {
+                        MenuIcon::Program(program) => Some(program.clone()),
+                        MenuIcon::Glyph(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let menu_icons: Vec<Option<icon::TabIcon>> = menu_programs
+            .iter()
+            .map(|program| {
+                program
+                    .as_deref()
+                    .and_then(|program| self.cached_icon(program))
+            })
+            .collect();
         let Some(session) = self.tabs.active() else {
             return;
         };
@@ -621,6 +740,10 @@ impl App {
         let icons: Vec<Option<icon::TabIcon>> = (0..self.tabs.len())
             .map(|index| self.tabs[index].icon.clone())
             .collect();
+        let (window_width, window_height) = self.window.as_ref().map_or((0.0, 0.0), |window| {
+            let size = window.inner_size();
+            (size.width as f32, size.height as f32)
+        });
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
             return;
         };
@@ -649,7 +772,28 @@ impl App {
             renderer.draw_chrome(layout, ui_px, active, &icons, self.strip_hover);
         }
         if let Some(menu) = self.menu.as_ref() {
-            renderer.draw_menu(menu, ui_px);
+            renderer.draw_menu(menu, &menu_icons);
+        }
+        if let Some(hover) = self.tooltip_hover.as_ref() {
+            if hover.since.elapsed() >= Duration::from_millis(TOOLTIP_DELAY_MS) {
+                let k = hover.anchor.h / TAB_STRIP_HEIGHT;
+                let text_px = TOOLTIP_TEXT_PX * k;
+                let text_width =
+                    renderer
+                        .fonts()
+                        .width_in(crate::fonts::UI_FONT_ID, &hover.text, text_px);
+                let line_height = renderer.fonts().ui_line_height(text_px);
+                if let Some(tooltip) = Tooltip::new(
+                    &hover.text,
+                    hover.anchor,
+                    text_width,
+                    line_height,
+                    window_width,
+                    window_height,
+                ) {
+                    renderer.draw_tooltip(&tooltip);
+                }
+            }
         }
         renderer.sync();
 
@@ -907,6 +1051,8 @@ impl App {
         // all highlight.
         let hover = strip_hover(self.strip_action_at(x, y));
         self.set_strip_hover(hover);
+        let target = self.tooltip_target(x, y);
+        self.update_tooltip_hover(target);
         // Keep the scrollbar expanded for the whole drag, even when the pointer
         // slips off the thumb.
         self.set_scrollbar_hover(self.scrollbar_drag || self.scrollbar_hit(x, y).is_some());
@@ -1021,6 +1167,8 @@ impl App {
         // disarms the chain, while a second empty-band press pairs.
         let mut strip = StripPress::Ignore;
         if state == ElementState::Pressed {
+            // A press dismisses a tooltip even when it starts a drag.
+            self.clear_tooltip();
             let press =
                 chrome_press(self.layout.as_ref().and_then(|layout| {
                     layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
@@ -1562,6 +1710,7 @@ fn about_text() -> String {
 /// past [`PROFILE_SHORTCUTS`] leaves it empty instead of naming a key that
 /// opens nothing.
 fn menu_items(config: &Config) -> Vec<MenuItem> {
+    let default = crate::profiles::default_profile_index(config);
     let mut items: Vec<MenuItem> = crate::profiles::profiles(config)
         .iter()
         .enumerate()
@@ -1571,18 +1720,33 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
             } else {
                 String::new()
             };
-            MenuItem::profile(index, &profile.name, &shortcut)
+            let mut item =
+                MenuItem::profile(index, &profile.name, &shortcut, &profile.shell.program);
+            // Windows Terminal draws the profile `+` would open semibold.
+            item.default = index == default;
+            item
         })
         .collect();
     // Neither row has a key binding, so neither may name one: an empty hint is
     // truthful, a dead shortcut is not.
-    items.push(MenuItem::fixed(MenuAction::Settings, "Settings", ""));
+    items.push(MenuItem::fixed(
+        MenuAction::Settings,
+        "Settings",
+        "",
+        crate::fonts::GLYPH_SETTINGS,
+    ));
     items.push(MenuItem::fixed(
         MenuAction::CommandPalette,
         "Command palette",
         "",
+        crate::fonts::GLYPH_COMMAND_PALETTE,
     ));
-    items.push(MenuItem::fixed(MenuAction::About, "About", ""));
+    items.push(MenuItem::fixed(
+        MenuAction::About,
+        "About",
+        "",
+        crate::fonts::GLYPH_HELP,
+    ));
     items
 }
 
@@ -2032,12 +2196,33 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.blink.advance(Instant::now()) {
+        let now = Instant::now();
+        if self.blink.advance(now) {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
-        match self.blink.deadline {
+        // A tooltip waiting out its delay needs a wake-up of its own: the blink
+        // timer may be a whole cursor phase away, or absent.
+        let mut tooltip_deadline = self
+            .tooltip_hover
+            .as_ref()
+            .filter(|hover| !hover.shown)
+            .map(|hover| hover.since + Duration::from_millis(TOOLTIP_DELAY_MS));
+        if tooltip_deadline.is_some_and(|deadline| now >= deadline) {
+            if let Some(hover) = self.tooltip_hover.as_mut() {
+                hover.shown = true;
+            }
+            tooltip_deadline = None;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        let deadline = match (self.blink.deadline, tooltip_deadline) {
+            (Some(blink), Some(tooltip)) => Some(blink.min(tooltip)),
+            (blink, tooltip) => blink.or(tooltip),
+        };
+        match deadline {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
@@ -2074,6 +2259,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // The pointer is off the window, so neither the strip nor a
                 // menu row is hovered.
                 self.set_strip_hover(None);
+                self.clear_tooltip();
                 self.set_scrollbar_hover(false);
                 if let Some(menu) = self.menu.as_mut() {
                     if menu.hovered.take().is_some() {
