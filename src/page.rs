@@ -11,8 +11,13 @@ use std::time::SystemTime;
 
 use crate::config::Config;
 
-/// Escape sequence that hides the cursor, clears the grid, and homes it.
-const RESET_SCREEN: &str = "\x1b[?25l\x1b[2J\x1b[H";
+/// Escape sequence that hides the cursor, clears the grid and the scrollback,
+/// and homes the cursor.
+///
+/// Pages are refilled in place, so the scrollback erase is what keeps a
+/// Settings tab (polled on every config save) or a palette (refilled on every
+/// keystroke) from piling the previous grids into history.
+const RESET_SCREEN: &str = "\x1b[?25l\x1b[2J\x1b[3J\x1b[H";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {
@@ -296,5 +301,29 @@ mod tests {
         let text = Page::new(PageKind::About).text(&config(), Path::new("unused"));
         assert!(text.contains("Termyx"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn refilling_a_page_drops_the_previous_refills_history() {
+        // A Settings tab is refilled on every config save and a palette on
+        // every keystroke. Without an explicit scrollback erase the old grids
+        // pile up in history and grow a scrollbar over a page that is a single
+        // screen.
+        let mut terminal = crate::term::Terminal::new(40, 10, 100);
+        for line in 0..40 {
+            terminal.feed(format!("old output {line}\r\n").as_bytes());
+        }
+        assert!(
+            terminal.history_size() > 0,
+            "the fixture must start with rows in the scrollback"
+        );
+
+        let page = Page::new(PageKind::About);
+        terminal.feed(page.text(&config(), Path::new("unused")).as_bytes());
+        assert_eq!(
+            terminal.history_size(),
+            0,
+            "a refill must leave no earlier grid behind"
+        );
     }
 }
