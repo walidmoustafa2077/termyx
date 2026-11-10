@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::thread;
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::ShellConfig;
@@ -12,13 +12,17 @@ use crate::event::UserEvent;
 
 /// A shell running in a pseudo-terminal.
 ///
-/// One reader thread forwards output bytes verbatim; the UI thread owns this
-/// value and never touches the PTY reader directly.
+/// One reader thread forwards output bytes verbatim and one waiter thread
+/// reports the shell exiting; the UI thread owns this value and never touches
+/// the PTY reader directly.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    /// Kills the shell when the session is dropped. The waiter thread owns the
+    /// child and reaps it.
+    killer: Box<dyn ChildKiller + Send + Sync>,
     _reader: thread::JoinHandle<()>,
+    _waiter: thread::JoinHandle<()>,
 }
 
 impl PtySession {
@@ -31,17 +35,34 @@ impl PtySession {
         proxy: EventLoopProxy<UserEvent>,
         session: u64,
     ) -> Result<Self> {
-        Self::spawn_with(config, cols, rows, move |bytes| {
-            let _ = proxy.send_event(UserEvent::PtyOutput { session, bytes });
-        })
+        let exit_proxy = proxy.clone();
+        Self::spawn_with(
+            config,
+            cols,
+            rows,
+            move |bytes| {
+                let _ = proxy.send_event(UserEvent::PtyOutput { session, bytes });
+            },
+            move || {
+                let _ = exit_proxy.send_event(UserEvent::Exited { session });
+            },
+        )
     }
 
-    /// Spawns the configured shell and forwards output chunks to `on_output`.
+    /// Spawns the configured shell and forwards output chunks to `on_output`,
+    /// then calls `on_exit` once the reader loop ends.
     ///
-    /// The reader thread owns the callback and exits when the PTY closes.
-    pub fn spawn_with<F>(config: &ShellConfig, cols: u16, rows: u16, on_output: F) -> Result<Self>
+    /// The reader thread owns both callbacks and exits when the PTY closes.
+    pub fn spawn_with<F, G>(
+        config: &ShellConfig,
+        cols: u16,
+        rows: u16,
+        on_output: F,
+        on_exit: G,
+    ) -> Result<Self>
     where
         F: Fn(Vec<u8>) + Send + 'static,
+        G: FnOnce() + Send + 'static,
     {
         let (program, args) = build_command(config);
         let pair = native_pty_system().openpty(PtySize {
@@ -59,7 +80,8 @@ impl PtySession {
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "termyx");
 
-        let child = pair.slave.spawn_command(command)?;
+        let mut child = pair.slave.spawn_command(command)?;
+        let killer = child.clone_killer();
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -78,12 +100,21 @@ impl PtySession {
                 }
             }
         });
+        // A Windows pseudoconsole keeps its output pipe open after the child
+        // exits, so the reader never sees EOF there. Waiting on the child is the
+        // one exit signal both platforms give, and it reaps the child so `Drop`
+        // only has to kill.
+        let waiter_thread = thread::spawn(move || {
+            let _ = child.wait();
+            on_exit();
+        });
 
         Ok(Self {
             master: pair.master,
             writer,
-            child,
+            killer,
             _reader: reader_thread,
+            _waiter: waiter_thread,
         })
     }
 
@@ -108,8 +139,9 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // The waiter thread owns the child and reaps it; dropping the session
+        // only has to stop the shell.
+        let _ = self.killer.kill();
     }
 }
 
@@ -195,9 +227,15 @@ mod tests {
         }
 
         let (sender, receiver) = mpsc::channel();
-        let _session = PtySession::spawn_with(&shell, 80, 24, move |bytes| {
-            let _ = sender.send(bytes);
-        })
+        let _session = PtySession::spawn_with(
+            &shell,
+            80,
+            24,
+            move |bytes| {
+                let _ = sender.send(bytes);
+            },
+            || {},
+        )
         .expect("spawn pty");
 
         let mut output = Vec::new();
@@ -219,5 +257,36 @@ mod tests {
             "pty output was {:?}",
             String::from_utf8_lossy(&output)
         );
+    }
+
+    #[test]
+    fn the_exit_callback_runs_when_the_shell_ends() {
+        let mut shell = ShellConfig::default();
+        #[cfg(windows)]
+        {
+            shell.program = "cmd.exe".into();
+            shell.args = vec!["/C".into(), "exit".into()];
+        }
+        #[cfg(not(windows))]
+        {
+            shell.program = "/bin/sh".into();
+            shell.args = vec!["-c".into(), "exit".into()];
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let _session = PtySession::spawn_with(
+            &shell,
+            80,
+            24,
+            |_| {},
+            move || {
+                let _ = sender.send(());
+            },
+        )
+        .expect("spawn pty");
+
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader must report the shell exit");
     }
 }

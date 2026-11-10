@@ -38,7 +38,18 @@ pub struct GlyphCache {
 impl GlyphCache {
     pub fn new() -> Self {
         Self {
-            atlas: Atlas::new(2048, 2048),
+            // 4096²: subpixel coverage triples the mask width, so the previous
+            // 2048² filled after a few thousand glyphs at 32 px and then
+            // silently stopped painting CJK, Arabic, and symbol-heavy cells.
+            atlas: Atlas::new(4096, 4096),
+            slots: HashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_atlas(atlas: Atlas) -> Self {
+        Self {
+            atlas,
             slots: HashMap::new(),
         }
     }
@@ -58,24 +69,53 @@ impl GlyphCache {
         if let Some(slot) = self.slots.get(&key) {
             return *slot;
         }
-        let slot = self.rasterize(font, glyph, key.size_px as f32);
+        let slot = self.slot_for(font, glyph, key);
         self.slots.insert(key, slot);
         slot
     }
 
-    fn rasterize(&mut self, font: &FontVec, glyph: GlyphId, size_px: f32) -> Option<GlyphSlot> {
+    /// Rasterizes `key`, reclaiming the atlas once if it has filled up.
+    ///
+    /// A full atlas is a resource problem, not a font one: caching it as a miss
+    /// would leave that glyph blank for the rest of the process with no way to
+    /// recover.
+    fn slot_for(&mut self, font: &FontVec, glyph: GlyphId, key: GlyphKey) -> Option<GlyphSlot> {
+        match self.rasterize(font, glyph, key.size_px as f32) {
+            Rasterized::Slot(slot) => Some(slot),
+            // The face has no drawable outline for this glyph at this size;
+            // that is a property of the font, so remembering it is correct.
+            Rasterized::NoOutline => None,
+            Rasterized::Full => {
+                // Every cached slot points into the atlas that is about to be
+                // reused, so the slots must go with the coverage they describe.
+                self.atlas.clear();
+                self.slots.clear();
+                match self.rasterize(font, glyph, key.size_px as f32) {
+                    Rasterized::Slot(slot) => Some(slot),
+                    // A glyph that cannot fit even an empty atlas is
+                    // unrenderable at this size; no retry can change that.
+                    Rasterized::NoOutline | Rasterized::Full => None,
+                }
+            }
+        }
+    }
+
+    fn rasterize(&mut self, font: &FontVec, glyph: GlyphId, size_px: f32) -> Rasterized {
         // 1. Rasterize the outline at a 4x resolution so each sub-pixel column
         //    has enough samples to approximate the coverage integral.
         let big = RASTER_SUPERSAMPLE as f32;
-        let outlined = font
-            .outline_glyph(glyph.with_scale(PxScale::from(em_px_scale(font, size_px).y * big)))?;
+        let Some(outlined) =
+            font.outline_glyph(glyph.with_scale(PxScale::from(em_px_scale(font, size_px).y * big)))
+        else {
+            return Rasterized::NoOutline;
+        };
         let bounds = outlined.px_bounds();
         let cols = bounds.width().ceil().max(1.0) as u32;
         let rows = bounds.height().ceil().max(1.0) as u32;
         let cells_w = cols.div_ceil(RASTER_SUPERSAMPLE);
         let cells_h = rows.div_ceil(RASTER_SUPERSAMPLE);
         if cells_w == 0 || cells_h == 0 {
-            return None;
+            return Rasterized::NoOutline;
         }
         let big_w = cells_w * RASTER_SUPERSAMPLE;
         let big_h = cells_h * RASTER_SUPERSAMPLE;
@@ -118,14 +158,25 @@ impl GlyphCache {
             }
         }
 
-        let rect = self.atlas.alloc(mask_w, mask_h)?;
+        let Some(rect) = self.atlas.alloc(mask_w, mask_h) else {
+            return Rasterized::Full;
+        };
         self.atlas.upload(rect, &mask);
-        Some(GlyphSlot {
+        Rasterized::Slot(GlyphSlot {
             rect,
             bearing_x: (bounds.min.x / big).round() as i32,
             bearing_y: (bounds.min.y / big).round() as i32,
         })
     }
+}
+
+/// Why one rasterization pass did or did not produce a slot.
+enum Rasterized {
+    Slot(GlyphSlot),
+    /// The face has no drawable outline for this glyph at this size.
+    NoOutline,
+    /// The atlas had no room; the glyph itself is fine.
+    Full,
 }
 
 impl Default for GlyphCache {
@@ -179,5 +230,49 @@ mod tests {
             size_px: fonts.size_px.round() as u32,
         };
         assert!(matches!(cache.slots.get(&key), Some(&None)));
+    }
+
+    #[test]
+    fn a_full_atlas_is_cleared_and_the_glyph_retried() {
+        let fonts = FontSet::load("Consolas", "Kawkab Mono", 14.0, 1.2)
+            .or_else(|_| FontSet::load("DejaVu Sans Mono", "Kawkab Mono", 14.0, 1.2))
+            .expect("font");
+        let glyph = fonts.font.glyph_id('A');
+        // A small atlas reaches exhaustion in a few allocations, so the retry
+        // can be proven without filling a real one glyph by glyph.
+        let mut cache = GlyphCache::with_atlas(Atlas::new(64, 64));
+        while cache.atlas.alloc(64, 8).is_some() {}
+        assert!(cache.atlas.alloc(1, 1).is_none(), "the atlas must be full");
+
+        // A slot cached before the clear describes the old layout; the next
+        // allocation will hand its rect to another glyph.
+        let stale = GlyphKey {
+            font: 0,
+            glyph: glyph.0,
+            size_px: 0,
+        };
+        cache.slots.insert(
+            stale,
+            Some(GlyphSlot {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                },
+                bearing_x: 0,
+                bearing_y: 0,
+            }),
+        );
+
+        let slot = cache
+            .get(0, &fonts.font, glyph, fonts.size_px)
+            .expect("the exhausted atlas must be cleared and the glyph rasterized");
+        assert!(slot.rect.w > 0 && slot.rect.h > 0);
+        assert!(
+            !cache.slots.contains_key(&stale),
+            "the clear must drop slots that point into the reused atlas"
+        );
+        assert_eq!(cache.slots.len(), 1, "only the retried glyph is cached");
     }
 }

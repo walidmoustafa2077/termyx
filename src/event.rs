@@ -8,6 +8,9 @@
 pub enum UserEvent {
     /// Bytes read from the pty, fed verbatim to the parser.
     PtyOutput { session: u64, bytes: Vec<u8> },
+    /// The session's reader thread ended: the shell exited or the pty closed,
+    /// so the tab has nothing left to show.
+    Exited { session: u64 },
     /// OSC 0/2 set the window title.
     Title { session: u64, title: String },
     /// A title-stack pop, or a term options reset, left the terminal with no

@@ -59,6 +59,14 @@ impl Atlas {
         Some(Rect { x: 0, y, w, h })
     }
 
+    /// Empties every shelf and zeroes the coverage so the whole atlas can be
+    /// reused. A caller that holds rects from before the clear must drop them:
+    /// the next allocations hand those same coordinates out to other glyphs.
+    pub fn clear(&mut self) {
+        self.shelves.clear();
+        self.data.fill(0);
+    }
+
     pub fn upload(&mut self, rect: Rect, mask: &[u8]) {
         debug_assert_eq!(mask.len(), (rect.w * rect.h) as usize);
         for row in 0..rect.h {

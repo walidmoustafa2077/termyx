@@ -26,7 +26,7 @@ use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::ui::menu::{MenuAction, MenuItem, MenuLayout};
-use crate::ui::tab_bar::{TabBarLayout, TabHit};
+use crate::ui::tab_bar::{StripHover, TabBarLayout, TabHit};
 use crate::visual::VisualMap;
 
 /// Upper bound on a single paste, in Unicode scalar values. A larger clipboard
@@ -61,9 +61,9 @@ pub struct App {
     /// The open `⌄` dropdown, if any. While it is `Some` the menu owns the
     /// pointer: presses, motion, the wheel, and Escape all route to it.
     menu: Option<MenuLayout>,
-    /// Tab under the pointer, painted as hover. Only a tab body counts: the
-    /// close button and the two buttons leave it clear.
-    hovered_tab: Option<usize>,
+    /// What the pointer is over in the strip, painted as hover. The `+` and `⌄`
+    /// buttons highlight too; empty band paints nothing.
+    strip_hover: Option<StripHover>,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     selection: Option<Selection>,
@@ -100,7 +100,7 @@ impl App {
             tabs: TabSet::new(),
             layout: None,
             menu: None,
-            hovered_tab: None,
+            strip_hover: None,
             clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
@@ -114,7 +114,10 @@ impl App {
             scrollbar_grab: 0.0,
             scrollbar_hover: false,
             blink: CursorBlink::idle(),
-            cursor_pos: (0.0, 0.0),
+            // Off the strip and outside the window until the first CursorMoved:
+            // (0, 0) is inside the strip band, so a press arriving first would
+            // be eaten as a chrome press.
+            cursor_pos: (-1.0, -1.0),
             cols: 80,
             rows: 24,
         }
@@ -386,9 +389,7 @@ impl App {
         // A forwarded press belongs to the tab that owns it. Balance it before
         // the new session becomes active, or the release would reach the wrong
         // shell and leave the original one stuck down.
-        if let Some(tracked) = release_button(self.app_mouse_button.take()) {
-            self.send_mouse(input::MouseEventKind::Release, Some(tracked));
-        }
+        self.release_forwarded_button();
         self.tabs.push(session);
         // The new tab is active, so a selection on the old grid is stale.
         self.selection = None;
@@ -407,10 +408,16 @@ impl App {
     /// Returns whether the set is now empty: a window with no tab has nothing
     /// left to show, so the caller exits.
     fn close_tab(&mut self, index: usize) -> bool {
+        // The session that owns a forwarded button is about to be dropped, so
+        // no release could ever reach it: balance the press first.
+        self.release_forwarded_button();
         let _ = self.tabs.remove(index);
         self.selection = None;
+        // The drag that was extending a selection in this tab has nothing left
+        // to extend.
+        self.mouse_down = false;
         // The tab under the pointer may have moved with the removal.
-        self.hovered_tab = None;
+        self.strip_hover = None;
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -434,13 +441,13 @@ impl App {
         Some(strip_action(layout.hit(x as f32, y as f32), active))
     }
 
-    /// Paints `hovered` as the tab under the pointer, redrawing only when the
-    /// tab actually changes.
-    fn set_hovered_tab(&mut self, hovered: Option<usize>) {
-        if self.hovered_tab == hovered {
+    /// Paints `hover` as the target under the pointer, redrawing only when it
+    /// actually changes.
+    fn set_strip_hover(&mut self, hover: Option<StripHover>) {
+        if self.strip_hover == hover {
             return;
         }
-        self.hovered_tab = hovered;
+        self.strip_hover = hover;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -484,7 +491,7 @@ impl App {
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         if let Some(layout) = self.layout.as_ref() {
-            renderer.draw_chrome(layout, ui_px, active, self.hovered_tab);
+            renderer.draw_chrome(layout, ui_px, active, self.strip_hover);
         }
         if let Some(menu) = self.menu.as_ref() {
             renderer.draw_menu(menu, ui_px);
@@ -692,6 +699,9 @@ impl App {
         let Some(next) = cycle_index(current, delta, self.tabs.len()) else {
             return;
         };
+        // The tab being hidden must release the button it was forwarded before
+        // the new session becomes the one keyboard input reaches.
+        self.release_forwarded_button();
         self.tabs.select(next);
         // The keyboard switch paints the tab the same way a click does.
         self.selection = None;
@@ -729,10 +739,9 @@ impl App {
             }
             return;
         }
-        // Only a tab body or the active tab's `✕` highlights; the two buttons
-        // leave the strip flat.
-        let hovered = hovered_tab(self.strip_action_at(x, y));
-        self.set_hovered_tab(hovered);
+        // A tab body, its `✕`, and the two buttons all highlight.
+        let hover = strip_hover(self.strip_action_at(x, y));
+        self.set_strip_hover(hover);
         // Keep the scrollbar expanded for the whole drag, even when the pointer
         // slips off the thumb.
         self.set_scrollbar_hover(self.scrollbar_drag || self.scrollbar_hit(x, y).is_some());
@@ -853,15 +862,11 @@ impl App {
             if let Some(menu) = self.menu.as_ref() {
                 let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                 let press = menu_press(menu.hit(x, y), menu.rect.contains(x, y));
-                let action = match press {
-                    MenuPress::Choose(index) => menu.items.get(index).map(|item| item.action),
-                    MenuPress::Dismiss => None,
-                };
+                let action = menu_choice(press, button)
+                    .and_then(|index| menu.items.get(index).map(|item| item.action));
                 // A forwarded button belongs to the tab that owns it; balance
                 // it before the menu takes over the pointer.
-                if let Some(tracked) = release_button(self.app_mouse_button.take()) {
-                    self.send_mouse(input::MouseEventKind::Release, Some(tracked));
-                }
+                self.release_forwarded_button();
                 // The press is chrome's, so its release cannot copy a stale
                 // selection, and it starts no grid click chain.
                 self.mouse_down = false;
@@ -880,9 +885,7 @@ impl App {
             if let Some(action) = self.strip_action_at(self.cursor_pos.0, self.cursor_pos.1) {
                 // A forwarded button belongs to the tab that owns it; balance
                 // it before the strip takes over the pointer.
-                if let Some(tracked) = release_button(self.app_mouse_button.take()) {
-                    self.send_mouse(input::MouseEventKind::Release, Some(tracked));
-                }
+                self.release_forwarded_button();
                 // The band starts a click chain of its own, so the next grid
                 // click cannot pair with this one as a double click.
                 self.mouse_down = false;
@@ -932,9 +935,7 @@ impl App {
                 {
                     // Release any button forwarded before the drag takes over
                     // the pointer, so the application is not left stuck down.
-                    if let Some(tracked) = release_button(self.app_mouse_button.take()) {
-                        self.send_mouse(input::MouseEventKind::Release, Some(tracked));
-                    }
+                    self.release_forwarded_button();
                     self.mouse_down = false;
                     match hit {
                         ScrollbarHit::Thumb(grab) => {
@@ -1221,6 +1222,15 @@ impl App {
         }
     }
 
+    /// Balances a button forwarded to the application before the pointer
+    /// changes owner: the release must reach the session that saw the press, or
+    /// that application believes the button is still down forever.
+    fn release_forwarded_button(&mut self) {
+        if let Some(tracked) = release_button(self.app_mouse_button.take()) {
+            self.send_mouse(input::MouseEventKind::Release, Some(tracked));
+        }
+    }
+
     fn pos_at(&self, x: f64, y: f64) -> Option<LogicalPos> {
         let renderer = self.renderer.as_ref()?;
         let snapshot = self.tabs.active()?.terminal.snapshot();
@@ -1362,15 +1372,19 @@ fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
     }
 }
 
-/// The tab the pointer must highlight for a strip action.
+/// The strip target the pointer must highlight for a strip action.
 ///
 /// A hit on the active tab's `✕` is a close rather than a select, but the
 /// button sits inside its tab, so that tab is still the one under the pointer
-/// and must keep its hover. The `+`/`⌄` buttons belong to no tab.
-fn hovered_tab(action: Option<StripAction>) -> Option<usize> {
+/// and must keep its hover. The `+`/`⌄` buttons highlight as themselves.
+fn strip_hover(action: Option<StripAction>) -> Option<StripHover> {
     match action {
-        Some(StripAction::Select(index) | StripAction::Close(index)) => Some(index),
-        _ => None,
+        Some(StripAction::Select(index) | StripAction::Close(index)) => {
+            Some(StripHover::Tab(index))
+        }
+        Some(StripAction::NewTab) => Some(StripHover::Plus),
+        Some(StripAction::OpenMenu) => Some(StripHover::Chevron),
+        Some(StripAction::Ignore) | None => None,
     }
 }
 
@@ -1394,6 +1408,18 @@ fn menu_press(hit: Option<usize>, inside: bool) -> MenuPress {
         (_, false) => MenuPress::Dismiss,
         (Some(index), true) => MenuPress::Choose(index),
         (None, true) => MenuPress::Dismiss,
+    }
+}
+
+/// The row a press activates, if any.
+///
+/// Only the left button chooses a row. Another button still dismisses the panel
+/// — the caller always closes it — but must not run the row under it, so a
+/// right click cannot open the config file.
+fn menu_choice(press: MenuPress, button: MouseButton) -> Option<usize> {
+    match press {
+        MenuPress::Choose(index) if button == MouseButton::Left => Some(index),
+        _ => None,
     }
 }
 
@@ -1557,7 +1583,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput { session, bytes } => {
                 if let FeedOutcome::Active { reflowed } =
@@ -1572,6 +1598,20 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                }
+            }
+            UserEvent::Exited { session } => {
+                // A background tab closes without taking the view: `TabSet`
+                // only moves the active slot when it was the one removed.
+                let Some(index) = self.tabs.position(session) else {
+                    // The tab is already gone; this is the reader of a session
+                    // the user closed.
+                    return;
+                };
+                tracing::debug!(session, index, "shell exited; closing its tab");
+                if self.close_tab(index) {
+                    // A window with no tab has nothing left to show.
+                    event_loop.exit();
                 }
             }
             UserEvent::Title { session, title } => {
@@ -1658,7 +1698,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 // The pointer is off the window, so neither the strip nor a
                 // menu row is hovered.
-                self.set_hovered_tab(None);
+                self.set_strip_hover(None);
                 self.set_scrollbar_hover(false);
                 if let Some(menu) = self.menu.as_mut() {
                     if menu.hovered.take().is_some() {
@@ -1682,10 +1722,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if !focused {
                     // A pressed button may never get its release after focus
                     // loss; balance the application and end local drags.
-                    if let Some(button) = self.app_mouse_button.take() {
-                        self.send_mouse(input::MouseEventKind::Release, Some(button));
-                    }
+                    self.release_forwarded_button();
                     self.mouse_down = false;
+                    // A strip press ends off-window too, so its release must
+                    // not still suppress copy-on-select in the grid.
+                    self.press_in_chrome = false;
                     self.scrollbar_drag = false;
                     let (x, y) = self.cursor_pos;
                     self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
@@ -2376,6 +2417,20 @@ mod tests {
     }
 
     #[test]
+    fn only_the_left_button_chooses_a_menu_row() {
+        assert_eq!(
+            menu_choice(MenuPress::Choose(2), MouseButton::Left),
+            Some(2)
+        );
+        assert_eq!(
+            menu_choice(MenuPress::Choose(2), MouseButton::Right),
+            None,
+            "a right click dismisses the panel without running its row"
+        );
+        assert_eq!(menu_choice(MenuPress::Dismiss, MouseButton::Left), None);
+    }
+
+    #[test]
     fn the_strip_controls_map_to_their_actions() {
         use crate::ui::tab_bar::TabHit;
         assert_eq!(
@@ -2461,15 +2516,26 @@ mod tests {
     #[test]
     fn the_active_tab_stays_hovered_over_its_close_button() {
         assert_eq!(
-            hovered_tab(Some(StripAction::Close(1))),
-            Some(1),
+            strip_hover(Some(StripAction::Close(1))),
+            Some(StripHover::Tab(1)),
             "the close button sits inside its tab, so the backdrop must stay"
         );
-        assert_eq!(hovered_tab(Some(StripAction::Select(0))), Some(0));
-        assert_eq!(hovered_tab(Some(StripAction::NewTab)), None);
-        assert_eq!(hovered_tab(Some(StripAction::OpenMenu)), None);
-        assert_eq!(hovered_tab(Some(StripAction::Ignore)), None);
-        assert_eq!(hovered_tab(None), None);
+        assert_eq!(
+            strip_hover(Some(StripAction::Select(0))),
+            Some(StripHover::Tab(0))
+        );
+        assert_eq!(
+            strip_hover(Some(StripAction::NewTab)),
+            Some(StripHover::Plus),
+            "the plus is its own hover target"
+        );
+        assert_eq!(
+            strip_hover(Some(StripAction::OpenMenu)),
+            Some(StripHover::Chevron),
+            "the chevron is its own hover target"
+        );
+        assert_eq!(strip_hover(Some(StripAction::Ignore)), None);
+        assert_eq!(strip_hover(None), None);
     }
 
     #[test]
@@ -2696,8 +2762,8 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty =
-            PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}).expect("spawn the test shell");
+        let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
+            .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
 

@@ -44,6 +44,17 @@ pub enum TabHit {
     Chevron,
 }
 
+/// What the pointer is over in the strip band, for painting hover.
+///
+/// A tab body (or its close button) is one target; the two buttons are their
+/// own, so a press on `+` or `⌄` can highlight without claiming a tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripHover {
+    Tab(usize),
+    Plus,
+    Chevron,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabBarLayout {
     pub width: f32,

@@ -227,6 +227,11 @@ impl TabSet {
         self.sessions.iter_mut().find(|session| session.id == id)
     }
 
+    /// The slot index of the session `id` carries, if it is still open.
+    pub fn position(&self, id: SessionId) -> Option<usize> {
+        self.sessions.iter().position(|session| session.id == id)
+    }
+
     pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
         self.slots.set_title(id, title)
     }
@@ -378,8 +383,8 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty =
-            PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}).expect("spawn the test shell");
+        let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
+            .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
 
@@ -431,6 +436,29 @@ mod tests {
         assert_eq!(
             set.session_mut(second).map(|session| session.id),
             Some(second)
+        );
+    }
+
+    #[test]
+    fn a_session_is_found_by_id_until_it_is_removed() {
+        let mut set = TabSet::new();
+        let first = set.next_id();
+        let second = set.next_id();
+        set.push(test_session(first));
+        set.push(test_session(second));
+
+        assert_eq!(set.position(first), Some(0));
+        assert_eq!(set.position(second), Some(1));
+        set.remove(0);
+        assert_eq!(
+            set.position(first),
+            None,
+            "a closed session must not be found again"
+        );
+        assert_eq!(
+            set.position(second),
+            Some(0),
+            "the index follows the removal"
         );
     }
 

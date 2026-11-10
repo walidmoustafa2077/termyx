@@ -15,7 +15,7 @@ use crate::selection::Selection;
 use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
-use crate::ui::tab_bar::{TabBarLayout, TAB_STRIP_HEIGHT};
+use crate::ui::tab_bar::{StripHover, TabBarLayout, TAB_STRIP_HEIGHT};
 use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
@@ -185,13 +185,13 @@ impl Renderer {
     ///
     /// `ui_px` is the physical chrome em size, already scaled by the window's
     /// DPI factor; `active` indexes the tab the window shows, and `hover` is
-    /// the tab under the pointer, if any.
+    /// the strip target under the pointer, if any.
     pub fn draw_chrome(
         &mut self,
         layout: &TabBarLayout,
         ui_px: f32,
         active: usize,
-        hover: Option<usize>,
+        hover: Option<StripHover>,
     ) {
         if layout.strip_h <= 0.0 || layout.width <= 0.0 {
             return;
@@ -199,7 +199,7 @@ impl Renderer {
         self.fill_band(layout);
         self.draw_tabs(layout, active, hover);
         self.draw_band_rule(layout);
-        self.draw_buttons(layout, ui_px);
+        self.draw_buttons(layout, ui_px, hover);
         self.draw_titles(layout, ui_px, active);
     }
 
@@ -212,11 +212,15 @@ impl Renderer {
     /// One fill per tab, then the details that tell them apart: a rule between
     /// neighbours and, on the active tab under the pointer, a backdrop behind
     /// the close button.
-    fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<usize>) {
+    fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
+        let hovered = match hover {
+            Some(StripHover::Tab(index)) => Some(index),
+            _ => None,
+        };
         for tab in &layout.tabs {
             let color = if tab.index == active {
                 self.theme.tab_active
-            } else if hover == Some(tab.index) {
+            } else if hovered == Some(tab.index) {
                 self.theme.tab_hover
             } else {
                 self.theme.tab_bar
@@ -228,7 +232,7 @@ impl Renderer {
         for tab in layout.tabs.iter().skip(1) {
             self.fill_rect(tab.rect.x, 0.0, 1.0, layout.strip_h, self.theme.tab_border);
         }
-        self.draw_close_backdrop(layout, active, hover);
+        self.draw_close_backdrop(layout, active, hovered);
     }
 
     /// Paints the square behind the active tab's `✕` while that tab is
@@ -261,14 +265,22 @@ impl Renderer {
     }
 
     /// The `+` and `⌄` glyphs. They share one inset and one colour, so they are
-    /// painted from the same pair of constants.
-    fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32) {
+    /// painted from the same pair of constants. A hovered button is filled with
+    /// the strip's `#1f1f1f` tone before its glyph goes down.
+    fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32, hover: Option<StripHover>) {
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let inset_x = 9.0 * k;
         let top = 6.0 * k;
         let width = layout.plus.w;
         let foreground = self.theme.foreground;
-        for (glyph, rect) in [("+", layout.plus), ("⌄", layout.chevron)] {
+        let buttons = [
+            ("+", layout.plus, StripHover::Plus),
+            ("⌄", layout.chevron, StripHover::Chevron),
+        ];
+        for (glyph, rect, target) in buttons {
+            if hover == Some(target) {
+                self.fill_rect(rect.x, 0.0, rect.w, rect.h, self.theme.tab_active);
+            }
             ui_text::draw_text(self, glyph, rect.x + inset_x, top, ui_px, foreground, width);
         }
     }
@@ -914,7 +926,12 @@ mod tests {
             "the close button has no backdrop when the pointer is away"
         );
 
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(0));
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Tab(0)),
+        );
         assert_eq!(
             pixel_at(&renderer, square.0, square.1),
             renderer.theme.tab_close_hover,
@@ -966,13 +983,60 @@ mod tests {
     }
 
     #[test]
+    fn the_plus_and_chevron_fill_with_the_hover_tone() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        // The strip's hover fill is `#1f1f1f`; pin the literal, not the theme
+        // field, so a palette rename cannot silently drop it.
+        let hover = Rgb::new(0x1f, 0x1f, 0x1f);
+        // A corner inside the button, clear of the glyph inset and the rule.
+        let plus = (layout.plus.x + 2.0, 2.0);
+        let chevron = (layout.chevron.x + 2.0, 2.0);
+
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(StripHover::Plus));
+        assert_eq!(
+            pixel_at(&renderer, plus.0, plus.1),
+            hover,
+            "a hovered + must fill with the strip's hover tone"
+        );
+        assert_eq!(
+            pixel_at(&renderer, chevron.0, chevron.1),
+            renderer.theme.tab_bar,
+            "the un-hovered chevron must stay flat"
+        );
+
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Chevron),
+        );
+        assert_eq!(
+            pixel_at(&renderer, chevron.0, chevron.1),
+            hover,
+            "a hovered ⌄ must fill with the strip's hover tone"
+        );
+        assert_eq!(
+            pixel_at(&renderer, plus.0, plus.1),
+            renderer.theme.tab_bar,
+            "leaving + must clear its fill"
+        );
+    }
+
+    #[test]
     fn the_strip_band_leaves_no_unpainted_pixel() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let sentinel = Rgb::new(255, 0, 255);
         renderer.pixmap.fill(sentinel.to_tiny());
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(1));
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Tab(1)),
+        );
         for y in 0..layout.strip_h as u32 {
             for x in 0..layout.width as u32 {
                 assert_ne!(
@@ -1001,7 +1065,12 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(1));
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Tab(1)),
+        );
         let tab = layout.tabs[1].rect;
         // The right padding is clear of the title and, since tab 1 is not
         // active, of any close glyph.

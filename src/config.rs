@@ -13,19 +13,36 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
-    fn windows_defaults() -> [Self; 2] {
-        [
-            Self {
-                name: "Windows PowerShell".to_string(),
-                program: "powershell.exe".to_string(),
+    /// The shells a first run offers before any config file exists.
+    ///
+    /// Windows has two named shells to choose from. Every other target has one
+    /// profile with an empty `program`, which makes `build_command` resolve the
+    /// user's `$SHELL`; a fixed name here could only guess wrong and would stop
+    /// the app from spawning at all on a clean machine.
+    fn platform_defaults() -> Vec<Self> {
+        #[cfg(windows)]
+        {
+            vec![
+                Self {
+                    name: "Windows PowerShell".to_string(),
+                    program: "powershell.exe".to_string(),
+                    args: Vec::new(),
+                },
+                Self {
+                    name: "Command Prompt".to_string(),
+                    program: "cmd.exe".to_string(),
+                    args: Vec::new(),
+                },
+            ]
+        }
+        #[cfg(not(windows))]
+        {
+            vec![Self {
+                name: "Default".to_string(),
+                program: String::new(),
                 args: Vec::new(),
-            },
-            Self {
-                name: "Command Prompt".to_string(),
-                program: "cmd.exe".to_string(),
-                args: Vec::new(),
-            },
-        ]
+            }]
+        }
     }
 }
 
@@ -55,7 +72,7 @@ impl Default for Config {
             selection: SelectionConfig::default(),
             theme: ThemeConfig::default(),
             shell: ShellConfig::default(),
-            profiles: ProfileConfig::windows_defaults().to_vec(),
+            profiles: ProfileConfig::platform_defaults(),
             default_profile: 0,
         }
     }
@@ -331,7 +348,7 @@ impl Config {
         self.window.padding = self.window.padding.clamp(0, 64);
         if self.profiles.is_empty() {
             self.profiles = if self.shell == ShellConfig::default() {
-                ProfileConfig::windows_defaults().to_vec()
+                ProfileConfig::platform_defaults()
             } else {
                 vec![ProfileConfig {
                     name: "Default".to_string(),
@@ -530,12 +547,24 @@ mod tests {
     }
 
     #[test]
-    fn profiles_default_to_windows_power_shell_and_command_prompt() {
+    fn profiles_default_to_the_platform_shells() {
         let config = Config::from_toml_str("").unwrap();
         let names: Vec<&str> = config.profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Windows PowerShell", "Command Prompt"]);
-        assert_eq!(config.profiles[0].program, "powershell.exe");
-        assert_eq!(config.profiles[1].program, "cmd.exe");
+        #[cfg(windows)]
+        {
+            assert_eq!(names, ["Windows PowerShell", "Command Prompt"]);
+            assert_eq!(config.profiles[0].program, "powershell.exe");
+            assert_eq!(config.profiles[1].program, "cmd.exe");
+        }
+        #[cfg(not(windows))]
+        {
+            // An empty program is what sends `build_command` to `$SHELL`; a
+            // hard-coded name here is the reason the app could not start on
+            // Linux or macOS.
+            assert_eq!(names, ["Default"]);
+            assert_eq!(config.profiles[0].program, "");
+            assert!(config.profiles[0].args.is_empty());
+        }
         assert_eq!(config.default_profile, 0);
     }
 
