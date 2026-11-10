@@ -41,8 +41,8 @@ impl TabSlots {
         self.active = Some(self.ids.len() - 1);
     }
 
-    // Counting tabs, checking emptiness, switching to one, and removing one
-    // are the close path's needs (Task 9), so those compile for the tests only.
+    // Counting tabs is the keyboard shortcuts' need (Task 10), so it compiles
+    // for the tests only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.ids.len()
@@ -57,7 +57,6 @@ impl TabSlots {
         self.active
     }
 
-    #[cfg(test)]
     pub fn select(&mut self, index: usize) {
         if index < self.ids.len() {
             self.active = Some(index);
@@ -66,7 +65,6 @@ impl TabSlots {
 
     /// Removes the active slot and activates the neighbour that takes its
     /// place: the one to the right, else the one to the left.
-    #[cfg(test)]
     pub fn remove_active(&mut self) -> Option<SessionId> {
         let index = self.active?;
         let id = self.ids.remove(index);
@@ -156,14 +154,13 @@ impl TabSet {
         self.sessions.len() - 1
     }
 
-    // Counting tabs, switching to one, and closing one are the close path's
-    // needs (Task 9), so those compile for the tests only.
+    // Counting tabs is the keyboard shortcuts' need (Task 10), so it compiles
+    // for the tests only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
@@ -172,7 +169,6 @@ impl TabSet {
         self.slots.active_index()
     }
 
-    #[cfg(test)]
     pub fn select(&mut self, index: usize) {
         self.slots.select(index);
     }
@@ -186,7 +182,6 @@ impl TabSet {
         Some(&mut self.sessions[index])
     }
 
-    #[cfg(test)]
     pub fn remove_active(&mut self) -> Option<Session> {
         let index = self.slots.active_index()?;
         let id = self.slots.remove_active()?;

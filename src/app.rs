@@ -25,7 +25,7 @@ use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
-use crate::ui::tab_bar::TabBarLayout;
+use crate::ui::tab_bar::{TabBarLayout, TabHit};
 use crate::visual::VisualMap;
 
 /// Upper bound on a single paste, in Unicode scalar values. A larger clipboard
@@ -57,8 +57,8 @@ pub struct App {
     /// Strip geometry from the window width and every tab title. `None` until
     /// the first session exists.
     layout: Option<TabBarLayout>,
-    /// Tab under the pointer, painted as hover. Written by the strip's cursor
-    /// handling in Task 9.
+    /// Tab under the pointer, painted as hover. Only a tab body counts: the
+    /// close button and the two buttons leave it clear.
     hovered_tab: Option<usize>,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
@@ -318,10 +318,53 @@ impl App {
             self.proxy.clone(),
         )?;
         self.tabs.push(session);
-        // The new tab is active, so a selection on the old grid is stale.
+        // The new tab is active, so a selection on the old grid is stale, and
+        // a `+` click arrives from a mouse handler that may still be mid-press.
+        self.selection = None;
+        self.mouse_down = false;
+        self.app_mouse_button = None;
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Closes the tab at `index` and shows the neighbour that takes its place.
+    ///
+    /// Dropping the session closes its child through `PtySession::drop`.
+    /// Returns whether the set is now empty: a window with no tab has nothing
+    /// left to show, so the caller exits.
+    fn close_tab(&mut self, index: usize) -> bool {
+        self.tabs.select(index);
+        let _ = self.tabs.remove_active();
         self.selection = None;
         self.rebuild_layout();
-        Ok(())
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        self.tabs.is_empty()
+    }
+
+    /// The strip control under a physical-pixel position, if any.
+    ///
+    /// The layout is built from physical pixels (window width and the height
+    /// the renderer reserved), and winit reports mouse positions in that same
+    /// space, so the hit test needs no scaling here.
+    fn tab_hit(&self, x: f64, y: f64) -> Option<TabHit> {
+        self.layout.as_ref()?.hit(x as f32, y as f32)
+    }
+
+    /// Paints `hovered` as the tab under the pointer, redrawing only when the
+    /// tab actually changes.
+    fn set_hovered_tab(&mut self, hovered: Option<usize>) {
+        if self.hovered_tab == hovered {
+            return;
+        }
+        self.hovered_tab = hovered;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// The parser of the tab the window shows.
@@ -466,6 +509,13 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        // Only a tab body highlights; a pointer on the close button or the two
+        // buttons leaves the strip flat.
+        let hovered = match self.tab_hit(x, y) {
+            Some(TabHit::Tab(index)) => Some(index),
+            _ => None,
+        };
+        self.set_hovered_tab(hovered);
         // Keep the scrollbar expanded for the whole drag, even when the pointer
         // slips off the thumb.
         self.set_scrollbar_hover(self.scrollbar_drag || self.scrollbar_hit(x, y).is_some());
@@ -557,17 +607,51 @@ impl App {
         self.scroll_local(lines);
     }
 
-    fn on_mouse(&mut self, state: ElementState, button: MouseButton) {
+    /// Handles a mouse button. Returns whether the window should exit: closing
+    /// the last tab leaves a terminal with nothing to show.
+    fn on_mouse(&mut self, state: ElementState, button: MouseButton) -> bool {
         let Some(input_button) = map_mouse_button(button) else {
-            return;
+            return false;
         };
         self.blink.restart(Instant::now());
+
+        if state == ElementState::Pressed {
+            // The strip sits above the grid and owns its clicks: they must not
+            // reach the PTY, start a grid selection, grab the scrollbar, or
+            // paste over a tab, whichever button was pressed.
+            if let Some(hit) = self.tab_hit(self.cursor_pos.0, self.cursor_pos.1) {
+                if button != MouseButton::Left {
+                    return false;
+                }
+                match hit {
+                    TabHit::Tab(index) => {
+                        self.tabs.select(index);
+                        self.selection = None;
+                        self.rebuild_layout();
+                    }
+                    TabHit::Close(index) => return self.close_tab(index),
+                    TabHit::Plus => {
+                        let index = crate::profiles::default_profile_index(&self.config);
+                        if let Err(err) = self.new_tab(index) {
+                            tracing::warn!(%err, "could not open a tab");
+                        }
+                    }
+                    // The dropdown is its own task; the click is still the
+                    // strip's, so it must not fall through to the terminal.
+                    TabHit::Chevron => tracing::debug!("the profile menu is not open yet"),
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return false;
+            }
+        }
 
         if state == ElementState::Pressed {
             if self.scrollbar_drag && button != MouseButton::Left {
                 // The pointer belongs to the drag; a stray button must not
                 // paste or reach the application mid-gesture.
-                return;
+                return false;
             }
 
             if button == MouseButton::Left {
@@ -595,7 +679,7 @@ impl App {
                             self.scroll_local(lines);
                         }
                     }
-                    return;
+                    return false;
                 }
             }
 
@@ -615,7 +699,7 @@ impl App {
                         window.request_redraw();
                     }
                 }
-                return;
+                return false;
             }
 
             // Double and triple clicks stay local even when the application
@@ -642,7 +726,7 @@ impl App {
                     self.mouse_down = false;
                     let whole_line = self.click_count == 3;
                     let Some((start, end)) = self.bounds_at(position, whole_line) else {
-                        return;
+                        return false;
                     };
                     let mut selection = Selection::new(LogicalPos {
                         row: position.row,
@@ -656,7 +740,7 @@ impl App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
-                    return;
+                    return false;
                 }
             }
 
@@ -674,7 +758,7 @@ impl App {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
                 self.send_mouse(input::MouseEventKind::Press, Some(input_button));
-                return;
+                return false;
             }
 
             // Shift+drag and non-reporting apps keep local text selection.
@@ -684,14 +768,14 @@ impl App {
             // above has already claimed the click for mouse-reporting apps.
             if button == MouseButton::Right {
                 self.paste_clipboard();
-                return;
+                return false;
             }
             if button != MouseButton::Left {
-                return;
+                return false;
             }
 
             let Some(position) = click_position else {
-                return;
+                return false;
             };
             self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
@@ -699,13 +783,13 @@ impl App {
             self.scrollbar_drag = false;
             let (x, y) = self.cursor_pos;
             self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
-            return;
+            return false;
         } else if let Some(tracked) = release_button(self.app_mouse_button.take()) {
             // Route by the state captured at press time: a forwarded press is
             // released even when Shift or the mouse mode changed mid-gesture.
             self.send_mouse(input::MouseEventKind::Release, Some(tracked));
             self.mouse_down = false;
-            return;
+            return false;
         } else {
             self.mouse_down = false;
             if button == MouseButton::Left && self.config.selection.copy_on_select {
@@ -721,6 +805,7 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        false
     }
 
     /// Inclusive cell range of the word or row containing `position`.
@@ -1096,8 +1181,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(position.x, position.y)
             }
-            WindowEvent::CursorLeft { .. } => self.set_scrollbar_hover(false),
-            WindowEvent::MouseInput { state, button, .. } => self.on_mouse(state, button),
+            WindowEvent::CursorLeft { .. } => {
+                // The pointer is off the window, so no tab is hovered either.
+                self.set_hovered_tab(None);
+                self.set_scrollbar_hover(false);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if self.on_mouse(state, button) {
+                    // Closing the last tab leaves nothing to show.
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Focused(focused) => {
                 if focused {
                     // Coming back to the window shows the cursor immediately.
@@ -1719,6 +1813,19 @@ mod tests {
         let mut blink = CursorBlink::idle();
         blink.restart(Instant::now());
         assert_eq!(blink.deadline, None);
+    }
+
+    #[test]
+    fn a_click_on_the_plus_hit_is_recognised() {
+        let layout = crate::ui::tab_bar::TabBarLayout::new(800.0, 32.0, &["one", "two"], |_| 80.0);
+        let hit = layout.hit(layout.plus.x + 4.0, 10.0);
+        assert_eq!(hit, Some(crate::ui::tab_bar::TabHit::Plus));
+    }
+
+    #[test]
+    fn a_click_below_the_strip_is_not_a_tab_hit() {
+        let layout = crate::ui::tab_bar::TabBarLayout::new(800.0, 32.0, &["one"], |_| 80.0);
+        assert!(layout.hit(10.0, 40.0).is_none());
     }
 
     #[test]

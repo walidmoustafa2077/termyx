@@ -24,10 +24,6 @@ pub struct Rect {
 }
 
 impl Rect {
-    // The strip's click handling (Task 9) is the first non-test consumer of
-    // the hit test, so `contains`, `TabHit`, and `hit` compile for the tests
-    // until then.
-    #[cfg(test)]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -40,7 +36,6 @@ pub struct TabRect {
     pub close: Rect,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabHit {
     Tab(usize),
@@ -70,31 +65,35 @@ impl TabBarLayout {
     /// `width_of` measures a title at the UI font size, so a long title both
     /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip
     /// runs out of room.
+    ///
+    /// The two buttons are reserved before any tab is placed, and each tab may
+    /// claim at most an equal share of what is left. A crowded strip therefore
+    /// shrinks its tabs (below [`MIN_TAB_WIDTH`] if it must) instead of pushing
+    /// the buttons past the window edge, so `+` and `⌄` stay clickable.
     pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
         let strip_h = strip_h.max(0.0);
         let k = strip_h / TAB_STRIP_HEIGHT;
         let max_tab = MAX_TAB_WIDTH * k;
         let min_tab = MIN_TAB_WIDTH * k;
-        let button_width = BUTTON_WIDTH * k;
         let close_size = CLOSE_SIZE * k;
         let tab_padding = TAB_PADDING * k;
         let title_size = TITLE_SIZE * k;
-        let available = (width - 2.0 * button_width).max(min_tab);
-        let wanted: Vec<f32> = titles
-            .iter()
-            .map(|title| (width_of(title) + title_size).clamp(min_tab, max_tab))
-            .collect();
-        let total: f32 = wanted.iter().sum();
-        let scale = if total > available && total > 0.0 {
-            available / total
+        // A window narrower than the button pair shrinks both together, so the
+        // strip always ends exactly at `width` and neither button is clipped.
+        let buttons = (2.0 * BUTTON_WIDTH * k).min(width.max(0.0));
+        let button_width = buttons / 2.0;
+        let available = (width - buttons).max(0.0);
+        let cap = if titles.is_empty() {
+            max_tab
         } else {
-            1.0
+            (available / titles.len() as f32).min(max_tab)
         };
+        let floor = min_tab.min(cap);
 
         let mut tabs = Vec::with_capacity(titles.len());
         let mut x = 0.0;
-        for (index, wanted) in wanted.iter().enumerate() {
-            let w = (wanted * scale).max(min_tab.min(available));
+        for (index, title) in titles.iter().enumerate() {
+            let w = (width_of(title) + title_size).clamp(floor, cap);
             let rect = Rect {
                 x,
                 y: 0.0,
@@ -133,7 +132,6 @@ impl TabBarLayout {
         }
     }
 
-    #[cfg(test)]
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
         if y < 0.0 || y >= self.strip_h {
             return None;
@@ -200,6 +198,32 @@ mod tests {
         assert_eq!(
             layout.hit(layout.chevron.x + 2.0, layout.chevron.y + 2.0),
             Some(TabHit::Chevron)
+        );
+    }
+
+    #[test]
+    fn the_buttons_stay_inside_a_strip_crowded_with_tabs() {
+        // 20 tabs on a 1200 px strip: the fair share is far below
+        // `MIN_TAB_WIDTH`, and the two buttons must still be reachable.
+        let titles: Vec<String> = (0..20).map(|index| format!("tab {index}")).collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let layout = TabBarLayout::new(1200.0, 32.0, &refs, fixed);
+        assert_eq!(layout.tabs.len(), 20);
+        assert!(
+            layout.tabs[0].rect.w < MIN_TAB_WIDTH,
+            "a crowded strip shrinks tabs below the minimum instead of overflowing"
+        );
+        assert!(layout.plus.x + layout.plus.w <= layout.width);
+        assert!(layout.chevron.x + layout.chevron.w <= layout.width);
+        assert_eq!(
+            layout.hit(layout.plus.x + 4.0, 10.0),
+            Some(TabHit::Plus),
+            "the plus button must still be clickable"
+        );
+        assert_eq!(
+            layout.hit(layout.chevron.x + 4.0, 10.0),
+            Some(TabHit::Chevron),
+            "the chevron button must still be clickable"
         );
     }
 
