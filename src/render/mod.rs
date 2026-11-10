@@ -363,13 +363,14 @@ impl Renderer {
         }
     }
 
-    /// The `+` and `⌄` glyphs, centred in their buttons, with WT's 1 px
-    /// divider at each button's left edge.
+    /// The `+` and `⌄` glyphs, centred in their buttons, with WT's single 1 px
+    /// separator between them.
     ///
-    /// WT draws `#3D3D3D` before `+` and a slightly darker `#2D2D2D` before
-    /// `⌄`; here that is `tab_separator` and `tab_border`, three units apart and
-    /// visually indistinguishable. The dividers go down after the hover fill so
-    /// a hovered button keeps its edge.
+    /// Measured in WT, the only line on this run of strip is the boundary
+    /// between `+` and `⌄`, painted `#3D3D3D` (`tab_separator`). There is no
+    /// line at the `+` button's left edge, and none at the tab's right border
+    /// beyond the tab's own `#292929` outline. The separator goes down after
+    /// the hover fill so a hovered button keeps its edge.
     fn draw_buttons(&mut self, layout: &TabBarLayout, ui_px: f32, hover: Option<StripHover>) {
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let foreground = self.theme.foreground;
@@ -383,13 +384,15 @@ impl Renderer {
             }
             ui_text::draw_text_centred(self, glyph, rect, ui_px, foreground);
         }
-        let dividers = [
-            (layout.plus.x, self.theme.tab_separator),
-            (layout.chevron.x, self.theme.tab_border),
-        ];
-        for (x, color) in dividers {
-            self.fill_rect(x, 0.0, 1.0, layout.strip_h, color);
-        }
+        // One separator only, at the `+`/`⌄` boundary. Measured `#3D3D3D`
+        // there, so use `tab_separator`, not the tab's darker outline.
+        self.fill_rect(
+            layout.chevron.x,
+            0.0,
+            1.0,
+            layout.strip_h,
+            self.theme.tab_separator,
+        );
     }
 
     /// The minimise, maximise and close controls at the strip's right end.
@@ -1673,17 +1676,18 @@ mod tests {
 
     #[test]
     fn the_title_clip_stops_before_the_close_box() {
-        // One tab gets `(318 - 64 - 138 - 24) / 1`: the width left after the
-        // buttons, the caption controls and the drag gutter. That is wide
-        // enough to show a title and its ellipsis, though the title itself is
-        // far longer than the tab can hold.
+        // One tab gets `(318 - 64 - 138 - 24 - 4 - 8) / 1`: the width left
+        // after the buttons, the caption controls, the drag gutter, the gap
+        // before `+` and the strip's left margin. That is wide enough to show a
+        // title and its ellipsis, though the title itself is far longer than
+        // the tab can hold.
         let layout = TabBarLayout::new(
             318.0,
             TAB_STRIP_HEIGHT,
             &["a very long tab title that cannot fit"],
         );
         let tab = layout.tabs[0].rect;
-        assert_eq!(tab.w, 92.0);
+        assert_eq!(tab.w, 80.0);
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let title_left = tab.x + (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_width = (tab.w - TITLE_SIZE * k).max(0.0);
@@ -1946,17 +1950,22 @@ mod tests {
         assert_eq!(pixel_at(&renderer, body.x, body.y), theme.tab_bar);
         assert_eq!(pixel_at(&renderer, body.x + 10.0, body.y), theme.tab_border);
 
-        // (e) WT's 1 px dividers lift the buttons off the band.
-        assert_eq!(
-            pixel_at(&renderer, layout.plus.x, 10.0),
-            theme.tab_separator
-        );
-        assert_ne!(pixel_at(&renderer, layout.plus.x, 10.0), theme.tab_bar);
-        assert_eq!(
-            pixel_at(&renderer, layout.chevron.x, 10.0),
-            theme.tab_border
-        );
-        assert_ne!(pixel_at(&renderer, layout.chevron.x, 10.0), theme.tab_bar);
+        // (e) The only separator on this run of strip is the `+`/`⌄` boundary,
+        // measured `#3D3D3D` in WT. Nothing is drawn at the `+` button's left
+        // edge, and the separator column is full height (the band rule and the
+        // strip's own edges are outside 1..strip_h-1).
+        for y in 1..layout.strip_h as u32 - 1 {
+            assert_eq!(
+                pixel_at(&renderer, layout.plus.x, y as f32),
+                theme.tab_bar,
+                "nothing may be drawn at the + button's left edge (y={y})"
+            );
+            assert_eq!(
+                pixel_at(&renderer, layout.chevron.x, y as f32),
+                theme.tab_separator,
+                "the +/⌄ boundary must be the separator at y={y}"
+            );
+        }
     }
 
     #[test]

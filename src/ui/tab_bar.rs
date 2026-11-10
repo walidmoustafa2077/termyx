@@ -16,6 +16,18 @@ pub const TAB_STRIP_HEIGHT: f32 = 40.0;
 pub const TAB_TOP_INSET: f32 = 8.0;
 /// Widest a single tab grows; the equal share is capped here.
 pub const MAX_TAB_WIDTH: f32 = 240.0;
+/// Strip px Windows Terminal leaves before the first tab.
+///
+/// WT's first tab outline sits at x=7 with its body starting at x=8, so the
+/// strip keeps an ~8 px left margin. Without it the active tab's rounded left
+/// corner and outline are clipped by the window edge.
+pub const TAB_LEFT_PAD: f32 = 8.0;
+/// Gap in strip px between the last tab and the `+` button.
+///
+/// WT's `+` sits a few px right of the last tab, and the only separator on that
+/// run of strip is the one between `+` and `⌄` (measured: the separator is the
+/// last tab end + 37 at one, two and three 240 px tabs, with 32 px buttons).
+pub const TAB_BUTTON_GAP: f32 = 4.0;
 /// The width below which the strip counts as crowded, pinned by the tests.
 ///
 /// The layout applies no floor — Windows Terminal enforces only the
@@ -127,10 +139,11 @@ impl TabBarLayout {
     /// hit-testing stay aligned at any DPI.
     ///
     /// The two buttons and the three window controls are reserved before any
-    /// tab is placed, and every tab then claims the same share of what is left
-    /// after the drag gutter, capped at [`MAX_TAB_WIDTH`]. That is the equal
-    /// division Windows Terminal uses: a title never drives the width, so one
-    /// tab on a wide window takes the full 240 px.
+    /// tab is placed, and every tab then claims the same share of the width
+    /// left after the drag gutter, the gap before `+` and the strip's left
+    /// margin, capped at [`MAX_TAB_WIDTH`]. That is the equal division Windows
+    /// Terminal uses: a title never drives the width, so one tab on a wide
+    /// window takes the full 240 px.
     ///
     /// A crowded strip shrinks every tab below the 80 px reference width
     /// instead of pushing a control past the window edge or swallowing the
@@ -142,6 +155,10 @@ impl TabBarLayout {
         let max_tab = MAX_TAB_WIDTH * k;
         let close_size = CLOSE_SIZE * k;
         let tab_padding = TAB_PADDING * k;
+        // WT keeps a small strip margin before the first tab so its rounded
+        // outline is not clipped, and a small gap before the `+` button.
+        let pad = TAB_LEFT_PAD * k;
+        let gap = TAB_BUTTON_GAP * k;
         // A window narrower than the button pair shrinks both together, so the
         // strip always ends exactly at `width` and neither button is clipped.
         let buttons = (2.0 * BUTTON_WIDTH * k).min(width.max(0.0));
@@ -154,7 +171,7 @@ impl TabBarLayout {
         // whatever is left, so subtracting it here is what keeps the empty band
         // visible even when every tab is at its cap.
         let gutter = (DRAG_GUTTER * k).min((width - buttons - caption).max(0.0));
-        let available = (width - buttons - caption - gutter).max(0.0);
+        let available = (width - buttons - caption - gutter - gap - pad).max(0.0);
         // Equal division, capped. No floor: when the share drops below the
         // 80 px reference width the strip is crowded and the smaller share is
         // taken as it is, rather than overflowing the controls.
@@ -165,7 +182,7 @@ impl TabBarLayout {
         };
 
         let mut tabs = Vec::with_capacity(titles.len());
-        let mut x = 0.0;
+        let mut x = pad;
         for index in 0..titles.len() {
             let rect = Rect {
                 x,
@@ -209,8 +226,12 @@ impl TabBarLayout {
             x += tab_width;
         }
 
+        // The buttons follow the last tab instead of hugging the right edge.
+        // The clamp keeps both left of the caption controls on a crowded strip,
+        // where the share would otherwise push them under the controls.
+        let plus_x = (x + gap).max(pad).min((width - caption - buttons).max(pad));
         let plus = Rect {
-            x,
+            x: plus_x,
             y: 0.0,
             w: button_width,
             h: strip_h,
@@ -296,7 +317,7 @@ mod tests {
     fn tabs_are_laid_out_left_to_right_and_are_capped() {
         let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
         assert_eq!(layout.tabs.len(), 3);
-        assert!((layout.tabs[0].rect.x - 0.0).abs() < f32::EPSILON);
+        assert_eq!(layout.tabs[0].rect.x, TAB_LEFT_PAD);
         assert!(layout.tabs[1].rect.x > layout.tabs[0].rect.x);
         assert!(layout.tabs[2].rect.x > layout.tabs[1].rect.x);
         assert!((layout.tabs[0].rect.w - MAX_TAB_WIDTH).abs() < f32::EPSILON);
@@ -312,8 +333,8 @@ mod tests {
 
     #[test]
     fn every_tab_gets_the_same_share_until_the_cap() {
-        // Three tabs on 1200 px: `(1200 - 64 - 138 - 24) / 3` is above the
-        // cap, so all three are exactly the cap wide.
+        // Three tabs on 1200 px: `(1200 - 64 - 138 - 24 - 4 - 8) / 3` is above
+        // the cap, so all three are exactly the cap wide.
         let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
         for tab in &layout.tabs {
             assert_eq!(tab.rect.w, MAX_TAB_WIDTH);
@@ -344,6 +365,67 @@ mod tests {
         let tab_end = layout.tabs[0].rect.x + layout.tabs[0].rect.w;
         assert!(layout.plus.x >= tab_end);
         assert!(layout.chevron.x > layout.plus.x);
+    }
+
+    #[test]
+    fn the_first_tab_gets_the_strip_left_margin() {
+        // WT's first tab outline sits at x=7 and its body starts at x=8, so
+        // ours starts at the 8 px pad and still takes the full 240 px cap.
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        assert_eq!(layout.tabs[0].rect.x, 8.0);
+        assert_eq!(layout.tabs[0].body.x, 8.0);
+        assert_eq!(layout.tabs[0].rect.w, 240.0);
+        // The `+` follows the tab after a 4 px gap; `⌄` starts one button later.
+        assert_eq!(layout.plus.x, 252.0);
+        assert_eq!(layout.chevron.x, 284.0);
+    }
+
+    #[test]
+    fn the_button_block_tracks_the_last_tab_on_two_and_three_tabs() {
+        // Measured WT: the `+`/`⌄` boundary is the last tab end + 37 at one,
+        // two and three 240 px tabs; with our 4 px gap it lands at end + 36.
+        // Either way the block moves with the tabs rather than being pinned
+        // to the right edge.
+        let two = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        assert_eq!(two.chevron.x, 524.0);
+        let three = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
+        assert_eq!(three.chevron.x, 764.0);
+        for layout in [&two, &three] {
+            assert_eq!(layout.chevron.x, layout.plus.x + BUTTON_WIDTH);
+        }
+    }
+
+    #[test]
+    fn eight_tabs_keep_the_buttons_clear_of_the_caption_controls() {
+        let titles: Vec<&str> = (0..8).map(|_| "one").collect();
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &titles);
+        // WT's three 46 px caption controls reserve 138 px; the button block
+        // must end before them and every tab must remain a target.
+        assert!(
+            layout.chevron.x + layout.chevron.w <= 1200.0 - 3.0 * CAPTION_BUTTON_WIDTH,
+            "the button block must stay left of the caption controls"
+        );
+        assert!(
+            layout.tabs.iter().all(|tab| tab.rect.w >= 1.0),
+            "every tab must keep a clickable width"
+        );
+    }
+
+    #[test]
+    fn the_strip_left_of_the_first_tab_is_not_a_tab() {
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one"]);
+        assert_eq!(layout.hit(TAB_LEFT_PAD - 1.0, 10.0), None);
+        assert_eq!(layout.hit(0.0, 10.0), None);
+    }
+
+    #[test]
+    fn the_button_rects_still_hit_plus_and_chevron() {
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["one", "two", "three"]);
+        assert_eq!(layout.hit(layout.plus.x + 2.0, 10.0), Some(TabHit::Plus));
+        assert_eq!(
+            layout.hit(layout.chevron.x + 2.0, 10.0),
+            Some(TabHit::Chevron)
+        );
     }
 
     #[test]
