@@ -2,15 +2,22 @@
 
 use crate::theme::Rgb;
 
-/// Paints the native window frame in the terminal background colour.
+/// Rounds the native window's corners and paints its frame in the chrome's
+/// border colour.
 ///
-/// Windows 11 draws a light 1-pixel border around every window; against a
-/// dark terminal it reads as a line above and below the content. Matching the
-/// border to the background hides it without touching the client area.
+/// Windows 11 draws a light 1-pixel border around every window and square
+/// corners on an undecorated one; against a dark terminal the border reads as a
+/// line above and below the content. Matching it to the strip's separator hides
+/// it without touching the client area, and the rounded preference matches the
+/// shape a decorated window has by default.
 #[cfg(target_os = "windows")]
-pub fn apply_dark_frame(window: &winit::window::Window, background: Rgb) {
+pub fn apply_dark_frame(window: &winit::window::Window, border: Rgb) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+    /// Corner shape of the window frame (`DwmSetWindowAttribute`).
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    /// `DWMWCP_ROUND`: the system's small-corner preference.
+    const DWMWCP_ROUND: u32 = 2;
     /// Border colour of the window frame (`DwmSetWindowAttribute`).
     const DWMWA_BORDER_COLOR: u32 = 34;
 
@@ -21,8 +28,7 @@ pub fn apply_dark_frame(window: &winit::window::Window, background: Rgb) {
         return;
     };
     // COLORREF layout is 0x00BBGGRR.
-    let color =
-        u32::from(background.r) | u32::from(background.g) << 8 | u32::from(background.b) << 16;
+    let color = u32::from(border.r) | u32::from(border.g) << 8 | u32::from(border.b) << 16;
 
     unsafe extern "system" {
         fn DwmSetWindowAttribute(
@@ -33,20 +39,28 @@ pub fn apply_dark_frame(window: &winit::window::Window, background: Rgb) {
         ) -> i32;
     }
 
-    // SAFETY: `hwnd` comes from winit's live window handle and `color` is a
-    // plain `u32` matching the attribute's documented size.
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    let size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: `hwnd` comes from winit's live window handle and both values are
+    // plain `u32`s matching the attributes' documented size.
     unsafe {
         DwmSetWindowAttribute(
-            win32.hwnd.get() as *mut core::ffi::c_void,
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &DWMWCP_ROUND as *const u32 as *const core::ffi::c_void,
+            size,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
             DWMWA_BORDER_COLOR,
             &color as *const u32 as *const core::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
+            size,
         );
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn apply_dark_frame(_window: &winit::window::Window, _background: Rgb) {}
+pub fn apply_dark_frame(_window: &winit::window::Window, _border: Rgb) {}
 
 /// One side or corner of the resize frame.
 ///

@@ -265,7 +265,11 @@ impl App {
             // painted buttons and `hit` would return a control for a click on
             // the chevron. Floor the window at 320 × 200 so the strip always
             // has the roughly 202 logical px those five controls need.
-            .with_min_inner_size(LogicalSize::new(320.0, 200.0));
+            .with_min_inner_size(LogicalSize::new(320.0, 200.0))
+            // The window stays hidden until the first frame is painted at the
+            // end of `create_window`: a visible-but-empty window shows the
+            // desktop for one frame, which reads as a flash on launch.
+            .with_visible(false);
         // On Windows the strip is the title bar, so no caption row may sit
         // above it. Only Windows restores a resize frame for an undecorated
         // window; other targets keep their native decorations, because removing
@@ -316,7 +320,7 @@ impl App {
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
-        platform::apply_dark_frame(&window, theme.background);
+        platform::apply_dark_frame(&window, theme.tab_border);
         let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
         renderer.set_top_inset(self.tab_strip_px());
 
@@ -350,7 +354,13 @@ impl App {
         let profile = crate::profiles::default_profile_index(&self.config);
         self.new_tab(profile)?;
 
+        // Paint the first frame before the window is shown, so the desktop is
+        // never visible through it and the tab strip is already in place when it
+        // appears. The redraw afterwards lets the OS settle anything it changed
+        // while showing the window.
+        self.render();
         if let Some(window) = &self.window {
+            window.set_visible(true);
             window.request_redraw();
         }
         Ok(())
@@ -2078,7 +2088,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(focused) => {
                 if focused {
-                    // Coming back to the window shows the cursor immediately.
+                    // Coming back to the window shows the cursor immediately,
+                    // and the frame is repainted so a surface the OS may have
+                    // cleared while unfocused is fresh before the cursor blink
+                    // resumes.
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                     self.blink.restart(Instant::now());
                 }
                 if !focused {
