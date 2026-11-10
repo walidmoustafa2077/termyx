@@ -370,6 +370,7 @@ impl App {
             fonts,
             theme,
             scaled_padding(self.config.window.padding, window.scale_factor()),
+            window.scale_factor() as f32,
         )?;
         renderer.set_top_inset(self.tab_strip_px());
 
@@ -385,6 +386,7 @@ impl App {
             renderer.fonts().cell_h,
             renderer.padding(),
             renderer.top_inset(),
+            renderer.scale_factor(),
         );
 
         if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
@@ -442,6 +444,7 @@ impl App {
             renderer.fonts().cell_h,
             renderer.padding(),
             renderer.top_inset(),
+            renderer.scale_factor(),
         );
         if cols == self.cols && rows == self.rows {
             return false;
@@ -462,12 +465,12 @@ impl App {
 
     /// Rebuilds the chrome and the grid for a new display scale factor.
     ///
-    /// The font set, the grid padding, the strip's top inset, the surface, the
-    /// tab geometry and every session's grid are re-derived from the new
-    /// factor, so the text, the window margin and the strip all grow together
-    /// with the display. A font reload failure logs and keeps the old set;
-    /// the window stays usable at the previous text size instead of ending the
-    /// session.
+    /// The font set, the grid padding, the strip's top inset, the scrollbar
+    /// metrics, the surface, the tab geometry and every session's grid are
+    /// re-derived from the new factor, so the text, the window margin and the
+    /// strip all grow together with the display. A font reload failure logs and
+    /// keeps the old set; the window stays usable at the previous text size
+    /// instead of ending the session.
     fn on_scale_factor_changed(&mut self, scale_factor: f64) {
         let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
             return;
@@ -495,7 +498,9 @@ impl App {
         // The strip height is physical and derives from the *new* scale factor,
         // so the inset must be recomputed rather than left at the old DPI's
         // value. The event's factor is authoritative here even if the window
-        // has already cached it.
+        // has already cached it. The scrollbar's widths and the gutter reserved
+        // for it derive from the same factor.
+        renderer.set_scale_factor(scale_factor as f32);
         renderer.set_padding(scaled_padding(self.config.window.padding, scale_factor));
         renderer.set_top_inset(strip_px(scale_factor));
         self.resize_surface(size.width, size.height);
@@ -1588,14 +1593,19 @@ impl App {
         let session = self.tabs.active()?;
         let window = self.window.as_ref()?;
         let size = window.inner_size();
+        let history = session.terminal.scrollable_history();
+        let offset = session.terminal.display_offset();
         scrollbar::geometry(
             size.width,
             renderer.padding() + renderer.top_inset(),
             renderer.fonts().cell_h,
-            self.rows,
-            session.terminal.scrollable_history(),
-            session.terminal.display_offset(),
-            hovered,
+            scrollbar::BarState {
+                rows: self.rows,
+                history,
+                offset,
+                hovered,
+            },
+            renderer.scale_factor(),
         )
     }
 
@@ -2533,10 +2543,11 @@ fn grid_size(
     cell_h: u32,
     padding: u32,
     top_inset: u32,
+    scale_factor: f32,
 ) -> (usize, usize) {
     // The scrollbar lives in a reserved gutter so its hovered width never
     // covers the last text column.
-    let gutter = scrollbar::GUTTER.ceil() as u32;
+    let gutter = scrollbar::gutter(scale_factor).ceil() as u32;
     let usable_w = width.saturating_sub(padding.saturating_mul(2).saturating_add(gutter));
     let usable_h = height.saturating_sub(padding.saturating_mul(2).saturating_add(top_inset));
     let cols = (usable_w / cell_w.max(1)).max(20) as usize;
@@ -2732,24 +2743,32 @@ mod tests {
 
     #[test]
     fn grid_size_uses_padding_and_minimums() {
-        assert_eq!(grid_size(1200, 800, 10, 20, 4, 0), (117, 39));
-        assert_eq!(grid_size(100, 100, 10, 20, 4, 0), (20, 5));
+        assert_eq!(grid_size(1200, 800, 10, 20, 4, 0, 1.0), (117, 39));
+        assert_eq!(grid_size(100, 100, 10, 20, 4, 0, 1.0), (20, 5));
     }
 
     #[test]
     fn grid_size_reserves_the_scrollbar_gutter() {
         let usable = 1200 - 4 * 2;
         assert_eq!(
-            grid_size(1200, 800, 1, 20, 4, 0).0,
-            usable - scrollbar::GUTTER.ceil() as usize
+            grid_size(1200, 800, 1, 20, 4, 0, 1.0).0,
+            usable - scrollbar::gutter(1.0).ceil() as usize
         );
+    }
+
+    #[test]
+    fn grid_size_reserves_a_wider_gutter_at_a_higher_scale() {
+        // The reserved strip must grow with the display: at 150% the hovered
+        // thumb is 18 px wide, so one fewer one-pixel column fits.
+        assert_eq!(grid_size(1200, 800, 1, 20, 4, 0, 1.0).0, 1178);
+        assert_eq!(grid_size(1200, 800, 1, 20, 4, 0, 1.5).0, 1171);
     }
 
     #[test]
     fn the_tab_strip_costs_two_rows_of_grid() {
         let padding = 8;
-        let (_, full) = grid_size(800, 600, 8, 16, padding, 0);
-        let (_, with_strip) = grid_size(800, 600, 8, 16, padding, 32);
+        let (_, full) = grid_size(800, 600, 8, 16, padding, 0, 1.0);
+        let (_, with_strip) = grid_size(800, 600, 8, 16, padding, 32, 1.0);
         assert_eq!(full - with_strip, 2);
     }
 

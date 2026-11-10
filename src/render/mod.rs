@@ -32,6 +32,9 @@ pub struct Renderer {
     pub cache: GlyphCache,
     pub theme: Theme,
     padding: u32,
+    /// The display scale factor, which sizes the scrollbar's thumb, its
+    /// minimum length and the gutter reserved for it.
+    scale_factor: f32,
     /// Pixels reserved above the grid for the tab strip.
     top_inset: u32,
     shape_cache: shape::ShapeCache,
@@ -176,10 +179,16 @@ fn corner_coverage(
 impl Renderer {
     /// Builds a renderer with a one-pixel surface.
     ///
-    /// `padding` is the window margin in physical pixels: the caller has
-    /// already scaled the configured logical value by the window's DPI factor,
-    /// because every coordinate below it is physical.
-    pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
+    /// `padding` is the window margin in physical pixels and `scale_factor` the
+    /// display's scale: the caller has already applied the factor to the
+    /// configured logical padding, and the scrollbar keeps the factor to size
+    /// its own physical metrics. Every coordinate below is physical.
+    pub fn new(
+        fonts: FontSet,
+        theme: Theme,
+        padding: u32,
+        scale_factor: f32,
+    ) -> anyhow::Result<Self> {
         let pixmap = Pixmap::new(1, 1)
             .ok_or_else(|| anyhow::anyhow!("could not allocate the initial pixmap"))?;
         Ok(Self {
@@ -189,6 +198,7 @@ impl Renderer {
             cache: GlyphCache::new(),
             theme,
             padding,
+            scale_factor,
             top_inset: 0,
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
@@ -314,14 +324,17 @@ impl Renderer {
             self.pixmap.width(),
             self.padding + self.top_inset,
             self.fonts.cell_h,
-            snapshot.rows,
-            snapshot.history,
-            snapshot.display_offset,
-            self.scrollbar_hover,
+            scrollbar::BarState {
+                rows: snapshot.rows,
+                history: snapshot.history,
+                offset: snapshot.display_offset,
+                hovered: self.scrollbar_hover,
+            },
+            self.scale_factor,
         ) {
             let color = self.theme.indexed(8);
             if self.scrollbar_hover {
-                let track_w = 2.0;
+                let track_w = 2.0 * self.scale_factor;
                 let track_x = geom.x + (geom.width - track_w) / 2.0;
                 let track = Rgb::new(
                     blend(self.theme.background.r, color.r, 0.4),
@@ -1092,6 +1105,18 @@ impl Renderer {
     /// scale changes so the margin grows with the text and the strip.
     pub fn set_padding(&mut self, padding: u32) {
         self.padding = padding;
+    }
+
+    /// The display scale factor the scrollbar metrics are derived from.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    /// Updates the display scale. Called on a display change with the event's
+    /// factor, before the grid is rebuilt, so the reserved gutter and the
+    /// thumb resize in the same frame as the fonts.
+    pub fn set_scale_factor(&mut self, scale_factor: f32) {
+        self.scale_factor = scale_factor;
     }
 
     /// Pixels reserved above the grid for the tab strip. Drawing offsets every
@@ -2362,7 +2387,7 @@ mod tests {
         let fonts = FontSet::load("Consolas", "Arial", 14.0, 1.2)
             .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 14.0, 1.2))
             .expect("a monospace font must exist");
-        Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4)
+        Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4, 1.0)
             .expect("renderer must be constructible")
     }
 
@@ -2373,7 +2398,7 @@ mod tests {
         if !fonts.has_arabic() {
             return None;
         }
-        Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4).ok()
+        Renderer::new(fonts, Theme::from_config(&ThemeConfig::default()), 4, 1.0).ok()
     }
 
     pub(crate) fn packed(color: Rgb) -> u32 {
@@ -3326,10 +3351,13 @@ mod tests {
             renderer.pixmap.width(),
             renderer.padding,
             renderer.fonts.cell_h,
-            snapshot.rows,
-            snapshot.history,
-            snapshot.display_offset,
-            false,
+            crate::scrollbar::BarState {
+                rows: snapshot.rows,
+                history: snapshot.history,
+                offset: snapshot.display_offset,
+                hovered: false,
+            },
+            renderer.scale_factor(),
         )
         .expect("history should show a scrollbar");
         let x = (geom.x + geom.width / 2.0).round() as u32;
@@ -3380,20 +3408,26 @@ mod tests {
             renderer.pixmap.width(),
             renderer.padding,
             renderer.fonts.cell_h,
-            snapshot.rows,
-            snapshot.history,
-            snapshot.display_offset,
-            false,
+            crate::scrollbar::BarState {
+                rows: snapshot.rows,
+                history: snapshot.history,
+                offset: snapshot.display_offset,
+                hovered: false,
+            },
+            renderer.scale_factor(),
         )
         .expect("history should show a scrollbar");
         let hovered = crate::scrollbar::geometry(
             renderer.pixmap.width(),
             renderer.padding,
             renderer.fonts.cell_h,
-            snapshot.rows,
-            snapshot.history,
-            snapshot.display_offset,
-            true,
+            crate::scrollbar::BarState {
+                rows: snapshot.rows,
+                history: snapshot.history,
+                offset: snapshot.display_offset,
+                hovered: true,
+            },
+            renderer.scale_factor(),
         )
         .expect("history should show a scrollbar");
         let y = (hovered.thumb_y + hovered.thumb_h / 2.0).round() as usize;

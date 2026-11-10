@@ -367,9 +367,9 @@ Frame composition, per row:
 ### 8.4 Geometry
 
 - Cell size is derived from the primary font's advance and line height, rounded to whole pixels.
-- DPI changes re-derive the font set, the tab strip height and the window
-  padding from the configured logical values, clear the atlas, and force a full
-  redraw.
+- DPI changes re-derive the font set, the tab strip height, the window padding
+  and the scrollbar's widths from the configured logical values, clear the
+  atlas, and force a full redraw.
 - Grid size = `floor((width - padding) / cell_w)`, `floor((height - padding) / cell_h)`.
 - Minimum window size: 20×5 cells.
 
