@@ -43,8 +43,26 @@ pub struct Renderer {
     shape_warned: bool,
     /// Whether the pointer is over the scrollbar, which widens its thumb.
     scrollbar_hover: bool,
+    /// Whether the window is maximised, which swaps the caption's maximise
+    /// glyph for the restore glyph. The app reads this from the live window
+    /// before each frame because the WM can maximise it without a click.
+    maximized: bool,
     /// The bundled app icon, decoded once for every tab to stamp from.
     tab_icon: Option<TabIcon>,
+}
+
+/// The glyph the maximise control paints for the window's current state.
+///
+/// `❐` (U+2750, upper-right shadowed white square) reads as the two overlapping
+/// windows Windows uses for "restore"; the fallback chain on this machine maps
+/// it, and `the_window_control_glyphs_resolve_to_a_face_that_maps_them` pins
+/// that. The plain `□` stays for the expand state.
+fn maximize_glyph(maximized: bool) -> &'static str {
+    if maximized {
+        "❐"
+    } else {
+        "□"
+    }
 }
 
 /// The fill and glyph colour for one caption control.
@@ -96,6 +114,7 @@ impl Renderer {
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
             scrollbar_hover: false,
+            maximized: false,
             tab_icon,
         })
     }
@@ -359,7 +378,9 @@ impl Renderer {
     /// Only the control under the pointer is filled: the close uses the accent
     /// red, the other two the strip's hover tone, and a resting control has no
     /// fill. The fill stops one pixel above the band rule so painting these
-    /// after [`Renderer::draw_band_rule`] leaves it intact.
+    /// after [`Renderer::draw_band_rule`] leaves it intact. The third control
+    /// shows a restore glyph while the window is maximised: `□` there would
+    /// claim that a click still expands an already-expanded window.
     fn draw_caption_buttons(
         &mut self,
         layout: &TabBarLayout,
@@ -368,7 +389,11 @@ impl Renderer {
     ) {
         let controls = [
             ("—", layout.minimize, StripHover::Minimize),
-            ("□", layout.maximize, StripHover::Maximize),
+            (
+                maximize_glyph(self.maximized),
+                layout.maximize,
+                StripHover::Maximize,
+            ),
             ("✕", layout.close_window, StripHover::CloseWindow),
         ];
         for (glyph, rect, target) in controls {
@@ -801,6 +826,12 @@ impl Renderer {
     /// widens its thumb and shows the track.
     pub fn set_scrollbar_hover(&mut self, hover: bool) {
         self.scrollbar_hover = hover;
+    }
+
+    /// Marks whether the window is maximised. The caption's third-state
+    /// distinction is a glyph, not a colour, so only the painter needs it.
+    pub fn set_maximized(&mut self, maximized: bool) {
+        self.maximized = maximized;
     }
 }
 
@@ -1297,7 +1328,7 @@ mod tests {
         use ab_glyph::Font;
 
         let renderer = default_renderer();
-        for ch in ['—', '□', '✕'] {
+        for ch in ['—', '□', '❐', '✕'] {
             let (face, glyph) = renderer.fonts().chrome_glyph(ch);
             let (font, _index) = renderer.fonts_face(face);
             assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");
@@ -1314,6 +1345,34 @@ mod tests {
                 "{ch:?} must have a positive advance"
             );
         }
+    }
+
+    #[test]
+    fn the_maximise_control_paints_a_distinct_restore_glyph() {
+        // The control must not claim "expand" while the window is already
+        // maximised. Compare the whole control cell rather than one pixel: the
+        // glyph's centre can be background for both faces.
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        let painted = |renderer: &mut Renderer, maximized: bool| {
+            renderer.set_maximized(maximized);
+            renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+            let rect = layout.maximize;
+            let mut pixels = Vec::new();
+            for y in rect.y as u32..(rect.y + rect.h) as u32 {
+                for x in rect.x as u32..(rect.x + rect.w) as u32 {
+                    pixels.push(pixel_at(renderer, x as f32, y as f32));
+                }
+            }
+            pixels
+        };
+
+        assert_ne!(
+            painted(&mut renderer, false),
+            painted(&mut renderer, true),
+            "a maximised window must paint the restore glyph, not `□`"
+        );
     }
 
     #[test]
@@ -1456,8 +1515,10 @@ mod tests {
 
     #[test]
     fn the_title_clip_stops_before_the_close_box() {
-        // One 116 px tab: `(318 - 64 - 138) / 1`, wide enough to show a title
-        // and its ellipsis. The title is far longer than the tab can hold.
+        // One tab gets `(318 - 64 - 138 - 24) / 1`: the width left after the
+        // buttons, the caption controls and the drag gutter. That is wide
+        // enough to show a title and its ellipsis, though the title itself is
+        // far longer than the tab can hold.
         let layout = TabBarLayout::new(
             318.0,
             32.0,
@@ -1465,7 +1526,7 @@ mod tests {
             |_| 200.0,
         );
         let tab = layout.tabs[0].rect;
-        assert_eq!(tab.w, 116.0);
+        assert_eq!(tab.w, 92.0);
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let title_left = tab.x + (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_width = (tab.w - TITLE_SIZE * k).max(0.0);

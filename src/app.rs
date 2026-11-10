@@ -257,9 +257,6 @@ impl App {
             initial_window_size(self.config.window.width, self.config.window.height, monitor);
         let attributes = Window::default_attributes()
             .with_title(FALLBACK_TITLE)
-            // The strip is the title bar, so no caption row may sit above it.
-            // The title stays for the taskbar and Alt+Tab.
-            .with_decorations(false)
             .with_inner_size(LogicalSize::new(width, height))
             // Below this width the caption controls (3 × 46) and the `+`/`⌄`
             // pair (2 × 32) cannot all fit: the caption rects would overlap the
@@ -267,6 +264,13 @@ impl App {
             // the chevron. Floor the window at 320 × 200 so the strip always
             // has the roughly 202 logical px those five controls need.
             .with_min_inner_size(LogicalSize::new(320.0, 200.0));
+        // On Windows the strip is the title bar, so no caption row may sit
+        // above it. Only Windows restores a resize frame for an undecorated
+        // window; other targets keep their native decorations, because removing
+        // them without a portable client-side resize would lose edge and corner
+        // resizing.
+        #[cfg(target_os = "windows")]
+        let attributes = attributes.with_decorations(false);
         let attributes = match icon::window_icon() {
             Ok(icon) => attributes.with_window_icon(Some(icon)),
             Err(err) => {
@@ -275,8 +279,10 @@ impl App {
             }
         };
         let window = Arc::new(event_loop.create_window(attributes)?);
-        // Removing the caption also drops the resize frame, Aero Snap and the
-        // shadow. Restore them before centring, which measures `outer_size`.
+        // On Windows, removing the caption also drops the resize frame. Restore
+        // it before centring, which measures `outer_size`. Other targets keep
+        // the frame and the decorations they were created with.
+        #[cfg(target_os = "windows")]
         platform::apply_custom_chrome(&window);
         // Center on the primary monitor so the OS never places the window over
         // the taskbar or past the screen edge.
@@ -392,10 +398,13 @@ impl App {
 
     /// Rebuilds the chrome and the grid for a new display scale factor.
     ///
-    /// Everything physical is re-derived from the new factor: the font set, the
-    /// strip's top inset, the surface, the tab geometry and every session's
-    /// grid. A font reload failure logs and keeps the old set; the window stays
-    /// usable at the previous text size instead of ending the session.
+    /// The font set, the strip's top inset, the surface, the tab geometry and
+    /// every session's grid are re-derived from the new factor. The renderer's
+    /// padding is not: it keeps the configured physical value, the same as at
+    /// startup, so the grid's outer margin and the strip's left inset do not
+    /// grow with the scale. A font reload failure logs and keeps the old set;
+    /// the window stays usable at the previous text size instead of ending the
+    /// session.
     fn on_scale_factor_changed(&mut self, scale_factor: f64) {
         let Some(size) = self.window.as_ref().map(|window| window.inner_size()) else {
             return;
@@ -560,6 +569,10 @@ impl App {
 
     fn render(&mut self) {
         let scrollbar_hover = self.scrollbar_hover || self.scrollbar_drag;
+        let maximized = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.is_maximized());
         let ui_px = UI_SIZE_PX * self.scale_factor() as f32;
         let Some(session) = self.tabs.active() else {
             return;
@@ -589,6 +602,7 @@ impl App {
             .map(|line| VisualMap::for_row(line, &self.config.bidi))
             .collect();
         renderer.set_scrollbar_hover(scrollbar_hover);
+        renderer.set_maximized(maximized);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, self.strip_hover);
@@ -959,23 +973,19 @@ impl App {
     /// Handles a mouse button. Returns whether the window should exit: closing
     /// the last tab leaves a terminal with nothing to show.
     fn on_mouse(&mut self, state: ElementState, button: MouseButton) -> bool {
-        let Some(input_button) = map_mouse_button(button) else {
-            return false;
-        };
-        self.blink.restart(Instant::now());
-
+        // The window's double-click chain is a left-button empty-band gesture.
+        // Compute it once for every press that reaches this method, including
+        // Back/Forward, which `map_mouse_button` drops below: a control, the
+        // menu, the grid, or another button is not part of the gesture and
+        // disarms the chain, while a second empty-band press pairs.
+        let mut strip = StripPress::Ignore;
         if state == ElementState::Pressed {
-            // The window's double-click chain is a left-button empty-band
-            // gesture. Compute it once for every press: a control, the menu,
-            // the grid, or another button is not part of it and disarms it,
-            // while a second empty-band press pairs.
             let press =
                 chrome_press(self.layout.as_ref().and_then(|layout| {
                     layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
                 }));
-            let in_strip = self
-                .strip_action_at(self.cursor_pos.0, self.cursor_pos.1)
-                .is_some();
+            let action = self.strip_action_at(self.cursor_pos.0, self.cursor_pos.1);
+            let in_strip = action.is_some();
             let (chain, double) = next_strip_click(
                 self.last_strip_click,
                 press,
@@ -984,7 +994,21 @@ impl App {
                 self.cursor_pos,
             );
             self.last_strip_click = chain;
+            strip = strip_press(
+                press,
+                button == MouseButton::Left,
+                in_strip,
+                self.menu.is_some(),
+                double,
+                action,
+            );
+        }
+        let Some(input_button) = map_mouse_button(button) else {
+            return false;
+        };
+        self.blink.restart(Instant::now());
 
+        if state == ElementState::Pressed {
             // With the dropdown open it owns the pointer: a press on a row is
             // consumed (running its action is a later task), and a press
             // anywhere else dismisses the panel. Neither reaches the strip or
@@ -1012,7 +1036,7 @@ impl App {
             // The whole band owns its presses, not just the controls: a miss on
             // a tab must not paste, select, reach the PTY, or grab the
             // scrollbar, whichever button was pressed.
-            if let Some(action) = self.strip_action_at(self.cursor_pos.0, self.cursor_pos.1) {
+            if strip != StripPress::Ignore {
                 // A forwarded button belongs to the tab that owns it; balance
                 // it before the strip takes over the pointer.
                 self.release_forwarded_button();
@@ -1023,24 +1047,29 @@ impl App {
                 self.last_click = None;
                 // The release that ends this press is the chrome's too.
                 self.press_in_chrome = true;
-                if button == MouseButton::Left && press == ChromePress::Drag {
+            }
+            match strip {
+                StripPress::Ignore => {}
+                StripPress::Drag => {
                     // A miss inside the band is empty chrome: it is the window's
                     // drag handle, the way a caption is. Win32's
                     // `WM_NCHITTEST` already routed the top 6 px to resizing, so
                     // every press that reaches here is below that border.
-                    if double {
-                        self.toggle_maximized();
-                        self.set_strip_hover(None);
-                    } else if let Some(window) = &self.window {
-                        // A failed drag is recoverable: the window simply
-                        // stays put.
+                    if let Some(window) = &self.window {
+                        // A failed drag is recoverable: the window simply stays
+                        // put.
                         if let Err(err) = window.drag_window() {
                             tracing::warn!(%err, "could not start the window drag");
                         }
                     }
                     return false;
                 }
-                if button == MouseButton::Left {
+                StripPress::ToggleMaximize => {
+                    self.toggle_maximized();
+                    self.set_strip_hover(None);
+                    return false;
+                }
+                StripPress::Act(action) => {
                     match action {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
@@ -1079,8 +1108,8 @@ impl App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                    return false;
                 }
-                return false;
             }
         }
 
@@ -1574,6 +1603,54 @@ fn next_strip_click(
     }
     let double = is_double_click(previous, now, at);
     (Some((now, at)), double)
+}
+
+/// What the strip arm of the mouse handler should do for one press.
+///
+/// The event loop matches this without re-testing any condition, so the whole
+/// decision lives in [`strip_press`] and its table test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripPress {
+    /// Not the strip's: the press falls through to the grid.
+    Ignore,
+    /// A miss on empty band, first press: move the window.
+    Drag,
+    /// A miss on empty band, second press: toggle maximise.
+    ToggleMaximize,
+    /// A painted control: run its action. A non-left press in the band gets
+    /// [`StripAction::Ignore`], which consumes it without running anything.
+    Act(StripAction),
+}
+
+/// Decides what one press inside the strip band means.
+///
+/// `action` is the painted target under the pointer, `in_strip` says whether
+/// the point is inside the band at all, and `menu_open` gives the dropdown
+/// priority over everything painted below it. Only a left press on the empty
+/// band can drag or double-click; every other in-band press is chrome's but
+/// carries no action, so it is consumed rather than reaching the terminal.
+fn strip_press(
+    press: ChromePress,
+    left: bool,
+    in_strip: bool,
+    menu_open: bool,
+    double: bool,
+    action: Option<StripAction>,
+) -> StripPress {
+    if !in_strip || menu_open {
+        return StripPress::Ignore;
+    }
+    if !left {
+        return StripPress::Act(StripAction::Ignore);
+    }
+    if press == ChromePress::Drag {
+        return if double {
+            StripPress::ToggleMaximize
+        } else {
+            StripPress::Drag
+        };
+    }
+    StripPress::Act(action.unwrap_or(StripAction::Ignore))
 }
 
 /// What a press inside the tab strip asks the app to do.
@@ -2307,14 +2384,18 @@ mod tests {
     }
 
     #[test]
-    fn a_frameless_window_reserves_the_same_strip_as_a_framed_one() {
-        // The name records the invariant: removing the caption must not alter
-        // the reserved strip height, or the grid would jump by the caption's
-        // height. 32 logical pixels double to 64 at 2x and stay 32 at 1x.
-        use crate::ui::tab_bar::TAB_STRIP_HEIGHT;
+    fn the_painted_chrome_reaches_the_window_edge_with_a_drag_gutter() {
+        // The caption controls are pinned to the right edge, and the `+`/`⌄`
+        // pair leaves at least one drag gutter before them: that empty band is
+        // what keeps the window draggable when the tabs are crowded.
+        use crate::ui::tab_bar::{TabBarLayout, DRAG_GUTTER};
 
-        assert_eq!(strip_px(2.0), 2 * TAB_STRIP_HEIGHT as u32);
-        assert_eq!(strip_px(1.0), TAB_STRIP_HEIGHT as u32);
+        let layout = TabBarLayout::new(800.0, 32.0, &["one", "two"], |_| 100.0);
+        assert_eq!(layout.close_window.x + layout.close_window.w, layout.width);
+        assert!(
+            layout.chevron.x + layout.chevron.w + DRAG_GUTTER <= layout.minimize.x + 0.01,
+            "the drag gutter must be the minimum gap before the controls"
+        );
     }
 
     #[test]
@@ -2754,6 +2835,88 @@ mod tests {
             )
             .1,
             "a repeat 10 px away starts a new gesture"
+        );
+    }
+
+    #[test]
+    fn strip_press_selects_one_action_for_every_press() {
+        // Every branch the event loop can take is decided here: an empty-band
+        // left press drags, its second press toggles, each painted control runs
+        // its action, any other button is consumed without one, and a press
+        // outside the band falls through to the grid.
+        assert_eq!(
+            strip_press(ChromePress::Drag, true, true, false, false, None),
+            StripPress::Drag
+        );
+        assert_eq!(
+            strip_press(ChromePress::Drag, true, true, false, true, None),
+            StripPress::ToggleMaximize
+        );
+
+        let controls = [
+            StripAction::Select(1),
+            StripAction::Close(1),
+            StripAction::NewTab,
+            StripAction::OpenMenu,
+            StripAction::MinimizeWindow,
+            StripAction::ToggleMaximize,
+            StripAction::CloseWindow,
+            StripAction::Ignore,
+        ];
+        for action in controls {
+            assert_eq!(
+                strip_press(ChromePress::Tab, true, true, false, false, Some(action)),
+                StripPress::Act(action),
+                "a painted control must run {action:?}"
+            );
+        }
+
+        // A press outside the strip is the grid's, whichever button and double
+        // click state it carries.
+        assert_eq!(
+            strip_press(ChromePress::Drag, true, false, false, true, None),
+            StripPress::Ignore
+        );
+        assert_eq!(
+            strip_press(
+                ChromePress::Tab,
+                false,
+                false,
+                false,
+                false,
+                Some(StripAction::Select(1))
+            ),
+            StripPress::Ignore
+        );
+
+        // A right or middle press on a painted control is chrome's but must not
+        // run the left-button action.
+        for press in [ChromePress::Drag, ChromePress::Tab] {
+            assert_eq!(
+                strip_press(
+                    press,
+                    false,
+                    true,
+                    false,
+                    false,
+                    Some(StripAction::ToggleMaximize)
+                ),
+                StripPress::Act(StripAction::Ignore),
+                "a non-left press must be consumed without a control action"
+            );
+        }
+
+        // The dropdown owns the pointer even when a strip control is under it.
+        assert_eq!(
+            strip_press(
+                ChromePress::Tab,
+                true,
+                true,
+                true,
+                false,
+                Some(StripAction::OpenMenu)
+            ),
+            StripPress::Ignore
         );
     }
 

@@ -121,26 +121,34 @@ args = ["/k"]
 
 ## Window chrome
 
-The tab strip is the window's title bar. The client area starts at the window's
-top edge: there is no caption row, no app icon, and no window title text in the
-chrome. The resize frame, edge resizing, Aero Snap and the drop shadow remain.
+The tab strip is the window's title bar on Windows. There the client area starts
+at the window's top edge: there is no caption row, no app icon, and no window
+title text in the chrome. The restored Windows frame provides the resize border
+and edge/corner resizing; Aero Snap and the drop shadow were not verified in
+this environment, so they are not claimed. Other platforms keep their native
+window decorations, including the native title bar, and the strip is painted
+inside the client area below it.
 
 - The three window controls are painted into the right end of the strip: `—`
-  minimises, `□` maximises and restores, and `✕` closes. Each is 46 logical px
-  wide and the full strip height.
+  minimises, `□` maximises and `❐` restores, and `✕` closes. Each is 46 logical
+  px wide and the full strip height.
 - Drag the empty part of the strip — after the last tab and its `+`/`⌄` buttons,
-  before the controls — to move the window, as a caption would.
+  before the controls — to move the window, as a caption would. A 24 logical px
+  gutter is reserved there even when the tabs are crowded, so the gesture is
+  always reachable.
 - Double-click that same empty space to maximise, and again to restore.
-- The top 6 physical px of the strip is the window's resize border, exactly as
-  on a native framed window: a press there starts a resize, not a click.
+- On Windows, the top 6 physical px of the strip is the window's resize border,
+  exactly as on a native framed window: a press there starts a resize, not a
+  click.
 - The window cannot be made smaller than 320 × 200 logical px, the floor at
   which the three controls and the `+`/`⌄` pair still fit without overlapping.
 
 Out of scope for now:
 
 - The Snap Layouts flyout that Windows shows when hovering a native maximise
-  button. Painted buttons cannot summon it, but dragging the window to a screen
-  edge still snaps.
+  button. Painted buttons cannot summon it. Dragging the window to a screen edge
+  is expected to snap through the restored Windows frame, but that behaviour was
+  not verified here and is not claimed.
 - Mirroring the three controls to the left edge under a right-to-left system
   locale.
 - Taskbar jump lists, thumbnail toolbars, and DWM Mica/Acrylic backdrops.

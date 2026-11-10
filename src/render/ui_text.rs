@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn chrome_glyphs_resolve_to_a_face_that_maps_them() {
         let renderer = crate::render::tests::default_renderer();
-        for ch in ['+', '✕', '⌄'] {
+        for ch in ['+', '✕', '⌄', '❐'] {
             let (face, glyph, advance) = glyph_for(&renderer, ch, UI_SIZE_PX);
             let (font, _index) = renderer.fonts_face(face);
             assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");

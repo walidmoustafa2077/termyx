@@ -9,6 +9,13 @@ pub const MAX_TAB_WIDTH: f32 = 220.0;
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width of the `+` and `⌄` buttons.
 pub const BUTTON_WIDTH: f32 = 32.0;
+/// Width of the empty drag band kept between the `⌄` and the caption controls.
+///
+/// Tabs are sized from the space left after the buttons and the controls. At a
+/// crowded width that share can absorb the entire band, leaving no pixel to
+/// press for moving the window; reserving this gutter keeps the title-bar
+/// gesture reachable no matter how many tabs are open.
+pub const DRAG_GUTTER: f32 = 24.0;
 /// Width of one of the three window controls at the strip's right end,
 /// matching the Windows caption buttons.
 pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
@@ -103,9 +110,11 @@ impl TabBarLayout {
     ///
     /// The two buttons and the three window controls are reserved before any
     /// tab is placed, and each tab may claim at most an equal share of what is
-    /// left. A crowded strip therefore shrinks its tabs (below
-    /// [`MIN_TAB_WIDTH`] if it must) instead of pushing a control past the
-    /// window edge, so `+`, `⌄` and the caption buttons stay clickable.
+    /// left after the drag gutter. A crowded strip therefore shrinks its tabs
+    /// (below [`MIN_TAB_WIDTH`] if it must) instead of pushing a control past
+    /// the window edge or swallowing the empty band that moves the window, so
+    /// `+`, `⌄` and the caption buttons stay clickable and the window stays
+    /// draggable.
     pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
         let strip_h = strip_h.max(0.0);
         let k = strip_h / TAB_STRIP_HEIGHT;
@@ -122,7 +131,11 @@ impl TabBarLayout {
         // is narrower than them; in that case their reservation still leaves
         // zero tab space instead of letting tabs paint over them.
         let caption = (3.0 * CAPTION_BUTTON_WIDTH * k).min(width.max(0.0));
-        let available = (width - buttons - caption).max(0.0);
+        // Reserve the drag gutter before sizing tabs, not after: the tabs take
+        // whatever is left, so subtracting it here is what keeps the empty band
+        // visible even when every tab is at its cap.
+        let gutter = (DRAG_GUTTER * k).min((width - buttons - caption).max(0.0));
+        let available = (width - buttons - caption - gutter).max(0.0);
         let cap = if titles.is_empty() {
             max_tab
         } else {
@@ -338,15 +351,14 @@ mod tests {
 
     #[test]
     fn the_caption_buttons_stay_reachable_on_a_crowded_strip() {
-        // 30 tabs of 32 px each fill exactly the 960 px left after the 138 px
-        // caption and 64 px button reservations at this width, so the painted
-        // boundary is exact and not just ordered.
+        // 30 tabs whose fair share is below `MIN_TAB_WIDTH`; the tab row ends
+        // at the drag gutter, which itself ends exactly where the controls
+        // begin, so the painted boundary is exact and not just ordered.
         let titles: Vec<&str> = (0..30).map(|_| "a long shell title").collect();
         let layout = TabBarLayout::new(1162.0, 32.0, &titles, |_| 120.0);
-        assert_eq!(
-            layout.chevron.x + layout.chevron.w,
-            layout.minimize.x,
-            "the reserved `+`/`⌄` pair must end exactly where the controls begin"
+        assert!(
+            (layout.chevron.x + layout.chevron.w + DRAG_GUTTER - layout.minimize.x).abs() < 0.01,
+            "the drag gutter must occupy exactly the space between `⌄` and the controls"
         );
         assert!(layout.plus.x + layout.plus.w <= layout.minimize.x);
         let last = layout.tabs.last().expect("a tab");
@@ -391,6 +403,32 @@ mod tests {
             Some(TabHit::Chevron),
             "the chevron button must still be clickable"
         );
+    }
+
+    #[test]
+    fn a_crowded_strip_keeps_a_drag_gutter_before_the_caption_controls() {
+        // The tab budget is `min(max_tab, available / n)`, so without a
+        // reservation `n * max_tab >= available` lets the tabs, `+` and `⌄`
+        // reach the controls and leaves no pixel to drag the window. Probe both
+        // the default and the minimum window width with 30 long-titled tabs.
+        let titles: Vec<String> = (0..30)
+            .map(|index| format!("a long shell title {index}"))
+            .collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        for width in [1200.0, 1024.0] {
+            let layout = TabBarLayout::new(width, 32.0, &refs, |_| 180.0);
+            let gutter_left = layout.chevron.x + layout.chevron.w;
+            assert!(
+                gutter_left + DRAG_GUTTER <= layout.minimize.x + 0.01,
+                "the drag gutter must survive at width {width}"
+            );
+            let midpoint = (gutter_left + layout.minimize.x) / 2.0;
+            assert_eq!(
+                layout.hit(midpoint, 16.0),
+                None,
+                "the gutter's midpoint must belong to no button at width {width}"
+            );
+        }
     }
 
     #[test]

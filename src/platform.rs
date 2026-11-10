@@ -363,13 +363,6 @@ pub fn apply_custom_chrome(window: &winit::window::Window) {
     }
 }
 
-/// Other platforms have no caption to remove here; winit's frameless window
-/// already keeps its own resize handling.
-#[cfg(not(target_os = "windows"))]
-pub fn apply_custom_chrome(window: &winit::window::Window) {
-    let _ = window;
-}
-
 /// Opens `path` with the platform's default handler.
 ///
 /// The child is not waited for: the opener outlives the call and the window
