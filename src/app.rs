@@ -445,22 +445,34 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, event: KeyEvent) {
+    /// Handles a key press. Returns whether the window should exit: closing the
+    /// last tab leaves a terminal with nothing to show.
+    fn on_key(&mut self, event: KeyEvent) -> bool {
         // Typing always reveals the cursor, so a keystroke is never typed into
         // a cursor that happens to be in its hidden phase.
         self.blink.restart(Instant::now());
+        // The tab shortcuts are chrome, not text: a key they claim must never
+        // also reach the shell.
+        if let Some(action) = tab_shortcut(&event.logical_key, self.modifiers) {
+            // Only cycling may auto-repeat: holding the new or close shortcut
+            // would otherwise open or close a tab per key repeat.
+            if event.repeat && !matches!(action, TabAction::Next | TabAction::Previous) {
+                return false;
+            }
+            return self.apply_tab_shortcut(action);
+        }
         if self.modifiers.control_key() && self.modifiers.shift_key() {
             if let Key::Character(text) = &event.logical_key {
                 match text.as_str() {
                     "c" | "C" => {
                         self.copy_selection();
-                        return;
+                        return false;
                     }
                     "v" | "V" => {
                         if !event.repeat {
                             self.paste_clipboard();
                         }
-                        return;
+                        return false;
                     }
                     _ => {}
                 }
@@ -483,7 +495,7 @@ impl App {
                     .is_some_and(|session| session.terminal.scrollable_history() > 0);
                 if has_history {
                     self.scroll_local(lines);
-                    return;
+                    return false;
                 }
             }
         }
@@ -495,7 +507,7 @@ impl App {
             KeyInput::BackTab
         } else {
             let Some(key) = map_key(&event.logical_key) else {
-                return;
+                return false;
             };
             key
         };
@@ -505,9 +517,67 @@ impl App {
             .map(|session| session.terminal.mode())
             .unwrap_or_else(TermMode::empty);
         let Some(bytes) = input::encode(key, mods_from(self.modifiers), mode) else {
-            return;
+            return false;
         };
         self.write_input(&bytes);
+        false
+    }
+
+    /// Runs a tab shortcut. Returns whether the last tab is gone, which leaves
+    /// the window with nothing to show.
+    fn apply_tab_shortcut(&mut self, action: TabAction) -> bool {
+        match action {
+            TabAction::Next => self.cycle_tab(1),
+            TabAction::Previous => self.cycle_tab(-1),
+            TabAction::NewTab => {
+                let index = crate::profiles::default_profile_index(&self.config);
+                if let Err(err) = self.new_tab(index) {
+                    tracing::warn!(%err, "could not open a tab");
+                }
+            }
+            TabAction::CloseTab => {
+                if let Some(index) = self.tabs.active_index() {
+                    return self.close_tab(index);
+                }
+            }
+            TabAction::SelectProfile(index) => self.open_profile(index),
+        }
+        false
+    }
+
+    /// Opens the profile a numbered shortcut names.
+    ///
+    /// A number past the end of the configured list opens nothing. Falling
+    /// through to `new_tab`, which substitutes the first profile, would start a
+    /// shell the user never asked for.
+    fn open_profile(&mut self, index: usize) {
+        if index >= crate::profiles::profiles(&self.config).len() {
+            tracing::debug!(profile = index, "no profile for this shortcut");
+            return;
+        }
+        if let Err(err) = self.new_tab(index) {
+            tracing::warn!(%err, "could not open a profile");
+        }
+    }
+
+    /// Shows the tab `delta` places from the active one, wrapping at both ends.
+    /// A single tab has nowhere to go, so the strip is left alone.
+    fn cycle_tab(&mut self, delta: isize) {
+        let count = self.tabs.len();
+        if count < 2 {
+            return;
+        }
+        let Some(current) = self.tabs.active_index() else {
+            return;
+        };
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        self.tabs.select(next);
+        // The keyboard switch paints the tab the same way a click does.
+        self.selection = None;
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Writes text to the shell through the shared PTY path.
@@ -1095,6 +1165,51 @@ fn strip_action(hit: Option<TabHit>, active: usize) -> StripAction {
     }
 }
 
+/// What a keyboard shortcut asks the tab strip to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabAction {
+    Next,
+    Previous,
+    NewTab,
+    CloseTab,
+    /// Index into the configured profiles, already zero-based.
+    SelectProfile(usize),
+}
+
+/// Shortcuts the window chrome owns. Kept free of `App` so the table can be
+/// tested without an event loop.
+///
+/// Only the keys listed here belong to the strip: everything else, including
+/// the copy and paste shortcuts `on_key` handles later, falls through to the
+/// terminal.
+fn tab_shortcut(key: &Key, modifiers: ModifiersState) -> Option<TabAction> {
+    let ctrl = modifiers.control_key();
+    let shift = modifiers.shift_key();
+    match key {
+        Key::Named(NamedKey::Tab) if ctrl => Some(if shift {
+            TabAction::Previous
+        } else {
+            TabAction::Next
+        }),
+        Key::Character(text) if ctrl && shift => {
+            // One digit names one of the first five profiles. Parsing the whole
+            // string, not its first byte, keeps a multi-scalar layout value
+            // from passing as a digit.
+            if let Ok(digit) = text.parse::<usize>() {
+                if text.len() == 1 && (1..=5).contains(&digit) {
+                    return Some(TabAction::SelectProfile(digit - 1));
+                }
+            }
+            match text.as_str() {
+                "T" | "t" => Some(TabAction::NewTab),
+                "W" | "w" => Some(TabAction::CloseTab),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Whether a physical y coordinate lies inside the strip band.
 fn in_strip(y: f64, strip_h: f32) -> bool {
     y >= 0.0 && y < f64::from(strip_h)
@@ -1295,7 +1410,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.on_key(event)
+                if self.on_key(event) {
+                    // Closing the last tab by keyboard leaves nothing to show.
+                    event_loop.exit();
+                }
             }
             WindowEvent::Ime(Ime::Commit(text)) => self.send_text(&text),
             // Composition preview (preedit) is Phase 3; the OS candidate window
@@ -1965,6 +2083,65 @@ mod tests {
             strip_action(Some(TabHit::Close(1)), 0),
             StripAction::Select(1),
             "a background tab's invisible close target is just its body"
+        );
+    }
+
+    #[test]
+    fn tab_shortcuts_are_recognised() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            tab_shortcut(&Key::Character("T".into()), ctrl_shift),
+            Some(TabAction::NewTab)
+        );
+        assert_eq!(
+            tab_shortcut(&Key::Character("W".into()), ctrl_shift),
+            Some(TabAction::CloseTab)
+        );
+        assert_eq!(
+            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::CONTROL),
+            Some(TabAction::Next)
+        );
+        assert_eq!(
+            tab_shortcut(
+                &Key::Named(NamedKey::Tab),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            Some(TabAction::Previous)
+        );
+        assert_eq!(
+            tab_shortcut(&Key::Character("2".into()), ctrl_shift),
+            Some(TabAction::SelectProfile(1))
+        );
+        assert_eq!(
+            tab_shortcut(&Key::Character("t".into()), ModifiersState::empty()),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_shortcuts_leave_every_other_key_to_the_terminal() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        // The copy and paste shortcuts are older and must keep their keys.
+        assert_eq!(tab_shortcut(&Key::Character("C".into()), ctrl_shift), None);
+        assert_eq!(tab_shortcut(&Key::Character("V".into()), ctrl_shift), None);
+        // Plain Tab and Shift+Tab still belong to the shell.
+        assert_eq!(
+            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+            None
+        );
+        assert_eq!(
+            tab_shortcut(&Key::Named(NamedKey::Tab), ModifiersState::empty()),
+            None
+        );
+        // Only the five numbered slots have a profile shortcut, and `0` is not
+        // one of them: it must not underflow into a profile index.
+        assert_eq!(tab_shortcut(&Key::Character("0".into()), ctrl_shift), None);
+        assert_eq!(tab_shortcut(&Key::Character("6".into()), ctrl_shift), None);
+        assert_eq!(
+            tab_shortcut(&Key::Character("5".into()), ctrl_shift),
+            Some(TabAction::SelectProfile(4))
         );
     }
 

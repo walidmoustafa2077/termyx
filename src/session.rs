@@ -41,8 +41,7 @@ impl TabSlots {
         self.active = Some(self.ids.len() - 1);
     }
 
-    // Counting tabs is the keyboard shortcuts' need (Task 10), so it compiles
-    // for the tests only.
+    // Only the tests count slots; production counts through `TabSet::len`.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.ids.len()
@@ -171,9 +170,8 @@ impl TabSet {
         self.sessions.len() - 1
     }
 
-    // Counting tabs is the keyboard shortcuts' need (Task 10), so it compiles
-    // for the tests only.
-    #[cfg(test)]
+    // Counting tabs is what lets the keyboard shortcuts wrap; the mouse only
+    // ever needs `is_empty`.
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
