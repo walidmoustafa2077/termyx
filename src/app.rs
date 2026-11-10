@@ -1520,9 +1520,10 @@ impl App {
             // Shift+drag and non-reporting apps keep local text selection.
             self.app_mouse_button = None;
 
-            // A right click that stays local pastes; the forwarding branch
-            // above has already claimed the click for mouse-reporting apps.
-            if button == MouseButton::Right {
+            // A right or middle click that stays local pastes; the forwarding
+            // branch above has already claimed the click for mouse-reporting
+            // apps.
+            if pastes_locally(button) {
                 self.paste_clipboard();
                 return false;
             }
@@ -2615,6 +2616,15 @@ fn forwards_mouse_press(mode: TermMode, shift: bool) -> bool {
     mode.intersects(TermMode::MOUSE_MODE) && !shift
 }
 
+/// Buttons that paste the clipboard when the press stays local.
+///
+/// The forwarding branch in [`App::on_mouse`] runs first, so an application
+/// that reports the mouse still receives a right or middle press. A local left
+/// press keeps its selection behavior.
+fn pastes_locally(button: MouseButton) -> bool {
+    matches!(button, MouseButton::Right | MouseButton::Middle)
+}
+
 /// A release is forwarded only when the matching press was forwarded. Using the
 /// tracked button rather than the live mode or Shift keeps a mid-gesture change
 /// from losing or inventing a release.
@@ -2954,6 +2964,16 @@ mod tests {
         assert!(!forwards_mouse_press(TermMode::empty(), false));
         assert!(!forwards_mouse_press(TermMode::SGR_MOUSE, false));
         assert!(!forwards_mouse_press(TermMode::ALT_SCREEN, false));
+    }
+
+    #[test]
+    fn middle_and_right_clicks_paste_in_the_grid() {
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            assert!(pastes_locally(button), "{button:?} must paste locally");
+        }
+        for button in [MouseButton::Left, MouseButton::Back, MouseButton::Forward] {
+            assert!(!pastes_locally(button), "{button:?} must not paste locally");
+        }
     }
 
     #[test]

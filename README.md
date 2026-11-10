@@ -87,6 +87,13 @@ then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`
 with contextual forms, either as a single lam-alef ligature or as connected
 two-glyph forms. See `assets/fonts/README.md`.
 
+## Mouse
+
+- Drag to select text; double-click selects a word and triple-click selects the
+  line.
+- Right-click or middle-click the grid pastes the clipboard.
+- While an application reports the mouse, hold **Shift** to select locally.
+
 ## Tabs
 
 Each tab runs its own shell; the strip above the grid shows one tab per
