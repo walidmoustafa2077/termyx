@@ -67,8 +67,8 @@ const UI_FAMILY: &str = "Segoe UI";
 pub const UI_FONT_ID: u8 = u8::MAX;
 
 /// Chrome text size in logical pixels.
-// `UI_SIZE_PX` has no non-test consumer until Task 7 sizes the tab titles, so
-// it compiles for the tests only.
+// `UI_SIZE_PX` has no non-test consumer until Task 8 lays out the tab titles,
+// so it compiles for the tests only.
 #[cfg(test)]
 pub(crate) const UI_SIZE_PX: f32 = 12.0;
 
@@ -204,8 +204,10 @@ impl FontSet {
     /// per character when the face is missing.
     ///
     /// `px` is an em size, the unit the glyph cache rasterizes at, so measured
-    /// advances and painted ink agree.
-    // `ui_width` has no non-test consumer until Task 7 lays out the tab strip,
+    /// advances and painted ink agree. It is already physical: the caller
+    /// multiplies the logical `UI_SIZE_PX` by the window's scale factor, the
+    /// same single conversion the tab strip height goes through.
+    // `ui_width` has no non-test consumer until Task 8 lays out the tab strip,
     // so it compiles for the tests only.
     #[cfg(test)]
     pub fn ui_width(&self, text: &str, px: f32) -> f32 {

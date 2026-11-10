@@ -15,7 +15,8 @@ use crate::theme::Rgb;
 ///
 /// `px` is an em size, the same unit the glyph cache rasterizes at. Measuring
 /// with a raw [`ab_glyph::PxScale`] instead would make the advances about a
-/// quarter too tight and overlap the glyph ink.
+/// quarter too tight and overlap the glyph ink. It is already physical: the
+/// caller scales the logical chrome size once, with the window's scale factor.
 pub fn draw_text(
     renderer: &mut Renderer,
     text: &str,

@@ -8,13 +8,11 @@ mod fonts;
 mod icon;
 mod input;
 mod platform;
+mod profiles;
 mod pty;
 mod render;
 mod scrollbar;
 mod selection;
-// Sessions and the tab set are held for Task 7, which wires tabs into the app;
-// the test build carries them so the product stays free of unreferenced code.
-#[cfg(test)]
 mod session;
 mod shape;
 mod term;

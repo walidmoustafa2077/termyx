@@ -19,10 +19,10 @@ use crate::fonts::FontSet;
 use crate::icon;
 use crate::input::{self, KeyInput, Mods};
 use crate::platform;
-use crate::pty::PtySession;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
+use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::visual::VisualMap;
@@ -34,8 +34,6 @@ const MAX_PASTE_CHARS: usize = 1_048_576;
 /// Upper bound on an OSC 52 payload, in bytes. The VT parser accumulates the
 /// whole sequence before the UI thread writes it to the clipboard.
 const MAX_OSC52_BYTES: usize = 100 * 1024;
-
-const DEFAULT_TITLE: &str = "Termyx";
 
 /// Longest delay between two clicks of one multi-click gesture.
 const CLICK_TIMEOUT: Duration = Duration::from_millis(400);
@@ -49,14 +47,12 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<UserEvent>,
-    /// Id of the one session this build owns. Task 7 replaces it with the
-    /// active tab's id from `TabSet`.
-    session_id: u64,
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     renderer: Option<Renderer>,
-    terminal: Option<Terminal>,
-    pty: Option<PtySession>,
+    /// The open shells. Each session owns its parser, its PTY child, and its
+    /// reader thread; the window shows whichever session is active.
+    tabs: TabSet,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     selection: Option<Selection>,
@@ -83,12 +79,10 @@ impl App {
         Self {
             config,
             proxy,
-            session_id: 1,
             window: None,
             surface: None,
             renderer: None,
-            terminal: None,
-            pty: None,
+            tabs: TabSet::new(),
             clipboard: None,
             modifiers: ModifiersState::empty(),
             selection: None,
@@ -107,10 +101,20 @@ impl App {
         }
     }
 
-    /// Pixels reserved above the grid for the tab strip. The strip geometry is
-    /// float; the renderer takes an integer inset.
+    /// Pixels reserved above the grid for the tab strip.
+    ///
+    /// `TAB_STRIP_HEIGHT` is logical while the renderer, the surface, and the
+    /// mouse coordinates are physical, so the window's scale factor is applied
+    /// here and nowhere else.
     fn tab_strip_px(&self) -> u32 {
-        crate::ui::tab_bar::TAB_STRIP_HEIGHT as u32
+        strip_px(self.scale_factor())
+    }
+
+    /// The window's scale factor, or 1.0 before the window exists.
+    fn scale_factor(&self) -> f64 {
+        self.window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor())
     }
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
@@ -121,7 +125,7 @@ impl App {
         let (width, height) =
             initial_window_size(self.config.window.width, self.config.window.height, monitor);
         let attributes = Window::default_attributes()
-            .with_title(DEFAULT_TITLE)
+            .with_title(FALLBACK_TITLE)
             .with_inner_size(LogicalSize::new(width, height));
         let attributes = match icon::window_icon() {
             Ok(icon) => attributes.with_window_icon(Some(icon)),
@@ -144,6 +148,10 @@ impl App {
         // winit starts with IME disabled on Windows; committed composition text
         // arrives as `WindowEvent::Ime` and is forwarded to the PTY.
         window.set_ime_allowed(true);
+        // Stored before the rest of the setup because `tab_strip_px` reads the
+        // window's scale factor; every step below only needs the window it
+        // already holds a handle to.
+        self.window = Some(window.clone());
 
         let context = Context::new(window.clone())
             .map_err(|err| anyhow::anyhow!("softbuffer context: {err}"))?;
@@ -174,19 +182,6 @@ impl App {
             renderer.padding(),
             renderer.top_inset(),
         );
-        let terminal = Terminal::new_with_events(
-            cols,
-            rows,
-            self.config.scrollback.lines,
-            Some((self.proxy.clone(), self.session_id)),
-        );
-        let pty = PtySession::spawn(
-            &self.config.shell,
-            cols as u16,
-            rows as u16,
-            self.proxy.clone(),
-            self.session_id,
-        )?;
 
         if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
             if let Err(err) = surface.resize(w, h) {
@@ -194,13 +189,15 @@ impl App {
             }
         }
 
-        self.window = Some(window);
         self.surface = Some(surface);
         self.renderer = Some(renderer);
-        self.terminal = Some(terminal);
-        self.pty = Some(pty);
         self.cols = cols;
         self.rows = rows;
+
+        // The first tab opens the config's default profile, so a bare launch
+        // and a new tab started from the `+` button agree.
+        let profile = crate::profiles::default_profile_index(&self.config);
+        self.new_tab(profile)?;
 
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -221,12 +218,11 @@ impl App {
         renderer.resize(width, height);
     }
 
-    /// Rebuilds the grid for the new surface size. Returns whether the grid
-    /// actually changed and therefore reflowed.
+    /// Rebuilds the grid for the new surface size. Every session is resized so
+    /// a background tab does not keep a stale width for its shell. Returns
+    /// whether the grid actually changed and therefore reflowed.
     fn resize_grid(&mut self, width: u32, height: u32) -> bool {
-        let (Some(renderer), Some(terminal), Some(pty)) =
-            (&self.renderer, &mut self.terminal, &mut self.pty)
-        else {
+        let Some(renderer) = self.renderer.as_ref() else {
             return false;
         };
         let (cols, rows) = grid_size(
@@ -240,9 +236,11 @@ impl App {
         if cols == self.cols && rows == self.rows {
             return false;
         }
-        terminal.resize(cols, rows);
-        if let Err(err) = pty.resize(cols as u16, rows as u16) {
-            tracing::warn!(%err, "pty resize failed");
+        for session in self.tabs.iter_mut() {
+            session.terminal.resize(cols, rows);
+            if let Err(err) = session.pty.resize(cols as u16, rows as u16) {
+                tracing::warn!(%err, "pty resize failed");
+            }
         }
         self.cols = cols;
         self.rows = rows;
@@ -260,20 +258,51 @@ impl App {
         }
         let title = title.trim();
         window.set_title(if title.is_empty() {
-            DEFAULT_TITLE
+            FALLBACK_TITLE
         } else {
             title
         });
     }
 
+    /// Opens `profile` in a new tab and shows it.
+    ///
+    /// A failed spawn leaves the window as it was; the caller decides whether
+    /// that is fatal (the first tab) or a warning (a later click).
+    fn new_tab(&mut self, profile: usize) -> anyhow::Result<()> {
+        let profiles = crate::profiles::profiles(&self.config);
+        let Some(profile) = profiles.get(profile).or_else(|| profiles.first()) else {
+            anyhow::bail!("no shell profiles configured");
+        };
+        tracing::debug!(profile = %profile.name, "opening a tab");
+        let id = self.tabs.next_id();
+        let session = spawn_session(
+            id,
+            &profile.shell,
+            self.cols,
+            self.rows,
+            self.config.scrollback.lines,
+            self.proxy.clone(),
+        )?;
+        self.tabs.push(session);
+        // The new tab is active, so a selection on the old grid is stale.
+        self.selection = None;
+        Ok(())
+    }
+
+    /// The parser of the tab the window shows.
+    fn active_terminal(&mut self) -> Option<&mut Terminal> {
+        Some(&mut self.tabs.active_mut()?.terminal)
+    }
+
     fn render(&mut self) {
         let scrollbar_hover = self.scrollbar_hover || self.scrollbar_drag;
-        let (Some(renderer), Some(terminal), Some(surface)) =
-            (&mut self.renderer, &self.terminal, &mut self.surface)
-        else {
+        let Some(session) = self.tabs.active() else {
             return;
         };
-        let mut snapshot = terminal.snapshot();
+        let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
+            return;
+        };
+        let mut snapshot = session.terminal.snapshot();
         // A blinking cursor is hidden on the off phase. Repainting the whole
         // frame is acceptable while damage tracking is out of scope.
         let blinking =
@@ -347,9 +376,9 @@ impl App {
             };
             if let Some(lines) = lines {
                 let has_history = self
-                    .terminal
-                    .as_ref()
-                    .is_some_and(|terminal| terminal.scrollable_history() > 0);
+                    .tabs
+                    .active()
+                    .is_some_and(|session| session.terminal.scrollable_history() > 0);
                 if has_history {
                     self.scroll_local(lines);
                     return;
@@ -369,9 +398,9 @@ impl App {
             key
         };
         let mode = self
-            .terminal
-            .as_ref()
-            .map(Terminal::mode)
+            .tabs
+            .active()
+            .map(|session| session.terminal.mode())
             .unwrap_or_else(TermMode::empty);
         let Some(bytes) = input::encode(key, mods_from(self.modifiers), mode) else {
             return;
@@ -385,10 +414,11 @@ impl App {
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
-        if let Some(pty) = &mut self.pty {
-            if let Err(err) = pty.write(bytes) {
-                tracing::warn!(%err, "pty write failed");
-            }
+        let Some(session) = self.tabs.active_mut() else {
+            return;
+        };
+        if let Err(err) = session.pty.write(bytes) {
+            tracing::warn!(%err, "pty write failed");
         }
     }
 
@@ -653,8 +683,7 @@ impl App {
 
     /// Inclusive cell range of the word or row containing `position`.
     fn bounds_at(&self, position: LogicalPos, whole_line: bool) -> Option<(usize, usize)> {
-        let terminal = self.terminal.as_ref()?;
-        let snapshot = terminal.snapshot();
+        let snapshot = self.tabs.active()?.terminal.snapshot();
         let line = snapshot.lines.get(position.row)?;
         Some(if whole_line {
             line_bounds(line)
@@ -664,15 +693,15 @@ impl App {
     }
 
     fn app_mouse_mode(&self) -> TermMode {
-        self.terminal
-            .as_ref()
-            .map(Terminal::mode)
+        self.tabs
+            .active()
+            .map(|session| session.terminal.mode())
             .unwrap_or_else(TermMode::empty)
     }
 
     fn scrollbar_geometry(&self, hovered: bool) -> Option<ScrollbarGeometry> {
         let renderer = self.renderer.as_ref()?;
-        let terminal = self.terminal.as_ref()?;
+        let session = self.tabs.active()?;
         let window = self.window.as_ref()?;
         let size = window.inner_size();
         scrollbar::geometry(
@@ -680,8 +709,8 @@ impl App {
             renderer.padding() + renderer.top_inset(),
             renderer.fonts().cell_h,
             self.rows,
-            terminal.scrollable_history(),
-            terminal.display_offset(),
+            session.terminal.scrollable_history(),
+            session.terminal.display_offset(),
             hovered,
         )
     }
@@ -722,14 +751,11 @@ impl App {
         let Some(geom) = self.scrollbar_geometry(true) else {
             return;
         };
-        let Some(history) = self.terminal.as_ref().map(Terminal::scrollable_history) else {
+        let Some(session) = self.tabs.active() else {
             return;
         };
-        let current = self
-            .terminal
-            .as_ref()
-            .map(Terminal::display_offset)
-            .unwrap_or(0);
+        let history = session.terminal.scrollable_history();
+        let current = session.terminal.display_offset();
         let target = scrollbar::offset_for_thumb_top(thumb_top, &geom, history);
         self.scroll_local(target as i32 - current as i32);
     }
@@ -737,7 +763,7 @@ impl App {
     /// Scrolls the viewport locally by `lines` (positive scrolls back into
     /// history). Returns whether the offset changed.
     fn scroll_local(&mut self, lines: i32) -> bool {
-        let Some(terminal) = self.terminal.as_mut() else {
+        let Some(terminal) = self.active_terminal() else {
             return false;
         };
         if lines == 0 || terminal.scrollable_history() == 0 {
@@ -791,9 +817,8 @@ impl App {
 
     fn pos_at(&self, x: f64, y: f64) -> Option<LogicalPos> {
         let renderer = self.renderer.as_ref()?;
-        let terminal = self.terminal.as_ref()?;
+        let snapshot = self.tabs.active()?.terminal.snapshot();
         let (row, visual) = cell_at(x, y, GridGeometry::of(renderer), self.cols, self.rows);
-        let snapshot = terminal.snapshot();
         let line = snapshot.lines.get(row)?;
         Some(logical_pos_at(row, visual, line, &self.config.bidi))
     }
@@ -815,10 +840,10 @@ impl App {
         let Some(selection) = &self.selection else {
             return;
         };
-        let Some(terminal) = &self.terminal else {
+        let Some(session) = self.tabs.active() else {
             return;
         };
-        let snapshot = terminal.snapshot();
+        let snapshot = session.terminal.snapshot();
         let text = match selection.mode {
             SelectionMode::Simple => {
                 selection.to_text(&snapshot, self.config.selection.trim_trailing)
@@ -857,9 +882,9 @@ impl App {
         };
         let text = cap_paste(text);
         let bracketed = self
-            .terminal
-            .as_ref()
-            .map(|terminal| terminal.mode().contains(TermMode::BRACKETED_PASTE))
+            .tabs
+            .active()
+            .map(|session| session.terminal.mode().contains(TermMode::BRACKETED_PASTE))
             .unwrap_or(false);
         let bytes = input::paste(&text, bracketed);
         self.write_input(&bytes);
@@ -934,11 +959,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput { session, bytes } => {
-                let Some(terminal) = self.terminal.as_mut() else {
-                    return;
-                };
-                if session == self.session_id {
-                    if terminal.feed(&bytes) {
+                if let FeedOutcome::Active { reflowed } =
+                    feed_session(&mut self.tabs, session, &bytes)
+                {
+                    if reflowed {
                         // Rows moved, so row-anchored selection positions are
                         // stale. An in-place repaint keeps the selection.
                         self.selection = None;
@@ -950,12 +974,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Title { session, title } => {
-                if session == self.session_id {
+                // The label belongs to its tab whether or not that tab is on
+                // screen; only the active tab also names the window.
+                self.tabs.set_title(session, &title);
+                if self
+                    .tabs
+                    .active()
+                    .is_some_and(|active| active.id == session)
+                {
                     self.apply_title(&title);
                 }
             }
             UserEvent::ResetTitle { session } => {
-                if session == self.session_id {
+                self.tabs.set_title(session, "");
+                if self
+                    .tabs
+                    .active()
+                    .is_some_and(|active| active.id == session)
+                {
                     self.apply_title("");
                 }
             }
@@ -1051,6 +1087,44 @@ impl ApplicationHandler<UserEvent> for App {
 /// high-DPI displays, because winit reports window sizes in physical pixels.
 fn scaled_font_size(size: f32, scale_factor: f64) -> f32 {
     (size as f64 * scale_factor) as f32
+}
+
+/// Logical-to-physical conversion for the tab strip: the single place the
+/// strip height is scaled. Everything downstream (the renderer inset, the grid
+/// size, the mouse origin) works in the physical pixels this returns.
+fn strip_px(scale_factor: f64) -> u32 {
+    (crate::ui::tab_bar::TAB_STRIP_HEIGHT * scale_factor as f32).round() as u32
+}
+
+/// Where a session's PTY output went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedOutcome {
+    /// No session carries the id: a late event from a closed tab. It must never
+    /// reach another session's parser.
+    Dropped,
+    /// Fed into a tab the window is not showing, so its grid stays current for
+    /// when the user switches to it. Nothing on screen changed.
+    Background,
+    /// Fed into the tab on screen. `reflowed` marks that rows moved, which
+    /// invalidates row-anchored selection positions.
+    Active { reflowed: bool },
+}
+
+/// Feeds one session's output into the parser of that session.
+///
+/// Routing by id — not by "whatever terminal is active" — is what keeps two
+/// tabs from merging their output.
+fn feed_session(tabs: &mut TabSet, session: SessionId, bytes: &[u8]) -> FeedOutcome {
+    let shown = tabs.active().map(|active| active.id);
+    let Some(target) = tabs.session_mut(session) else {
+        return FeedOutcome::Dropped;
+    };
+    let reflowed = target.terminal.feed(bytes);
+    if shown == Some(session) {
+        FeedOutcome::Active { reflowed }
+    } else {
+        FeedOutcome::Background
+    }
 }
 
 fn grid_size(
@@ -1186,6 +1260,10 @@ fn logical_pos_at(row: usize, visual: usize, line: &RowSnapshot, bidi: &BidiConf
 /// Where the grid starts and how big its cells are, in physical pixels. The x
 /// origin is the window padding alone; the y origin also clears the tab strip,
 /// so the two origins stay distinct here.
+///
+/// Derived from the renderer on every use rather than cached on `App`, so the
+/// renderer stays the single source of grid geometry and a hit test cannot
+/// disagree with the pixels last drawn.
 #[derive(Clone, Copy)]
 struct GridGeometry {
     padding: f64,
@@ -1239,7 +1317,9 @@ fn cap_paste(mut text: String) -> String {
 mod tests {
     use super::*;
 
-    use crate::config::BaseDirection;
+    use crate::config::{BaseDirection, ShellConfig};
+    use crate::pty::PtySession;
+    use crate::session::Session;
     use crate::term::{Cell, RowSnapshot, Style};
 
     #[test]
@@ -1578,5 +1658,96 @@ mod tests {
         let mut blink = CursorBlink::idle();
         blink.restart(Instant::now());
         assert_eq!(blink.deadline, None);
+    }
+
+    #[test]
+    fn closing_the_last_tab_leaves_no_active_session() {
+        let mut slots = crate::session::TabSlots::new();
+        slots.push(1);
+        slots.push(2);
+        slots.select(0);
+        assert_eq!(slots.remove_active(), Some(1));
+        assert_eq!(slots.remove_active(), Some(2));
+        assert_eq!(slots.remove_active(), None);
+    }
+
+    /// An inert shell that stays open until the session is dropped, so the
+    /// routing test never depends on a command finishing.
+    fn idle_shell() -> ShellConfig {
+        #[cfg(windows)]
+        let program = "cmd.exe";
+        #[cfg(not(windows))]
+        let program = "/bin/sh";
+        ShellConfig {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    fn test_session(id: SessionId) -> Session {
+        let pty =
+            PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}).expect("spawn the test shell");
+        Session::new(id, Terminal::new(80, 24, 100), pty)
+    }
+
+    /// The text of a session's first grid row, without the trailing blanks the
+    /// snapshot pads every row with.
+    fn first_row(session: &Session) -> String {
+        let snapshot = session.terminal.snapshot();
+        snapshot.lines[0]
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn output_reaches_only_the_session_it_names() {
+        let mut tabs = TabSet::new();
+        let background = tabs.next_id();
+        let shown = tabs.next_id();
+        tabs.push(test_session(background));
+        tabs.push(test_session(shown));
+        assert_eq!(tabs.active().map(|session| session.id), Some(shown));
+
+        // A background tab still parses its own output so its grid is current
+        // when the user switches to it, but it is not the tab on screen.
+        assert_eq!(
+            feed_session(&mut tabs, background, b"bg"),
+            FeedOutcome::Background
+        );
+        assert_eq!(first_row(&tabs[0]), "bg");
+        assert_eq!(first_row(&tabs[1]), "");
+
+        // An id no session carries — a late read from a closed tab — must not
+        // fall through to the active terminal. It changes no grid, and it is
+        // not `Active`, the only outcome that requests a redraw.
+        let closed = tabs.next_id();
+        assert_eq!(
+            feed_session(&mut tabs, closed, b"ghost"),
+            FeedOutcome::Dropped
+        );
+        assert_eq!(first_row(&tabs[0]), "bg");
+        assert_eq!(first_row(&tabs[1]), "");
+
+        // Only output naming the shown tab reaches the visible grid.
+        assert_eq!(
+            feed_session(&mut tabs, shown, b"fg"),
+            FeedOutcome::Active { reflowed: false }
+        );
+        assert_eq!(first_row(&tabs[0]), "bg");
+        assert_eq!(first_row(&tabs[1]), "fg");
+    }
+
+    #[test]
+    fn the_tab_strip_scales_once_with_the_window() {
+        // The strip is 32 logical pixels. `strip_px` is the only place that
+        // converts, because the renderer, the surface, and the mouse
+        // coordinates all work in physical pixels.
+        assert_eq!(strip_px(1.0), 32);
+        assert_eq!(strip_px(1.25), 40);
+        assert_eq!(strip_px(1.5), 48);
     }
 }

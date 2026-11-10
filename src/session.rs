@@ -41,10 +41,15 @@ impl TabSlots {
         self.active = Some(self.ids.len() - 1);
     }
 
+    // The strip's click handling (Task 8) and closing a tab (Task 9) are the
+    // first non-test readers of the slot count, the active slot, the ids, and
+    // the labels, so these compile for the tests only.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.ids.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
@@ -53,6 +58,7 @@ impl TabSlots {
         self.active
     }
 
+    #[cfg(test)]
     pub fn select(&mut self, index: usize) {
         if index < self.ids.len() {
             self.active = Some(index);
@@ -61,6 +67,7 @@ impl TabSlots {
 
     /// Removes the active slot and activates the neighbour that takes its
     /// place: the one to the right, else the one to the left.
+    #[cfg(test)]
     pub fn remove_active(&mut self) -> Option<SessionId> {
         let index = self.active?;
         let id = self.ids.remove(index);
@@ -73,6 +80,7 @@ impl TabSlots {
         Some(id)
     }
 
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<SessionId> {
         self.ids.clone()
     }
@@ -86,6 +94,10 @@ impl TabSlots {
         self.titles[index] = clean_title(title);
     }
 
+    /// The labels of every slot, with the fallback for untitled ones.
+    ///
+    /// Only the test suite reads them until Task 8 draws the strip.
+    #[cfg(test)]
     pub fn titles(&self) -> Vec<&str> {
         self.titles
             .iter()
@@ -144,18 +156,25 @@ impl TabSet {
         self.sessions.len() - 1
     }
 
+    // Nothing on screen counts tabs, switches to one, closes one, or lists
+    // their labels until Tasks 8 and 9 wire the strip and the close button, so
+    // these compile for the tests only.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
 
+    #[cfg(test)]
     pub fn active_index(&self) -> Option<usize> {
         self.slots.active_index()
     }
 
+    #[cfg(test)]
     pub fn select(&mut self, index: usize) {
         self.slots.select(index);
     }
@@ -169,6 +188,7 @@ impl TabSet {
         Some(&mut self.sessions[index])
     }
 
+    #[cfg(test)]
     pub fn remove_active(&mut self) -> Option<Session> {
         let index = self.slots.active_index()?;
         let id = self.slots.remove_active()?;
@@ -181,6 +201,7 @@ impl TabSet {
         self.sessions.iter_mut()
     }
 
+    #[cfg(test)]
     pub fn titles(&self) -> Vec<&str> {
         self.slots.titles()
     }
