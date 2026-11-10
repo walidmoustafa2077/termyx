@@ -367,7 +367,9 @@ Frame composition, per row:
 ### 8.4 Geometry
 
 - Cell size is derived from the primary font's advance and line height, rounded to whole pixels.
-- DPI changes trigger font reload, atlas clear, and a full redraw.
+- DPI changes re-derive the font set, the tab strip height and the window
+  padding from the configured logical values, clear the atlas, and force a full
+  redraw.
 - Grid size = `floor((width - padding) / cell_w)`, `floor((height - padding) / cell_h)`.
 - Minimum window size: 20×5 cells.
 
@@ -399,7 +401,7 @@ base_direction = "ltr"   # ltr | rtl | auto
 [window]
 width = 1200
 height = 800
-padding = 4
+padding = 4              # logical px, scaled by the display
 
 [scrollback]
 lines = 10000

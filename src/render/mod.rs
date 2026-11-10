@@ -174,6 +174,11 @@ fn corner_coverage(
 }
 
 impl Renderer {
+    /// Builds a renderer with a one-pixel surface.
+    ///
+    /// `padding` is the window margin in physical pixels: the caller has
+    /// already scaled the configured logical value by the window's DPI factor,
+    /// because every coordinate below it is physical.
     pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
         let pixmap = Pixmap::new(1, 1)
             .ok_or_else(|| anyhow::anyhow!("could not allocate the initial pixmap"))?;
@@ -1078,8 +1083,15 @@ impl Renderer {
         &self.pixels
     }
 
+    /// The window margin around the grid, in physical pixels.
     pub fn padding(&self) -> u32 {
         self.padding
+    }
+
+    /// Sets the window margin in physical pixels. Called when the display
+    /// scale changes so the margin grows with the text and the strip.
+    pub fn set_padding(&mut self, padding: u32) {
+        self.padding = padding;
     }
 
     /// Pixels reserved above the grid for the tab strip. Drawing offsets every

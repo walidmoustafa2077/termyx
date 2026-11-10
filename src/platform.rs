@@ -50,6 +50,18 @@ pub(crate) fn resize_edge(x: i32, y: i32, width: i32, height: i32, border: i32) 
     }
 }
 
+/// The physical width a logical resize border grows to at `dpi`.
+///
+/// The hit test works in physical pixels, so a fixed 6 px band would be only
+/// four logical pixels wide on a 150% display. `0` is what `GetDpiForWindow`
+/// returns when it cannot read the window; the standard 96 then keeps the
+/// border at its unscaled width instead of erasing it.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn scaled_border(border: i32, dpi: u32) -> i32 {
+    let dpi = if dpi == 0 { 96 } else { dpi as i32 };
+    (border * dpi + 48) / 96
+}
+
 #[cfg(target_os = "windows")]
 type Hwnd = *mut core::ffi::c_void;
 #[cfg(target_os = "windows")]
@@ -63,7 +75,8 @@ type SubclassProc = unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam, usize, 
 
 #[cfg(target_os = "windows")]
 const WM_NCHITTEST: u32 = 0x0084;
-/// Width of the invisible border that starts a resize, in physical pixels.
+/// Width of the invisible border that starts a resize, in physical pixels at
+/// 96 DPI. `hit_test_edge` scales it by the window's current DPI.
 #[cfg(target_os = "windows")]
 const RESIZE_BORDER: i32 = 6;
 #[cfg(target_os = "windows")]
@@ -133,6 +146,7 @@ unsafe extern "system" {
     fn ScreenToClient(hwnd: Hwnd, point: *mut WinPoint) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut WinRect) -> i32;
     fn IsZoomed(hwnd: Hwnd) -> i32;
+    fn GetDpiForWindow(hwnd: Hwnd) -> u32;
 }
 
 /// Answers `WM_NCHITTEST` with the resize edge under the pointer.
@@ -195,12 +209,16 @@ unsafe fn hit_test_edge(hwnd: Hwnd, lparam: Lparam) -> Option<Edge> {
     if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
         return None;
     }
+    // The DPI is read per message rather than cached at startup because the
+    // window can move to a monitor with a different scale without restarting.
+    // SAFETY: `hwnd` is the live window the hit test was sent to.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
     resize_edge(
         point.x,
         point.y,
         rect.right - rect.left,
         rect.bottom - rect.top,
-        RESIZE_BORDER,
+        scaled_border(RESIZE_BORDER, dpi),
     )
 }
 
@@ -426,6 +444,18 @@ mod tests {
         assert_eq!(resize_edge(w - 1, h / 2, w, h, b), Some(Edge::Right));
         assert_eq!(resize_edge(w / 2, 0, w, h, b), Some(Edge::Top));
         assert_eq!(resize_edge(w / 2, h - 1, w, h, b), Some(Edge::Bottom));
+    }
+
+    #[test]
+    fn the_resize_border_follows_the_display_scale() {
+        // A fixed physical band would shrink to four logical pixels on a 150%
+        // display, where the same drag is much harder to start.
+        assert_eq!(scaled_border(6, 96), 6);
+        assert_eq!(scaled_border(6, 120), 8);
+        assert_eq!(scaled_border(6, 144), 9);
+        assert_eq!(scaled_border(6, 192), 12);
+        // `GetDpiForWindow` reports zero when it cannot read the window's DPI.
+        assert_eq!(scaled_border(6, 0), 6);
     }
 
     #[test]

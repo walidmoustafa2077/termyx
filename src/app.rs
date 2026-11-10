@@ -343,7 +343,11 @@ impl App {
             self.config.font.line_height,
         )?;
         let theme = Theme::from_config(&self.config.theme);
-        let mut renderer = Renderer::new(fonts, theme, self.config.window.padding)?;
+        let mut renderer = Renderer::new(
+            fonts,
+            theme,
+            scaled_padding(self.config.window.padding, window.scale_factor()),
+        )?;
         renderer.set_top_inset(self.tab_strip_px());
 
         let size = window.inner_size();
@@ -432,11 +436,10 @@ impl App {
 
     /// Rebuilds the chrome and the grid for a new display scale factor.
     ///
-    /// The font set, the strip's top inset, the surface, the tab geometry and
-    /// every session's grid are re-derived from the new factor. The renderer's
-    /// padding is not: it keeps the configured physical value, the same as at
-    /// startup, so the grid's outer margin and the strip's left inset do not
-    /// grow with the scale. A font reload failure logs and keeps the old set;
+    /// The font set, the grid padding, the strip's top inset, the surface, the
+    /// tab geometry and every session's grid are re-derived from the new
+    /// factor, so the text, the window margin and the strip all grow together
+    /// with the display. A font reload failure logs and keeps the old set;
     /// the window stays usable at the previous text size instead of ending the
     /// session.
     fn on_scale_factor_changed(&mut self, scale_factor: f64) {
@@ -467,6 +470,7 @@ impl App {
         // so the inset must be recomputed rather than left at the old DPI's
         // value. The event's factor is authoritative here even if the window
         // has already cached it.
+        renderer.set_padding(scaled_padding(self.config.window.padding, scale_factor));
         renderer.set_top_inset(strip_px(scale_factor));
         self.resize_surface(size.width, size.height);
         if self.resize_grid(size.width, size.height) {
@@ -2324,6 +2328,16 @@ fn scaled_font_size(size: f32, scale_factor: f64) -> f32 {
     (size as f64 * scale_factor) as f32
 }
 
+/// Converts the configured window padding from logical pixels to the physical
+/// pixels the grid is laid out in.
+///
+/// Without this the margin stays 8 physical pixels on every display, so it
+/// looks half as wide on a 150% monitor while the text and the tab strip grow.
+/// Both places that build or rebuild a renderer apply it.
+fn scaled_padding(padding: u32, scale_factor: f64) -> u32 {
+    (padding as f64 * scale_factor).round() as u32
+}
+
 /// Logical-to-physical conversion for the tab strip: the single place the
 /// strip height is scaled. Everything downstream (the renderer inset, the grid
 /// size, the mouse origin) works in the physical pixels this returns.
@@ -3673,6 +3687,20 @@ mod tests {
         // change, so it stays a manual-verification item.
         assert_eq!(scaled_font_size(16.0, 1.25), 20.0);
         assert_eq!(scaled_font_size(16.0, 1.5), 24.0);
+    }
+
+    #[test]
+    fn scaled_padding_follows_the_display_scale() {
+        // The config is written in logical pixels while the renderer and the
+        // mouse mapping work in physical ones, so both places that build a
+        // renderer run the configured value through this conversion.
+        assert_eq!(scaled_padding(8, 1.0), 8);
+        assert_eq!(scaled_padding(8, 1.25), 10);
+        assert_eq!(scaled_padding(8, 1.5), 12);
+        // A zero margin stays zero at any scale.
+        assert_eq!(scaled_padding(0, 2.0), 0);
+        // Odd values round to the nearest physical pixel.
+        assert_eq!(scaled_padding(5, 1.5), 8);
     }
 
     #[test]
