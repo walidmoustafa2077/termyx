@@ -9,6 +9,9 @@ pub const MAX_TAB_WIDTH: f32 = 220.0;
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width of the `+` and `⌄` buttons.
 pub const BUTTON_WIDTH: f32 = 32.0;
+/// Width of one of the three window controls at the strip's right end,
+/// matching the Windows caption buttons.
+pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 /// Logical px a tab spends on chrome besides the title itself: the left
 /// padding, the icon, the gap after the icon, the gap before the close box,
 /// the close box, and the right padding — `12 + 16 + 6 + 6 + 16 + 12`.
@@ -51,17 +54,25 @@ pub enum TabHit {
     Close(usize),
     Plus,
     Chevron,
+    /// The three window controls, left to right at the strip's right end.
+    Minimize,
+    Maximize,
+    CloseWindow,
 }
 
 /// What the pointer is over in the strip band, for painting hover.
 ///
-/// A tab body (or its close button) is one target; the two buttons are their
-/// own, so a press on `+` or `⌄` can highlight without claiming a tab.
+/// A tab body (or its close button) is one target; the two buttons and the
+/// three window controls are their own, so a press on any can highlight
+/// without claiming a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripHover {
     Tab(usize),
     Plus,
     Chevron,
+    Minimize,
+    Maximize,
+    CloseWindow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +84,10 @@ pub struct TabBarLayout {
     pub titles: Vec<String>,
     pub plus: Rect,
     pub chevron: Rect,
+    /// Window controls pinned to the right edge, left to right.
+    pub minimize: Rect,
+    pub maximize: Rect,
+    pub close_window: Rect,
 }
 
 impl TabBarLayout {
@@ -86,10 +101,11 @@ impl TabBarLayout {
     /// widens its tab (up to [`MAX_TAB_WIDTH`]) and gets clipped when the strip
     /// runs out of room.
     ///
-    /// The two buttons are reserved before any tab is placed, and each tab may
-    /// claim at most an equal share of what is left. A crowded strip therefore
-    /// shrinks its tabs (below [`MIN_TAB_WIDTH`] if it must) instead of pushing
-    /// the buttons past the window edge, so `+` and `⌄` stay clickable.
+    /// The two buttons and the three window controls are reserved before any
+    /// tab is placed, and each tab may claim at most an equal share of what is
+    /// left. A crowded strip therefore shrinks its tabs (below
+    /// [`MIN_TAB_WIDTH`] if it must) instead of pushing a control past the
+    /// window edge, so `+`, `⌄` and the caption buttons stay clickable.
     pub fn new(width: f32, strip_h: f32, titles: &[&str], width_of: impl Fn(&str) -> f32) -> Self {
         let strip_h = strip_h.max(0.0);
         let k = strip_h / TAB_STRIP_HEIGHT;
@@ -102,7 +118,11 @@ impl TabBarLayout {
         // strip always ends exactly at `width` and neither button is clipped.
         let buttons = (2.0 * BUTTON_WIDTH * k).min(width.max(0.0));
         let button_width = buttons / 2.0;
-        let available = (width - buttons).max(0.0);
+        // The caption controls keep their Windows width unless the whole strip
+        // is narrower than them; in that case their reservation still leaves
+        // zero tab space instead of letting tabs paint over them.
+        let caption = (3.0 * CAPTION_BUTTON_WIDTH * k).min(width.max(0.0));
+        let available = (width - buttons - caption).max(0.0);
         let cap = if titles.is_empty() {
             max_tab
         } else {
@@ -152,6 +172,28 @@ impl TabBarLayout {
             w: button_width,
             h: strip_h,
         };
+        // Pinned right to left so the close control's right edge is the
+        // strip's own right edge, in the Windows caption order.
+        let controls_right = width;
+        let control_w = CAPTION_BUTTON_WIDTH * k;
+        let close_window = Rect {
+            x: controls_right - control_w,
+            y: 0.0,
+            w: control_w,
+            h: strip_h,
+        };
+        let maximize = Rect {
+            x: close_window.x - control_w,
+            y: 0.0,
+            w: control_w,
+            h: strip_h,
+        };
+        let minimize = Rect {
+            x: maximize.x - control_w,
+            y: 0.0,
+            w: control_w,
+            h: strip_h,
+        };
         Self {
             width,
             strip_h,
@@ -159,12 +201,27 @@ impl TabBarLayout {
             titles: titles.iter().map(|title| (*title).to_string()).collect(),
             plus,
             chevron,
+            minimize,
+            maximize,
+            close_window,
         }
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
         if y < 0.0 || y >= self.strip_h {
             return None;
+        }
+        // The controls own the strip's right end before any tab is considered:
+        // the reservation keeps tabs away, and this order keeps the rule
+        // explicit if a future layout ever crowded them.
+        if self.minimize.contains(x, y) {
+            return Some(TabHit::Minimize);
+        }
+        if self.maximize.contains(x, y) {
+            return Some(TabHit::Maximize);
+        }
+        if self.close_window.contains(x, y) {
+            return Some(TabHit::CloseWindow);
         }
         if let Some(tab) = self.tabs.iter().find(|tab| tab.close.contains(x, y)) {
             return Some(TabHit::Close(tab.index));
@@ -238,14 +295,50 @@ mod tests {
             layout.hit(close.x + close.w / 2.0, close.y + close.h / 2.0),
             Some(TabHit::Close(0))
         );
+        // 8 px down clears the window's 6 px top resize border (Task 1's
+        // `WM_NCHITTEST` subclass), so these probe the click, not the frame.
         assert_eq!(
-            layout.hit(layout.plus.x + 2.0, layout.plus.y + 2.0),
+            layout.hit(layout.plus.x + 2.0, layout.plus.y + 8.0),
             Some(TabHit::Plus)
         );
         assert_eq!(
-            layout.hit(layout.chevron.x + 2.0, layout.chevron.y + 2.0),
+            layout.hit(layout.chevron.x + 2.0, layout.chevron.y + 8.0),
             Some(TabHit::Chevron)
         );
+    }
+
+    #[test]
+    fn the_caption_buttons_are_pinned_to_the_right_edge() {
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 40.0);
+        assert_eq!(layout.close_window.x + layout.close_window.w, layout.width);
+        assert_eq!(layout.close_window.x, layout.maximize.x + layout.maximize.w);
+        assert_eq!(layout.maximize.x, layout.minimize.x + layout.minimize.w);
+        assert_eq!(layout.minimize.w, CAPTION_BUTTON_WIDTH);
+        // Every control is a full-height strip cell, in the Windows order.
+        for rect in [layout.minimize, layout.maximize, layout.close_window] {
+            assert_eq!(rect.y, 0.0);
+            assert_eq!(rect.h, layout.strip_h);
+        }
+    }
+
+    #[test]
+    fn tabs_stop_before_the_caption_buttons() {
+        let layout = TabBarLayout::new(1200.0, 32.0, &["one", "two", "three"], |_| 300.0);
+        let last = layout.tabs.last().expect("a tab");
+        assert!(layout.plus.x + layout.plus.w <= layout.minimize.x);
+        assert!(last.rect.x + last.rect.w <= layout.plus.x);
+    }
+
+    #[test]
+    fn the_caption_buttons_stay_reachable_on_a_crowded_strip() {
+        let titles: Vec<&str> = (0..30).map(|_| "a long shell title").collect();
+        let layout = TabBarLayout::new(1200.0, 32.0, &titles, |_| 120.0);
+        for rect in [layout.minimize, layout.maximize, layout.close_window] {
+            assert!(rect.x >= 0.0 && rect.x + rect.w <= layout.width);
+            // 8 px down clears the 6 px top resize border, which starts a
+            // resize rather than a click; the button itself is full height.
+            assert!(layout.hit(rect.x + 8.0, rect.y + 8.0).is_some());
+        }
     }
 
     #[test]

@@ -72,6 +72,12 @@ pub(crate) enum Edge {
 /// every point is interior there.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn resize_edge(x: i32, y: i32, width: i32, height: i32, border: i32) -> Option<Edge> {
+    // The caller converts a screen point before asking, so a point that missed
+    // the window can still reach this helper; it is outside the client rect and
+    // on no border at all.
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return None;
+    }
     if border <= 0 || width < 2 * border || height < 2 * border {
         return None;
     }
@@ -423,6 +429,18 @@ mod tests {
         assert_eq!(resize_edge(100, 50, 200, 100, 6), None);
         // The border is a strict outer band: one pixel inside it is interior.
         assert_eq!(resize_edge(6, 6, 200, 100, 6), None);
+    }
+
+    #[test]
+    fn a_point_outside_the_client_area_is_not_an_edge() {
+        // `WM_NCHITTEST` converts the screen point to client space before this
+        // helper sees it. A point past the right edge, or above-left of the
+        // window, is outside the client rect and must fall through to winit
+        // rather than start a resize from a border it is nowhere near.
+        assert_eq!(resize_edge(240, 50, 200, 100, 6), None);
+        assert_eq!(resize_edge(-10, -10, 200, 100, 6), None);
+        // One pixel inside the top-left corner is still on the border.
+        assert_eq!(resize_edge(1, 1, 200, 100, 6), Some(Edge::TopLeft));
     }
 
     #[test]

@@ -222,6 +222,10 @@ impl Renderer {
         // at the top of the strip, and painting it later would erase a window-
         // wide rule behind that button.
         self.draw_band_rule(layout);
+        // The caption controls paint last. Their hover fill stops one pixel
+        // above the strip's bottom edge, so painting them after the rule cannot
+        // erase it, and the rule (already down) cannot cut through a control.
+        self.draw_caption_buttons(layout, ui_px, hover);
         self.draw_titles(layout, ui_px, active, hover);
     }
 
@@ -320,6 +324,42 @@ impl Renderer {
                 self.fill_round_top(rect, 4.0 * k, self.theme.tab_active);
             }
             ui_text::draw_text_centred(self, glyph, rect, ui_px, foreground);
+        }
+    }
+
+    /// The minimise, maximise and close controls at the strip's right end.
+    ///
+    /// Only the control under the pointer is filled: the close uses the accent
+    /// red, the other two the strip's hover tone, and a resting control has no
+    /// fill. The fill stops one pixel above the band rule so painting these
+    /// after [`Renderer::draw_band_rule`] leaves it intact.
+    fn draw_caption_buttons(
+        &mut self,
+        layout: &TabBarLayout,
+        ui_px: f32,
+        hover: Option<StripHover>,
+    ) {
+        let controls = [
+            ("—", layout.minimize, StripHover::Minimize),
+            ("□", layout.maximize, StripHover::Maximize),
+            ("✕", layout.close_window, StripHover::CloseWindow),
+        ];
+        for (glyph, rect, target) in controls {
+            let hovered = hover == Some(target);
+            if hovered {
+                let fill = if target == StripHover::CloseWindow {
+                    self.theme.caption_close_hover
+                } else {
+                    self.theme.tab_hover
+                };
+                self.fill_rect(rect.x, rect.y, rect.w, (rect.h - 1.0).max(0.0), fill);
+            }
+            let color = if hovered {
+                self.theme.tab_title
+            } else {
+                self.theme.tab_title_inactive
+            };
+            ui_text::draw_text_centred(self, glyph, rect, ui_px, color);
         }
     }
 
@@ -1224,6 +1264,76 @@ mod tests {
     }
 
     #[test]
+    fn the_window_control_glyphs_resolve_to_a_face_that_maps_them() {
+        // The three caption controls go through the same per-character resolver
+        // as the tab strip's `✕`/`⌄`; an unmapped glyph would paint `.notdef`.
+        use ab_glyph::Font;
+
+        let renderer = default_renderer();
+        for ch in ['—', '□', '✕'] {
+            let (face, glyph) = renderer.fonts().chrome_glyph(ch);
+            let (font, _index) = renderer.fonts_face(face);
+            assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");
+            assert_ne!(
+                font.glyph_id(ch).0,
+                0,
+                "face {face} must rasterize {ch:?}, not .notdef"
+            );
+            assert!(
+                renderer
+                    .fonts()
+                    .ui_width(&ch.to_string(), crate::fonts::UI_SIZE_PX)
+                    > 0.0,
+                "{ch:?} must have a positive advance"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hovered_caption_button_fills_and_leaves_the_band_rule() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::CloseWindow),
+        );
+        let close = layout.close_window;
+        // A corner clear of the centred glyph and of the bottom rule.
+        assert_eq!(
+            pixel_at(&renderer, close.x + 2.0, 2.0),
+            renderer.theme.caption_close_hover,
+            "the close control must fill with the accent red while hovered"
+        );
+        assert_eq!(
+            pixel_at(&renderer, close.x + 2.0, close.h - 1.0),
+            renderer.theme.tab_border,
+            "the hover fill must stop above the band rule"
+        );
+
+        // The other two use the strip's own hover tone, and leaving the
+        // controls clears their fill.
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Minimize),
+        );
+        assert_eq!(
+            pixel_at(&renderer, layout.minimize.x + 2.0, 2.0),
+            renderer.theme.tab_hover,
+            "a hovered minimise control uses the strip hover tone"
+        );
+        assert_eq!(
+            pixel_at(&renderer, close.x + 2.0, 2.0),
+            renderer.theme.tab_bar,
+            "the close fill must clear when the pointer leaves it"
+        );
+    }
+
+    #[test]
     fn a_tab_without_a_close_box_paints_no_close() {
         let mut renderer = default_renderer();
         renderer.resize(100, 120);
@@ -1292,10 +1402,10 @@ mod tests {
 
     #[test]
     fn the_title_clip_stops_before_the_close_box() {
-        // One 116 px tab: `(180 - 64) / 1`, wide enough to show a title and
-        // its ellipsis. The title is far longer than the tab can hold.
+        // One 116 px tab: `(318 - 64 - 138) / 1`, wide enough to show a title
+        // and its ellipsis. The title is far longer than the tab can hold.
         let layout = TabBarLayout::new(
-            180.0,
+            318.0,
             32.0,
             &["a very long tab title that cannot fit"],
             |_| 200.0,
@@ -1516,8 +1626,8 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(200, 120);
         // A strip too narrow to give either of two tabs its own icon slot:
-        // each tab is 18 px wide while the icon alone wants 28.
-        let layout = crate::ui::tab_bar::TabBarLayout::new(100.0, 32.0, &["one", "two"], |_| 20.0);
+        // each tab is 20 px wide while the icon alone wants 28.
+        let layout = crate::ui::tab_bar::TabBarLayout::new(242.0, 32.0, &["one", "two"], |_| 20.0);
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
         let second = layout.tabs[1].rect;
         for y in 1..layout.strip_h as u32 - 1 {

@@ -226,6 +226,14 @@ impl App {
         }
     }
 
+    /// Maximises a normal window and restores a maximised one.
+    fn toggle_maximized(&self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        window.set_maximized(!window.is_maximized());
+    }
+
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
         let monitor = event_loop.primary_monitor().map(|monitor| {
             let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
@@ -945,6 +953,21 @@ impl App {
                         // The dropdown is the strip's own layer; the click is
                         // still chrome's, so it must not reach the terminal.
                         StripAction::OpenMenu => self.toggle_menu(),
+                        // The window moves off the pointer, so nothing is
+                        // hovered any more; the redraw below paints it away.
+                        StripAction::MinimizeWindow => {
+                            if let Some(window) = &self.window {
+                                window.set_minimized(true);
+                            }
+                            self.set_strip_hover(None);
+                        }
+                        StripAction::ToggleMaximize => {
+                            self.toggle_maximized();
+                            self.set_strip_hover(None);
+                        }
+                        // Closing ends the event loop: the `MouseInput` arm
+                        // exits the app when `on_mouse` returns true.
+                        StripAction::CloseWindow => return true,
                         StripAction::Ignore => {}
                     }
                     if let Some(window) = &self.window {
@@ -1397,6 +1420,9 @@ enum StripAction {
     Close(usize),
     NewTab,
     OpenMenu,
+    MinimizeWindow,
+    ToggleMaximize,
+    CloseWindow,
     Ignore,
 }
 
@@ -1412,6 +1438,9 @@ fn strip_action(hit: Option<TabHit>) -> StripAction {
         Some(TabHit::Close(index)) => StripAction::Close(index),
         Some(TabHit::Plus) => StripAction::NewTab,
         Some(TabHit::Chevron) => StripAction::OpenMenu,
+        Some(TabHit::Minimize) => StripAction::MinimizeWindow,
+        Some(TabHit::Maximize) => StripAction::ToggleMaximize,
+        Some(TabHit::CloseWindow) => StripAction::CloseWindow,
         None => StripAction::Ignore,
     }
 }
@@ -1428,6 +1457,9 @@ fn strip_hover(action: Option<StripAction>) -> Option<StripHover> {
         }
         Some(StripAction::NewTab) => Some(StripHover::Plus),
         Some(StripAction::OpenMenu) => Some(StripHover::Chevron),
+        Some(StripAction::MinimizeWindow) => Some(StripHover::Minimize),
+        Some(StripAction::ToggleMaximize) => Some(StripHover::Maximize),
+        Some(StripAction::CloseWindow) => Some(StripHover::CloseWindow),
         Some(StripAction::Ignore) | None => None,
     }
 }
@@ -2505,6 +2537,23 @@ mod tests {
         assert_eq!(strip_action(Some(TabHit::Chevron)), StripAction::OpenMenu);
     }
 
+    #[test]
+    fn clicking_a_caption_button_maps_to_its_window_action() {
+        use crate::ui::tab_bar::TabHit;
+        assert_eq!(
+            strip_action(Some(TabHit::Minimize)),
+            StripAction::MinimizeWindow
+        );
+        assert_eq!(
+            strip_action(Some(TabHit::Maximize)),
+            StripAction::ToggleMaximize
+        );
+        assert_eq!(
+            strip_action(Some(TabHit::CloseWindow)),
+            StripAction::CloseWindow
+        );
+    }
+
     fn six_profiles() -> Config {
         let mut text = String::new();
         for index in 1..=6 {
@@ -2590,8 +2639,9 @@ mod tests {
     #[test]
     fn a_stationary_pointer_re_hovers_the_tab_that_moves_under_it() {
         use crate::ui::tab_bar::{TabBarLayout, TabHit};
-        // Three equal tabs; the pointer rests on the middle tab's `✕`.
-        let before = TabBarLayout::new(600.0, 32.0, &["one", "two", "three"], |_| 100.0);
+        // Three 168 px tabs (100 px title + chrome); the pointer rests on the
+        // middle tab's `✕`.
+        let before = TabBarLayout::new(800.0, 32.0, &["one", "two", "three"], |_| 100.0);
         let close = before.tabs[1].close;
         let (x, y) = (close.x + 1.0, close.y + 1.0);
         assert_eq!(before.hit(x, y), Some(TabHit::Close(1)));
@@ -2599,7 +2649,7 @@ mod tests {
         // Closing that tab slides the third into the same geometry, close box
         // included, so the same pixel is still a close target. The hover has to
         // follow it, or the second click closes a tab whose `✕` never painted.
-        let after = TabBarLayout::new(600.0, 32.0, &["one", "three"], |_| 100.0);
+        let after = TabBarLayout::new(800.0, 32.0, &["one", "three"], |_| 100.0);
         assert_eq!(after.hit(x, y), Some(TabHit::Close(1)));
         assert_eq!(
             hover_after_layout_change(&after, x as f64, y as f64),

@@ -48,6 +48,9 @@ pub struct Theme {
     /// Lighter than the active tab so the button reads as pressed in, not dug
     /// out.
     pub tab_close_hover: Rgb,
+    /// Fill behind the close control at the strip's right end while it is
+    /// hovered; the Windows accent red.
+    pub caption_close_hover: Rgb,
     /// The title on the tab the window shows. Its own token rather than the
     /// grid's `foreground`, so a user remapping ANSI grey cannot dim the tab
     /// they are looking at.
@@ -102,6 +105,7 @@ impl Theme {
             tab_active: Rgb::new(31, 31, 31),
             tab_hover: Rgb::new(26, 26, 26),
             tab_close_hover: Rgb::new(51, 51, 51),
+            caption_close_hover: Rgb::new(196, 43, 28),
             tab_title: Rgb::new(255, 255, 255),
             tab_title_inactive: Rgb::new(204, 204, 204),
             tab_border: Rgb::new(43, 43, 43),
@@ -157,6 +161,7 @@ mod tests {
         assert_eq!(theme.tab_hover, Rgb::new(26, 26, 26));
         assert_eq!(theme.tab_active, Rgb::new(31, 31, 31));
         assert_eq!(theme.tab_close_hover, Rgb::new(51, 51, 51));
+        assert_eq!(theme.caption_close_hover, Rgb::new(196, 43, 28));
         assert_eq!(theme.tab_title, Rgb::new(255, 255, 255));
         assert_eq!(theme.tab_title_inactive, Rgb::new(204, 204, 204));
         assert!(theme.tab_bar.r < theme.tab_hover.r);
