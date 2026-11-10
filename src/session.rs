@@ -146,17 +146,23 @@ impl TabSlots {
     }
 }
 
-/// One shell session: its parser and its child.
+/// One tab: its parser and, for shell tabs, its child.
 ///
 /// Its title is not stored here: [`TabSlots`] is the single store, and the tab
 /// strip reads it through [`TabSet::titles`]. Its icon is: the program it
 /// started is a property of this session, not of the strip.
+///
+/// In-app pages (Settings, palette, About) use the same grid so rendering,
+/// scrolling, and selection stay one path, but they have no child process and
+/// therefore no `pty`.
 pub struct Session {
     pub id: SessionId,
     pub terminal: Terminal,
-    pub pty: PtySession,
+    pub pty: Option<PtySession>,
     /// The program's icon, once the app has looked one up.
     pub icon: Option<crate::icon::TabIcon>,
+    /// Set when this tab is an in-app page rather than a shell.
+    pub page: Option<crate::page::Page>,
 }
 
 impl Session {
@@ -166,8 +172,20 @@ impl Session {
         Self {
             id,
             terminal,
-            pty,
+            pty: Some(pty),
             icon: None,
+            page: None,
+        }
+    }
+
+    /// A page tab: a grid with generated content and no child to write to.
+    pub fn page_tab(id: SessionId, terminal: Terminal, page: crate::page::Page) -> Self {
+        Self {
+            id,
+            terminal,
+            pty: None,
+            icon: None,
+            page: Some(page),
         }
     }
 }
@@ -530,7 +548,12 @@ mod tests {
             session.icon.is_none(),
             "a session starts without an icon; only the app knows its program"
         );
-        session.pty.resize(80, 24).expect("resize the child");
+        session
+            .pty
+            .as_mut()
+            .expect("a shell session has a child")
+            .resize(80, 24)
+            .expect("resize the child");
     }
 
     #[test]

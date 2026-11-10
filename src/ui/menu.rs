@@ -113,18 +113,19 @@ pub struct MenuLayout {
 }
 
 impl MenuLayout {
-    /// Anchored under `anchor`, kept inside the window on both axes: the
-    /// dropdown opens downward unless that would run past the bottom edge, in
-    /// which case it flips above the anchor. The right edge is pulled in when
-    /// the anchor sits near the window's edge, and the panel shrinks to the
-    /// window when the window is narrower than it.
+    /// Anchored at `anchor`'s top-left corner like a context menu: the panel's
+    /// left edge sits on the click and opens downward unless that would run
+    /// past the bottom edge, in which case it flips above the point. The left
+    /// edge is pulled in near the window's right edge, and the panel shrinks to
+    /// the window when the window is narrower than it.
     ///
-    /// When neither side can hold the whole menu, the panel is pinned directly
-    /// under the strip — never over it, or a row would steal the chevron — and
-    /// only the rows that fit entirely are laid out. Dropped rows are absent
-    /// from `rows`, so `hit` cannot find them.
+    /// A press inside the tab strip would otherwise cover the chevron, so such
+    /// a point is pushed to the strip's bottom edge first. When neither side
+    /// can hold the whole menu, the panel is pinned there and only the rows
+    /// that fit entirely are laid out. Dropped rows are absent from `rows`, so
+    /// `hit` cannot find them.
     ///
-    /// `anchor` is the strip's chevron, so its height carries the DPI scale the
+    /// `anchor` is the pointer point; its height carries the DPI scale the
     /// strip was laid out at. Deriving the factor from it keeps the dropdown in
     /// step with the scaled chrome without a fifth argument.
     pub fn new(anchor: Rect, items: Vec<MenuItem>, window_width: f32, window_height: f32) -> Self {
@@ -145,19 +146,25 @@ impl MenuLayout {
             0.0
         };
         let full_height = items.len() as f32 * row_height + 2.0 * padding + rule_gap;
-        let x = (anchor.x + anchor.w - width).clamp(0.0, (window_width - width).max(0.0));
-
-        let below = anchor.y + anchor.h + gap;
-        let above = anchor.y - gap - full_height;
-        let y = if below + full_height <= window_height {
-            below
-        } else if above >= 0.0 {
-            above
+        let x = anchor.x.clamp(0.0, (window_width - width).max(0.0));
+        // A click on the strip lands on the chevron; opening over it would put
+        // a row under the pointer and steal the toggle.
+        let floor = if anchor.y < anchor.h {
+            anchor.y + anchor.h
         } else {
-            // Neither side holds the whole menu. Pin it under the strip and
-            // keep only the rows that fit; the window never clips a row that
-            // `hit` can still reach.
-            (anchor.y + anchor.h).max(0.0)
+            0.0
+        };
+        let top = anchor.y.max(floor);
+
+        let y = if top + full_height <= window_height {
+            top
+        } else if top - gap - full_height >= floor {
+            top - gap - full_height
+        } else {
+            // Neither side holds the whole menu. Pin it to the floor and keep
+            // only the rows that fit; the window never clips a row that `hit`
+            // can still reach.
+            floor
         };
 
         let mut rows = Vec::with_capacity(items.len());
@@ -257,17 +264,44 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_hangs_below_its_anchor_and_keeps_its_top_edge() {
+    fn the_menu_opens_at_the_click_point() {
         let anchor = Rect {
-            x: 700.0,
-            y: 0.0,
-            w: 32.0,
+            x: 300.0,
+            y: 200.0,
+            w: 0.0,
             h: TAB_STRIP_HEIGHT,
         };
         let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
-        assert_eq!(menu.rect.y, TAB_STRIP_HEIGHT + MENU_GAP);
-        assert!(menu.rect.x + menu.rect.w <= 700.0 + 32.0 + 0.5);
+        assert_eq!(menu.rect.x, 300.0, "the left edge sits on the click");
+        assert_eq!(menu.rect.y, 200.0, "the top edge sits on the click");
         assert_eq!(menu.rows.len(), 4);
+    }
+
+    #[test]
+    fn a_click_near_the_right_edge_pulls_the_menu_in() {
+        let anchor = Rect {
+            x: 700.0,
+            y: 200.0,
+            w: 0.0,
+            h: TAB_STRIP_HEIGHT,
+        };
+        let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
+        assert_eq!(menu.rect.x, 800.0 - MENU_WIDTH);
+        assert_eq!(menu.rect.y, 200.0);
+    }
+
+    #[test]
+    fn a_click_on_the_strip_opens_below_it() {
+        // The chevron press must not put a row under the pointer.
+        let anchor = Rect {
+            x: 700.0,
+            y: 0.0,
+            w: 0.0,
+            h: TAB_STRIP_HEIGHT,
+        };
+        let menu = MenuLayout::new(anchor, items(), 800.0, 600.0);
+        assert_eq!(menu.rect.y, TAB_STRIP_HEIGHT);
+        assert_eq!(menu.hit(700.0, 4.0), None);
     }
 
     #[test]
@@ -380,7 +414,7 @@ mod tests {
         let menu = MenuLayout::new(anchor, items(), 1200.0, 800.0);
         let k = 48.0 / TAB_STRIP_HEIGHT;
         assert_eq!(menu.rect.w, MENU_WIDTH * k);
-        assert_eq!(menu.rect.y, 48.0 + MENU_GAP * k);
+        assert_eq!(menu.rect.y, 48.0);
         assert_eq!(menu.rows[0].h, MENU_ROW_HEIGHT * k);
         assert_eq!(
             menu.hit(menu.rows[3].x + 4.0, menu.rows[3].y + 4.0),

@@ -1,8 +1,9 @@
 //! Window, surface, and event wiring.
 
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
@@ -18,11 +19,12 @@ use crate::event::UserEvent;
 use crate::fonts::{FontSet, UI_SIZE_PX};
 use crate::icon;
 use crate::input::{self, KeyInput, Mods};
+use crate::page::{self, Page, PageAction, PageKind};
 use crate::platform;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
-use crate::session::{spawn_session, SessionId, TabSet, FALLBACK_TITLE};
+use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::Theme;
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
@@ -55,6 +57,11 @@ const STRIP_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long the cursor stays visible or hidden while blinking.
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How often an open Settings tab checks whether the config file changed.
+/// Saves are rare and user-driven, so polling is enough and avoids a second
+/// thread watching the filesystem.
+const SETTINGS_POLL: Duration = Duration::from_millis(500);
+
 /// A control the pointer is resting on, with the label its tooltip would show.
 struct TooltipHover {
     text: String,
@@ -67,6 +74,11 @@ struct TooltipHover {
 
 pub struct App {
     config: Config,
+    /// The file the Settings tab shows and polls, resolved once at startup so
+    /// a `--config` override and the default path behave the same.
+    config_path: PathBuf,
+    /// Last write time of `config_path` seen by the Settings poll.
+    settings_stamp: Option<SystemTime>,
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
@@ -122,9 +134,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(config: Config, config_path: PathBuf, proxy: EventLoopProxy<UserEvent>) -> Self {
+        let settings_stamp = page::settings_stamp(&config_path);
         Self {
             config,
+            config_path,
+            settings_stamp,
             proxy,
             window: None,
             surface: None,
@@ -220,7 +235,7 @@ impl App {
         self.refresh_strip_hover();
     }
 
-    /// Opens the dropdown under the `⌄`, or closes it when it is already open.
+    /// Opens the dropdown at the pointer, or closes it when it is already open.
     fn toggle_menu(&mut self) {
         if self.menu.is_some() {
             self.close_menu();
@@ -229,15 +244,23 @@ impl App {
         }
     }
 
-    /// Builds the dropdown from the live profile list and anchors it under the
-    /// chevron. Also called to re-anchor an open menu after the strip moves.
+    /// Builds the dropdown from the live profile list and anchors it at the
+    /// pointer, context-menu style. Also called to re-anchor an open menu after
+    /// the strip moves.
     fn open_menu(&mut self) {
         // The panel covers the strip, so no tooltip may hang over it.
         self.clear_tooltip();
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
-        let anchor = layout.chevron;
+        // The chevron height carries the DPI scale the panel must match; the
+        // position comes from the click so the panel opens where the user is.
+        let anchor = Rect {
+            x: self.cursor_pos.0 as f32,
+            y: self.cursor_pos.1 as f32,
+            w: 0.0,
+            h: layout.chevron.h,
+        };
         let (width, height) = self.window.as_ref().map_or((0.0, 0.0), |window| {
             let size = window.inner_size();
             (size.width as f32, size.height as f32)
@@ -425,7 +448,10 @@ impl App {
         }
         for session in self.tabs.iter_mut() {
             session.terminal.resize(cols, rows);
-            if let Err(err) = session.pty.resize(cols as u16, rows as u16) {
+            let Some(pty) = session.pty.as_mut() else {
+                continue;
+            };
+            if let Err(err) = pty.resize(cols as u16, rows as u16) {
                 tracing::warn!(%err, "pty resize failed");
             }
         }
@@ -832,6 +858,9 @@ impl App {
             self.close_menu();
             return false;
         }
+        if let Some(exit) = self.page_key(&event) {
+            return exit;
+        }
         // The tab shortcuts are chrome, not text: a key they claim must never
         // also reach the shell.
         if let Some(action) = tab_shortcut(&event, self.modifiers) {
@@ -904,6 +933,71 @@ impl App {
         false
     }
 
+    /// Routes a key to the active page when it is the command palette.
+    ///
+    /// `None` means the page does not claim the key, so the normal shortcut and
+    /// grid paths still run. Modified keys are never claimed: copy, paste, and
+    /// tab cycling stay available while the palette is open.
+    fn page_key(&mut self, event: &KeyEvent) -> Option<bool> {
+        if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+            return None;
+        }
+        let index = self.tabs.active_index()?;
+        if self.tabs[index].page.as_ref().map(Page::kind) != Some(PageKind::CommandPalette) {
+            return None;
+        }
+        let id = self.tabs[index].id;
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => return Some(self.close_tab(index)),
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(page) = self.tabs[index].page.as_mut() {
+                    page.backspace();
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
+                let delta = if matches!(event.logical_key, Key::Named(NamedKey::ArrowUp)) {
+                    -1
+                } else {
+                    1
+                };
+                let count = self.tabs[index]
+                    .page
+                    .as_ref()
+                    .map_or(0, |page| page.matches(&self.config).len());
+                if let Some(page) = self.tabs[index].page.as_mut() {
+                    page.move_selection(delta, count);
+                }
+            }
+            Key::Named(NamedKey::Enter) if !event.repeat => {
+                let action = self.tabs[index]
+                    .page
+                    .as_ref()
+                    .and_then(|page| page.selected_action(&self.config));
+                let Some(action) = action else {
+                    return Some(false);
+                };
+                self.close_tab(index);
+                self.run_menu_action(palette_action(action));
+                // The chosen row always opens or focuses a tab; only exit when
+                // a failed profile spawn left nothing behind.
+                return Some(self.tabs.is_empty());
+            }
+            Key::Character(text) if !text.is_empty() => {
+                if let Some(page) = self.tabs[index].page.as_mut() {
+                    for character in text.chars() {
+                        page.type_char(character);
+                    }
+                }
+            }
+            _ => return None,
+        }
+        self.refill_page(id);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        Some(false)
+    }
+
     /// Runs a tab shortcut. Returns whether the last tab is gone, which leaves
     /// the window with nothing to show.
     fn apply_tab_shortcut(&mut self, action: TabAction) -> bool {
@@ -942,7 +1036,7 @@ impl App {
     }
 
     /// Runs a row of the `⌄` dropdown. The caller closes the menu first, so an
-    /// action that opens a shell or a dialog starts from a clean strip.
+    /// action that opens a shell or a page starts from a clean strip.
     fn run_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::Profile(index) => {
@@ -950,56 +1044,48 @@ impl App {
                     tracing::warn!(%err, "could not open a profile");
                 }
             }
-            MenuAction::Settings => self.open_settings(),
-            MenuAction::CommandPalette => {
-                tracing::info!("the command palette arrives in a later task");
-            }
-            MenuAction::About => {
-                // `show()` blocks until the dialog closes. Run on the UI thread
-                // it would stop the event loop and the window would freeze, and
-                // Windows may not even paint the dialog. Building the whole
-                // dialog in the worker keeps every non-`Send` value on that
-                // thread; the handle is dropped right away, so the dialog
-                // outlives this press without being joined.
-                let spawned = std::thread::Builder::new()
-                    .name("about-dialog".into())
-                    .spawn(|| {
-                        rfd::MessageDialog::new()
-                            .set_title(FALLBACK_TITLE)
-                            .set_description(about_text())
-                            .set_level(rfd::MessageLevel::Info)
-                            .show();
-                    });
-                if let Err(err) = spawned {
-                    tracing::warn!(%err, "could not open the About dialog");
-                }
-            }
+            MenuAction::Settings => self.open_page(PageKind::Settings),
+            MenuAction::CommandPalette => self.open_page(PageKind::CommandPalette),
+            MenuAction::About => self.open_page(PageKind::About),
         }
     }
 
-    /// Opens the config file, or the folder it belongs in when it does not
-    /// exist yet.
-    ///
-    /// A terminal runs fine without a config file, so `Settings` on a first run
-    /// is normal, not an error. Revealing the folder says where the file goes
-    /// without inventing one; a failure at either step is logged, never shown
-    /// as a dialog.
-    fn open_settings(&self) {
-        let path = crate::config::default_config_path();
-        if path.exists() {
-            if let Err(err) = platform::open_path(&path) {
-                tracing::warn!(%err, "could not open the config file");
-            }
+    /// Opens an in-app page as a tab with its own grid and no child process.
+    fn open_page(&mut self, kind: PageKind) {
+        let id = self.tabs.next_id();
+        // Pages have no events to route; the grid still needs a parser for its
+        // scrollback and snapshots.
+        let terminal =
+            Terminal::new_with_events(self.cols, self.rows, self.config.scrollback.lines, None);
+        let page = Page::new(kind);
+        let title = page.title();
+        self.tabs.push(Session::page_tab(id, terminal, page));
+        self.tabs.set_title(id, title);
+        self.release_forwarded_button();
+        self.selection = None;
+        self.mouse_down = false;
+        self.click_count = 0;
+        self.last_click = None;
+        self.press_in_chrome = false;
+        self.refill_page(id);
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Regenerates a page's grid from live data. Called on open, on every
+    /// palette key, and when the Settings poll sees a new config save.
+    fn refill_page(&mut self, id: SessionId) {
+        let Some(session) = self.tabs.session_mut(id) else {
             return;
-        }
-        let folder = path.parent().unwrap_or(&path);
-        if let Err(err) = std::fs::create_dir_all(folder) {
-            tracing::warn!(%err, "could not create the config folder");
-        }
-        tracing::info!(path = %path.display(), "no config file yet; opening its folder");
-        if let Err(err) = platform::open_path(folder) {
-            tracing::warn!(%err, "could not open the config folder");
-        }
+        };
+        let Some(page) = session.page.as_ref() else {
+            return;
+        };
+        let text = page.text(&self.config, &self.config_path);
+        session.terminal.feed(text.as_bytes());
+        self.selection = None;
     }
 
     /// Shows the tab `delta` places from the active one, wrapping at both ends.
@@ -1032,7 +1118,12 @@ impl App {
         let Some(session) = self.tabs.active_mut() else {
             return;
         };
-        if let Err(err) = session.pty.write(bytes) {
+        // Page tabs own no child process. Typing, paste, and focus reports all
+        // arrive here, so one guard keeps every one of them from the grid.
+        let Some(pty) = session.pty.as_mut() else {
+            return;
+        };
+        if let Err(err) = pty.write(bytes) {
             tracing::warn!(%err, "pty write failed");
         }
     }
@@ -1699,13 +1790,14 @@ impl App {
 /// a further profile would name one nothing binds.
 const PROFILE_SHORTCUTS: usize = 5;
 
-/// The body of the About dialog. Kept pure so the wording is testable without
-/// a window or an event loop.
-fn about_text() -> String {
-    format!(
-        "Termyx {}\n\nA Rust terminal with RTL support.",
-        env!("CARGO_PKG_VERSION")
-    )
+/// Maps a palette row to the menu action that runs it. Both enums name the
+/// same commands; the palette simply drops its own row.
+fn palette_action(action: PageAction) -> MenuAction {
+    match action {
+        PageAction::Profile(index) => MenuAction::Profile(index),
+        PageAction::Settings => MenuAction::Settings,
+        PageAction::About => MenuAction::About,
+    }
 }
 
 /// The rows of the `⌄` dropdown: one per profile, then the window commands.
@@ -2222,10 +2314,42 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
         }
-        let deadline = match (self.blink.deadline, tooltip_deadline) {
-            (Some(blink), Some(tooltip)) => Some(blink.min(tooltip)),
-            (blink, tooltip) => blink.or(tooltip),
-        };
+        // Settings is a live view of a file. Polling its write time while a
+        // Settings tab is open picks up saves without a watcher thread, and
+        // costs nothing once the tab is gone.
+        let settings_open = (0..self.tabs.len()).any(|index| {
+            self.tabs[index]
+                .page
+                .as_ref()
+                .is_some_and(|page| page.kind() == PageKind::Settings)
+        });
+        let mut settings_deadline = None;
+        if settings_open {
+            let stamp = page::settings_stamp(&self.config_path);
+            if stamp != self.settings_stamp {
+                self.settings_stamp = stamp;
+                let ids: Vec<SessionId> = (0..self.tabs.len())
+                    .filter(|&index| {
+                        self.tabs[index]
+                            .page
+                            .as_ref()
+                            .is_some_and(|page| page.kind() == PageKind::Settings)
+                    })
+                    .map(|index| self.tabs[index].id)
+                    .collect();
+                for id in ids {
+                    self.refill_page(id);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            settings_deadline = Some(now + SETTINGS_POLL);
+        }
+        let deadline = [self.blink.deadline, tooltip_deadline, settings_deadline]
+            .into_iter()
+            .flatten()
+            .min();
         match deadline {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
@@ -3291,19 +3415,6 @@ mod tests {
                 items[8].shortcut.as_str()
             ),
             (MenuAction::About, "About", "")
-        );
-    }
-
-    #[test]
-    fn the_about_text_names_the_app_and_its_version() {
-        let text = about_text();
-        assert!(
-            text.contains("Termyx"),
-            "the dialog must say which app it describes, got {text:?}"
-        );
-        assert!(
-            text.contains(env!("CARGO_PKG_VERSION")),
-            "the dialog must show the version this build reports, got {text:?}"
         );
     }
 
