@@ -119,6 +119,32 @@ program = "cmd.exe"
 args = ["/k"]
 ```
 
+## Window chrome
+
+The tab strip is the window's title bar. The client area starts at the window's
+top edge: there is no caption row, no app icon, and no window title text in the
+chrome. The resize frame, edge resizing, Aero Snap and the drop shadow remain.
+
+- The three window controls are painted into the right end of the strip: `—`
+  minimises, `□` maximises and restores, and `✕` closes. Each is 46 logical px
+  wide and the full strip height.
+- Drag the empty part of the strip — after the last tab and its `+`/`⌄` buttons,
+  before the controls — to move the window, as a caption would.
+- Double-click that same empty space to maximise, and again to restore.
+- The top 6 physical px of the strip is the window's resize border, exactly as
+  on a native framed window: a press there starts a resize, not a click.
+- The window cannot be made smaller than 320 × 200 logical px, the floor at
+  which the three controls and the `+`/`⌄` pair still fit without overlapping.
+
+Out of scope for now:
+
+- The Snap Layouts flyout that Windows shows when hovering a native maximise
+  button. Painted buttons cannot summon it, but dragging the window to a screen
+  edge still snaps.
+- Mirroring the three controls to the left edge under a right-to-left system
+  locale.
+- Taskbar jump lists, thumbnail toolbars, and DWM Mica/Acrylic backdrops.
+
 ## Terminal protocol support
 
 The VT parser and grid come from `alacritty_terminal`, so standard terminal

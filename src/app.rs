@@ -43,6 +43,14 @@ const CLICK_TIMEOUT: Duration = Duration::from_millis(400);
 /// Largest cursor movement between two clicks of one multi-click gesture.
 const CLICK_DISTANCE: f64 = 4.0;
 
+/// Longest delay between two presses on the same empty strip spot that still
+/// count as a double click on the window's drag handle.
+///
+/// Deliberately separate from [`CLICK_TIMEOUT`]: the grid's multi-click chain
+/// and the window chrome's double click are independent gestures, and neither
+/// may drive the other.
+const STRIP_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// How long the cursor stays visible or hidden while blinking.
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -74,6 +82,11 @@ pub struct App {
     press_in_chrome: bool,
     click_count: u8,
     last_click: Option<(Instant, f64, f64)>,
+    /// The last press on the empty part of the strip, for the drag handle's own
+    /// double-click chain. Kept apart from `last_click`/`click_count`, which
+    /// belong to the grid: a window drag must never seed a word or line
+    /// selection, and a grid click must never toggle maximise.
+    last_strip_click: Option<(Instant, (f64, f64))>,
     // Button forwarded to a mouse-reporting application, if any. Local text
     // selection uses `mouse_down` instead.
     app_mouse_button: Option<input::MouseButton>,
@@ -108,6 +121,7 @@ impl App {
             press_in_chrome: false,
             click_count: 0,
             last_click: None,
+            last_strip_click: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
             scrollbar_drag: false,
@@ -374,6 +388,54 @@ impl App {
         self.cols = cols;
         self.rows = rows;
         true
+    }
+
+    /// Rebuilds the chrome and the grid for a new display scale factor.
+    ///
+    /// Everything physical is re-derived from the new factor: the font set, the
+    /// strip's top inset, the surface, the tab geometry and every session's
+    /// grid. A font reload failure logs and keeps the old set; the window stays
+    /// usable at the previous text size instead of ending the session.
+    fn on_scale_factor_changed(&mut self, scale_factor: f64) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let size = window.inner_size();
+        let fonts = FontSet::load(
+            &self.config.font.family,
+            &self.config.font.arabic_family,
+            scaled_font_size(self.config.font.size, scale_factor),
+            self.config.font.line_height,
+        );
+        match fonts {
+            Ok(fonts) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_fonts(fonts);
+                }
+            }
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    "could not reload the fonts for the new scale; keeping the old set"
+                );
+            }
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            // The strip height is physical and derives from the *new* scale
+            // factor, so the inset must be recomputed rather than left at the
+            // old DPI's value. The event's factor is authoritative here even if
+            // the window has already cached it.
+            renderer.set_top_inset(strip_px(scale_factor));
+        }
+        self.resize_surface(size.width, size.height);
+        if self.resize_grid(size.width, size.height) {
+            // Reflow invalidates logical selection positions.
+            self.selection = None;
+        }
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Applies a session title to the window, keeping the `dynamic_title`
@@ -944,6 +1006,30 @@ impl App {
                 // The release that ends this press is the chrome's too.
                 self.press_in_chrome = true;
                 if button == MouseButton::Left {
+                    // A miss inside the band is empty chrome: it is the window's
+                    // drag handle, the way a caption is. Win32's
+                    // `WM_NCHITTEST` already routed the top 6 px to resizing, so
+                    // every press that reaches here is below that border.
+                    if chrome_press(self.layout.as_ref().and_then(|layout| {
+                        layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                    })) == ChromePress::Drag
+                    {
+                        let now = Instant::now();
+                        let at = self.cursor_pos;
+                        let double = is_double_click(self.last_strip_click, now, at);
+                        self.last_strip_click = Some((now, at));
+                        if double {
+                            self.toggle_maximized();
+                            self.set_strip_hover(None);
+                        } else if let Some(window) = &self.window {
+                            // A failed drag is recoverable: the window simply
+                            // stays put.
+                            if let Err(err) = window.drag_window() {
+                                tracing::warn!(%err, "could not start the window drag");
+                            }
+                        }
+                        return false;
+                    }
                     match action {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
@@ -1419,6 +1505,41 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
     items
 }
 
+/// What a press inside the strip band belongs to.
+///
+/// Empty band is the window's drag handle; every painted target keeps its own
+/// action and never moves the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromePress {
+    /// A miss on empty band: press and drag move the window, double-click
+    /// toggles maximise.
+    Drag,
+    /// A tab, its `✕`, `+`, `⌄` or a caption control.
+    Tab,
+}
+
+/// Classifies a strip hit. Only a miss on empty band drags the window.
+fn chrome_press(hit: Option<TabHit>) -> ChromePress {
+    match hit {
+        None => ChromePress::Drag,
+        Some(_) => ChromePress::Tab,
+    }
+}
+
+/// Whether `at` is the second press of a double click on the empty strip.
+///
+/// The position must match within [`CLICK_DISTANCE`] px and the gap must stay
+/// below [`STRIP_DOUBLE_CLICK`]; `previous` is the last empty-band press. This
+/// chain is separate from the grid's, so a window toggle can never become a
+/// word or line selection.
+fn is_double_click(previous: Option<(Instant, (f64, f64))>, now: Instant, at: (f64, f64)) -> bool {
+    previous.is_some_and(|(then, (x, y))| {
+        now.saturating_duration_since(then) <= STRIP_DOUBLE_CLICK
+            && (at.0 - x).abs() <= CLICK_DISTANCE
+            && (at.1 - y).abs() <= CLICK_DISTANCE
+    })
+}
+
 /// What a press inside the tab strip asks the app to do.
 ///
 /// The band owns every press in it, so a miss on a control is
@@ -1786,6 +1907,10 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                inner_size_writer: _,
+            } => self.on_scale_factor_changed(scale_factor),
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
@@ -2505,6 +2630,39 @@ mod tests {
     }
 
     #[test]
+    fn empty_strip_space_moves_the_window_but_a_tab_does_not() {
+        use crate::ui::tab_bar::TabHit;
+
+        // Only a miss on the empty band is the drag handle. Every painted target
+        // keeps its own action, so pressing a tab, its `✕`, `+`, `⌄` or a caption
+        // control never moves the window and never reaches the grid.
+        assert_eq!(chrome_press(None), ChromePress::Drag);
+        assert_eq!(chrome_press(Some(TabHit::Tab(0))), ChromePress::Tab);
+        assert_eq!(chrome_press(Some(TabHit::Plus)), ChromePress::Tab);
+        assert_eq!(chrome_press(Some(TabHit::Minimize)), ChromePress::Tab);
+    }
+
+    #[test]
+    fn a_second_press_in_the_same_spot_is_a_double_click() {
+        let now = Instant::now();
+        let previous = Some((now, (120.0, 16.0)));
+        assert!(is_double_click(
+            previous,
+            now + Duration::from_millis(200),
+            (122.0, 18.0)
+        ));
+        assert!(
+            !is_double_click(previous, now + Duration::from_millis(200), (130.0, 16.0)),
+            "a press 10 px away is a new gesture, not the same spot"
+        );
+        assert!(
+            !is_double_click(previous, now + Duration::from_millis(500), (120.0, 16.0)),
+            "a press after the interval starts a new gesture"
+        );
+        assert!(!is_double_click(None, now, (120.0, 16.0)));
+    }
+
+    #[test]
     fn a_press_on_a_menu_row_chooses_it() {
         assert_eq!(menu_press(Some(2), true), MenuPress::Choose(2));
     }
@@ -2996,6 +3154,24 @@ mod tests {
         assert_eq!(strip_px(1.0), 32);
         assert_eq!(strip_px(1.25), 40);
         assert_eq!(strip_px(1.5), 48);
+    }
+
+    #[test]
+    fn a_display_scale_change_recomputes_the_strip_and_the_fonts() {
+        // `on_scale_factor_changed` feeds both of these to the renderer: the
+        // physical strip height becomes its top inset and the physical font
+        // size becomes every glyph's and every cell's size. They must move
+        // together, or the painted band and the grid disagree after a DPI
+        // change.
+        assert_eq!(strip_px(1.25), 40);
+        assert_eq!(strip_px(1.5), 48);
+        assert_ne!(
+            strip_px(1.0),
+            strip_px(1.5),
+            "the reserved inset must follow the new scale factor"
+        );
+        assert_eq!(scaled_font_size(16.0, 1.25), 20.0);
+        assert_eq!(scaled_font_size(16.0, 1.5), 24.0);
     }
 
     #[test]

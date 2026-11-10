@@ -733,6 +733,16 @@ impl Renderer {
         &self.fonts
     }
 
+    /// Swaps in a font set rasterized for a new display scale factor.
+    ///
+    /// The glyph atlas is keyed by pixel size, so it is dropped: reusing it
+    /// would blit glyphs rasterized for the previous DPI. The caller must also
+    /// reset the top inset and resize, because both are physical sizes too.
+    pub fn set_fonts(&mut self, fonts: FontSet) {
+        self.fonts = fonts;
+        self.cache = GlyphCache::new();
+    }
+
     /// Font data for a glyph-cache face id.
     pub(crate) fn fonts_face(&self, id: u8) -> (&ab_glyph::FontVec, u32) {
         self.fonts.font_for_id(id)

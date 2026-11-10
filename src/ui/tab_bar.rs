@@ -412,6 +412,17 @@ mod tests {
     }
 
     #[test]
+    fn the_gap_before_the_caption_buttons_is_empty_space() {
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 40.0);
+        // The gap after the `⌄` — not after the `+`, which is still inside the
+        // chevron at this width — is the empty band that doubles as the window's
+        // drag handle.
+        let x = layout.chevron.x + layout.chevron.w + 4.0;
+        assert!(x < layout.minimize.x, "the test needs empty space to probe");
+        assert_eq!(layout.hit(x, 16.0), None);
+    }
+
+    #[test]
     fn the_strip_is_a_single_row_of_the_requested_height() {
         // The strip height is physical and comes from the caller; a scaled
         // display passes 40 here and both the rects and the hit test follow.
