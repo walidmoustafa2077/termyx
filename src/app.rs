@@ -86,7 +86,7 @@ pub struct App {
     /// double-click chain. Kept apart from `last_click`/`click_count`, which
     /// belong to the grid: a window drag must never seed a word or line
     /// selection, and a grid click must never toggle maximise.
-    last_strip_click: Option<(Instant, (f64, f64))>,
+    last_strip_click: StripClickChain,
     // Button forwarded to a mouse-reporting application, if any. Local text
     // selection uses `mouse_down` instead.
     app_mouse_button: Option<input::MouseButton>,
@@ -965,6 +965,26 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
+            // The window's double-click chain is a left-button empty-band
+            // gesture. Compute it once for every press: a control, the menu,
+            // the grid, or another button is not part of it and disarms it,
+            // while a second empty-band press pairs.
+            let press =
+                chrome_press(self.layout.as_ref().and_then(|layout| {
+                    layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                }));
+            let in_strip = self
+                .strip_action_at(self.cursor_pos.0, self.cursor_pos.1)
+                .is_some();
+            let (chain, double) = next_strip_click(
+                self.last_strip_click,
+                press,
+                button == MouseButton::Left && in_strip && self.menu.is_none(),
+                Instant::now(),
+                self.cursor_pos,
+            );
+            self.last_strip_click = chain;
+
             // With the dropdown open it owns the pointer: a press on a row is
             // consumed (running its action is a later task), and a press
             // anywhere else dismisses the panel. Neither reaches the strip or
@@ -982,7 +1002,6 @@ impl App {
                 self.mouse_down = false;
                 self.click_count = 0;
                 self.last_click = None;
-                self.last_strip_click = None;
                 self.press_in_chrome = true;
                 self.close_menu();
                 if let Some(action) = action {
@@ -1004,34 +1023,24 @@ impl App {
                 self.last_click = None;
                 // The release that ends this press is the chrome's too.
                 self.press_in_chrome = true;
-                if button == MouseButton::Left {
-                    let press = chrome_press(self.layout.as_ref().and_then(|layout| {
-                        layout.hit(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                    }));
+                if button == MouseButton::Left && press == ChromePress::Drag {
                     // A miss inside the band is empty chrome: it is the window's
                     // drag handle, the way a caption is. Win32's
                     // `WM_NCHITTEST` already routed the top 6 px to resizing, so
                     // every press that reaches here is below that border.
-                    if keeps_strip_click_chain(press) {
-                        let now = Instant::now();
-                        let at = self.cursor_pos;
-                        let double = is_double_click(self.last_strip_click, now, at);
-                        self.last_strip_click = Some((now, at));
-                        if double {
-                            self.toggle_maximized();
-                            self.set_strip_hover(None);
-                        } else if let Some(window) = &self.window {
-                            // A failed drag is recoverable: the window simply
-                            // stays put.
-                            if let Err(err) = window.drag_window() {
-                                tracing::warn!(%err, "could not start the window drag");
-                            }
+                    if double {
+                        self.toggle_maximized();
+                        self.set_strip_hover(None);
+                    } else if let Some(window) = &self.window {
+                        // A failed drag is recoverable: the window simply
+                        // stays put.
+                        if let Err(err) = window.drag_window() {
+                            tracing::warn!(%err, "could not start the window drag");
                         }
-                        return false;
                     }
-                    // A real control is not part of a title-bar double click, so
-                    // it disarms the chain for the next empty-band press.
-                    self.last_strip_click = None;
+                    return false;
+                }
+                if button == MouseButton::Left {
                     match action {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
@@ -1079,9 +1088,6 @@ impl App {
             // Any press outside the band owns the next release, even if an
             // earlier band press never saw its own.
             self.press_in_chrome = false;
-            // A press outside the strip cannot pair with an earlier empty-band
-            // press as a window double click.
-            self.last_strip_click = None;
             if self.scrollbar_drag && button != MouseButton::Left {
                 // The pointer belongs to the drag; a stray button must not
                 // paste or reach the application mid-gesture.
@@ -1531,13 +1537,17 @@ fn chrome_press(hit: Option<TabHit>) -> ChromePress {
     }
 }
 
+/// The last empty-band press and where it landed, used to recognise the
+/// window's title-bar double click.
+type StripClickChain = Option<(Instant, (f64, f64))>;
+
 /// Whether `at` is the second press of a double click on the empty strip.
 ///
 /// The position must match within [`CLICK_DISTANCE`] px and the gap must stay
 /// below [`STRIP_DOUBLE_CLICK`]; `previous` is the last empty-band press. This
 /// chain is separate from the grid's, so a window toggle can never become a
 /// word or line selection.
-fn is_double_click(previous: Option<(Instant, (f64, f64))>, now: Instant, at: (f64, f64)) -> bool {
+fn is_double_click(previous: StripClickChain, now: Instant, at: (f64, f64)) -> bool {
     previous.is_some_and(|(then, (x, y))| {
         now.saturating_duration_since(then) <= STRIP_DOUBLE_CLICK
             && (at.0 - x).abs() <= CLICK_DISTANCE
@@ -1545,14 +1555,25 @@ fn is_double_click(previous: Option<(Instant, (f64, f64))>, now: Instant, at: (f
     })
 }
 
-/// Whether a press on the strip leaves the window's double-click chain armed.
+/// Advances the empty-band double-click chain for one strip press.
 ///
-/// Only another press on the empty band can pair with the previous one. A tab,
-/// its `✕`, the `+`/`⌄`, or a caption control starts a different gesture and
-/// must disarm the chain, or `empty → tab → empty` within the double-click
-/// interval would toggle maximise.
-fn keeps_strip_click_chain(press: ChromePress) -> bool {
-    matches!(press, ChromePress::Drag)
+/// Returns the chain the next press sees and whether this press is the second
+/// half of the window gesture. Only a left press on empty band can pair: a real
+/// control (tab, its `✕`, `+`, `⌄`, a caption control) starts a different
+/// gesture, and another button is not part of a left-button double click, so
+/// both disarm the chain.
+fn next_strip_click(
+    previous: StripClickChain,
+    press: ChromePress,
+    left_press: bool,
+    now: Instant,
+    at: (f64, f64),
+) -> (StripClickChain, bool) {
+    if !left_press || press != ChromePress::Drag {
+        return (None, false);
+    }
+    let double = is_double_click(previous, now, at);
+    (Some((now, at)), double)
 }
 
 /// What a press inside the tab strip asks the app to do.
@@ -2678,12 +2699,62 @@ mod tests {
     }
 
     #[test]
-    fn only_an_empty_strip_press_keeps_the_double_click_chain() {
-        // The chain pairs two presses on the same empty spot. A real control in
-        // between must disarm it; otherwise `empty → tab → empty` within the
-        // interval would toggle maximise.
-        assert!(keeps_strip_click_chain(ChromePress::Drag));
-        assert!(!keeps_strip_click_chain(ChromePress::Tab));
+    fn only_consecutive_left_presses_on_empty_space_pair() {
+        use crate::ui::tab_bar::TabHit;
+
+        let start = Instant::now();
+        let empty = (600.0, 16.0);
+        let step = |previous, press, left, ms, at| {
+            next_strip_click(previous, press, left, start + Duration::from_millis(ms), at)
+        };
+        let tab = chrome_press(Some(TabHit::Tab(0)));
+        let caption = chrome_press(Some(TabHit::Minimize));
+
+        let (chain, double) = step(None, ChromePress::Drag, true, 0, empty);
+        assert!(!double, "the first empty press starts the chain");
+        assert!(chain.is_some(), "empty space arms the chain");
+        assert!(
+            step(chain, ChromePress::Drag, true, 200, empty).1,
+            "two empty presses within the interval pair"
+        );
+
+        // A control, another button, or the same button outside the band is
+        // not part of the gesture. Each disarms the chain, so the next empty
+        // press starts over instead of pairing with the press before it.
+        for (name, press, left) in [
+            ("tab", tab, true),
+            ("caption", caption, true),
+            ("tab with the right button", tab, false),
+            (
+                "empty space with the right button",
+                ChromePress::Drag,
+                false,
+            ),
+        ] {
+            let (chain, double) = step(Some((start, empty)), press, left, 100, empty);
+            assert!(!double, "{name} must not complete a double click");
+            assert!(chain.is_none(), "{name} must disarm the chain");
+            assert!(
+                !step(chain, ChromePress::Drag, true, 200, empty).1,
+                "an empty press after a {name} must not pair"
+            );
+        }
+
+        assert!(
+            !step(Some((start, empty)), ChromePress::Drag, true, 450, empty).1,
+            "a slow repeat starts a new gesture"
+        );
+        assert!(
+            !step(
+                Some((start, empty)),
+                ChromePress::Drag,
+                true,
+                200,
+                (610.0, 16.0)
+            )
+            .1,
+            "a repeat 10 px away starts a new gesture"
+        );
     }
 
     #[test]
