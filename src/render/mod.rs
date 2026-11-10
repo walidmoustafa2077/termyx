@@ -344,7 +344,6 @@ impl Renderer {
         let icon_size = TAB_ICON_SIZE * k;
         let title_left = (TAB_PADDING + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         let title_top = 9.0 * k;
-        let foreground = self.theme.foreground;
         for tab in &layout.tabs {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
@@ -378,7 +377,13 @@ impl Renderer {
             );
             let shows_close = tab.index == active || hover == Some(StripHover::Tab(tab.index));
             if shows_close && tab.close.w > 0.0 {
-                ui_text::draw_text_centred(self, "✕", tab.close, CLOSE_GLYPH_SIZE * k, foreground);
+                ui_text::draw_text_centred(
+                    self,
+                    "✕",
+                    tab.close,
+                    CLOSE_GLYPH_SIZE * k,
+                    self.theme.tab_title,
+                );
             }
         }
     }
@@ -1240,7 +1245,7 @@ mod tests {
             "no backdrop may paint where there is no close target"
         );
         assert_eq!(
-            count_color(&renderer, tab, renderer.theme.foreground),
+            count_color(&renderer, tab, renderer.theme.tab_title),
             0,
             "no glyph may paint where there is no close target"
         );
@@ -1406,6 +1411,63 @@ mod tests {
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
         assert_centred(&renderer, layout.tabs[0].close, renderer.theme.tab_active);
+    }
+
+    #[test]
+    fn the_close_glyph_is_painted_at_the_small_chrome_size() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let close = layout.tabs[0].close;
+
+        // Paint the same cross at the title size on the same fill. Comparing
+        // painted ink with painted ink keeps antialiasing and the glyph's side
+        // bearings out of the comparison: only the smaller em size makes the
+        // real `✕` narrower.
+        let mut reference = default_renderer();
+        reference.resize(400, 120);
+        reference.pixmap.fill(reference.theme.tab_active.to_tiny());
+        let reference_color = reference.theme.tab_title;
+        ui_text::draw_text_centred(
+            &mut reference,
+            "✕",
+            close,
+            crate::fonts::UI_SIZE_PX,
+            reference_color,
+        );
+        let ink_width = |renderer: &Renderer| {
+            let (left, _, right, _) = ink_bounds(renderer, close, renderer.theme.tab_active);
+            right - left + 1.0
+        };
+        let painted = ink_width(&renderer);
+        let at_title_size = ink_width(&reference);
+        assert!(
+            painted < at_title_size,
+            "the ✕ ink must be narrower than at the title size ({painted} vs {at_title_size} px)"
+        );
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
+        let (left, _, right, _) = renderer
+            .fonts()
+            .chrome_ink_bounds("✕", CLOSE_GLYPH_SIZE * k)
+            .expect("the close glyph must have an outline");
+        assert!(
+            (painted - (right - left)).abs() <= 1.0,
+            "the painted ✕ must match the {CLOSE_GLYPH_SIZE} px ink width"
+        );
+    }
+
+    #[test]
+    fn the_close_glyph_uses_the_active_title_colour() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        let close = layout.tabs[0].close;
+        assert!(
+            brightest_red(&renderer, close) > renderer.theme.foreground.r,
+            "the ✕ must share the active title's white, not the grid's #cccccc"
+        );
     }
 
     #[test]

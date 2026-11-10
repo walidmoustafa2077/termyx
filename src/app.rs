@@ -139,13 +139,18 @@ impl App {
             .map_or(1.0, |window| window.scale_factor())
     }
 
-    /// Rebuilds the strip geometry. Called after a resize and after opening a
-    /// tab, because a tab's width depends on every title in the strip.
+    /// Rebuilds the strip geometry. Called after a resize, a tab change, or a
+    /// retitle, because a tab's width depends on every title in the strip.
     ///
     /// Both inputs are physical: the window width, and the strip height the
     /// renderer actually reserved above the grid (`top_inset`). Taking the
     /// height from the field the grid uses keeps the painted band and the
     /// reserved inset the same number after a DPI change.
+    ///
+    /// The hover is re-derived here because every layout change is the one
+    /// point where the tab under a stationary pointer can become a different
+    /// tab. Leaving the old index would paint a `✕` on the wrong tab and let a
+    /// click close a shell whose button was never shown.
     fn rebuild_layout(&mut self) {
         let Some(renderer) = self.renderer.as_ref() else {
             return;
@@ -180,6 +185,7 @@ impl App {
             // pointing at where the button used to be.
             self.open_menu();
         }
+        self.refresh_strip_hover();
     }
 
     /// Opens the dropdown under the `⌄`, or closes it when it is already open.
@@ -419,12 +425,26 @@ impl App {
         // to extend.
         self.mouse_down = false;
         // The tab under the pointer may have moved with the removal.
-        self.strip_hover = None;
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
         self.tabs.is_empty()
+    }
+
+    /// Re-derives the strip hover from the pointer and the current layout.
+    ///
+    /// A layout change can move every tab under a stationary pointer (closing,
+    /// opening, retitling or resizing), so the hover from before the change may
+    /// name a tab that no longer sits there. Re-deriving keeps the painted `✕`
+    /// and the next press on the same target: without it, a click at an
+    /// unchanged pixel could close a tab whose `✕` was not visible when the
+    /// click landed.
+    fn refresh_strip_hover(&mut self) {
+        let hover = self.layout.as_ref().and_then(|layout| {
+            hover_after_layout_change(layout, self.cursor_pos.0, self.cursor_pos.1)
+        });
+        self.set_strip_hover(hover);
     }
 
     /// The strip action for a physical-pixel position, or `None` when the
@@ -1386,6 +1406,18 @@ fn strip_hover(action: Option<StripAction>) -> Option<StripHover> {
         Some(StripAction::OpenMenu) => Some(StripHover::Chevron),
         Some(StripAction::Ignore) | None => None,
     }
+}
+
+/// The strip hover in `layout` under a pointer at `(x, y)`.
+///
+/// Used after a layout change moves the tabs under a stationary pointer: the
+/// hover must name the tab that is there now, not the one that was there when
+/// the pointer last moved. Outside the band nothing is hovered.
+fn hover_after_layout_change(layout: &TabBarLayout, x: f64, y: f64) -> Option<StripHover> {
+    if !in_strip(y, layout.strip_h) {
+        return None;
+    }
+    strip_hover(Some(strip_action(layout.hit(x as f32, y as f32))))
 }
 
 /// What a press with the dropdown open asks the app to do.
@@ -2504,6 +2536,27 @@ mod tests {
             strip_action(Some(TabHit::Close(0))),
             StripAction::Close(0),
             "the target does not depend on which tab the window shows"
+        );
+    }
+
+    #[test]
+    fn a_stationary_pointer_re_hovers_the_tab_that_moves_under_it() {
+        use crate::ui::tab_bar::{TabBarLayout, TabHit};
+        // Three equal tabs; the pointer rests on the middle tab's `✕`.
+        let before = TabBarLayout::new(600.0, 32.0, &["one", "two", "three"], |_| 100.0);
+        let close = before.tabs[1].close;
+        let (x, y) = (close.x + 1.0, close.y + 1.0);
+        assert_eq!(before.hit(x, y), Some(TabHit::Close(1)));
+
+        // Closing that tab slides the third into the same geometry, close box
+        // included, so the same pixel is still a close target. The hover has to
+        // follow it, or the second click closes a tab whose `✕` never painted.
+        let after = TabBarLayout::new(600.0, 32.0, &["one", "three"], |_| 100.0);
+        assert_eq!(after.hit(x, y), Some(TabHit::Close(1)));
+        assert_eq!(
+            hover_after_layout_change(&after, x as f64, y as f64),
+            Some(StripHover::Tab(1)),
+            "the pointer must re-hover the close target so its ✕ paints before a second click"
         );
     }
 
