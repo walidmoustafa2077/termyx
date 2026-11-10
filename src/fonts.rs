@@ -61,10 +61,55 @@ const SYMBOL_PROBES: &[char] = &['✕', '●', '❯', '\u{E0B0}', '\u{E000}'];
 /// Proportional family used for window chrome (tab titles, menu items).
 const UI_FAMILY: &str = "Segoe UI";
 
+/// System icon families tried in order for the chrome's window controls.
+///
+/// Windows Terminal draws its caption buttons, the new-tab `+` and the tab's
+/// `✕` from `Segoe MDL2 Assets`, so the same face gives the same shapes for
+/// free. Fluent Icons is the Windows 11 successor and maps the same private-use
+/// codepoints, so it is preferred when installed.
+const ICON_FAMILIES: &[&str] = &["Segoe Fluent Icons", "Segoe MDL2 Assets"];
+
+/// A family only counts as the icon face if it maps the glyphs the chrome
+/// draws, so an unrelated face that happens to share a name is skipped.
+const ICON_PROBES: &[char] = &['\u{E921}', '\u{E922}', '\u{E8BB}', '\u{E710}'];
+
 /// Reserved glyph-cache face id for the proportional UI face.
 ///
 /// Symbol faces start at `2`, so the top of the range stays unambiguous.
 pub const UI_FONT_ID: u8 = u8::MAX;
+
+/// Reserved glyph-cache face id for the system icon face.
+///
+/// Distinct from [`UI_FONT_ID`] because the icon face is a symbol font: its
+/// `+` and letters are `.notdef`, so only the chrome's control codepoints may
+/// be resolved through it.
+pub const ICON_FONT_ID: u8 = u8::MAX - 1;
+
+/// Codepoints the chrome draws, all from the Windows icon face. Windows
+/// Terminal uses these exact glyphs, which is why its controls are not the
+/// text characters `—`, `□` and `✕` drawn here before.
+pub(crate) const GLYPH_MINIMIZE: &str = "\u{E921}";
+pub(crate) const GLYPH_MAXIMIZE: &str = "\u{E922}";
+pub(crate) const GLYPH_RESTORE: &str = "\u{E923}";
+pub(crate) const GLYPH_CLOSE: &str = "\u{E8BB}";
+pub(crate) const GLYPH_ADD: &str = "\u{E710}";
+pub(crate) const GLYPH_CHEVRON: &str = "\u{E70D}";
+
+/// Icon-face em size for the tab's own `✕`, in logical pixels.
+///
+/// Measured on Windows Terminal 1.24 at 100 %: the tab's `✕` ink box is 9x9 px,
+/// smaller than the 10 px caption controls, so the two cannot share a size.
+pub(crate) const TAB_CLOSE_ICON_PX: f32 = 9.0;
+
+/// Icon-face em size for the window controls and the strip's dropdown, in
+/// logical pixels.
+///
+/// Measured on Windows Terminal 1.24 at 100 %: the minimise ink is a single
+/// 10 px row, the maximise outline and caption `✕` are 10x10, and the `⌄` ink is
+/// 8 px wide. Drawn at the 14 px text size ours came out 14 px wide in every
+/// case, so the icon face needs its own, smaller em. The `+` keeps the text
+/// size: WT's `+` ink is 11 px wide, which is what 14 px produces.
+pub(crate) const CONTROL_ICON_PX: f32 = 10.0;
 
 /// Chrome text size in logical pixels.
 ///
@@ -105,6 +150,9 @@ pub struct FontSet {
     /// Proportional face for window chrome; absent on systems without it, in
     /// which case chrome text falls back to the primary monospace face.
     pub ui: Option<FontFace>,
+    /// System icon face for the window controls; absent on systems without it,
+    /// in which case those glyphs fall back to symbol faces.
+    pub icons: Option<FontFace>,
     pub symbols: Vec<FontFace>,
 }
 
@@ -137,6 +185,7 @@ impl FontSet {
 
         let arabic = load_arabic(&database, arabic_family);
         let ui = load_ui(&database);
+        let icons = load_icons(&database);
         let symbols = load_symbols(
             &database,
             family,
@@ -152,6 +201,7 @@ impl FontSet {
             descent,
             arabic,
             ui,
+            icons,
             symbols,
         })
     }
@@ -172,8 +222,9 @@ impl FontSet {
     }
 
     /// Font data for a face id: `0` primary, `1` Arabic, `2..` symbol faces,
-    /// [`UI_FONT_ID`] the proportional chrome face. Unknown ids and absent
-    /// faces fall back to the primary face.
+    /// [`UI_FONT_ID`] the proportional chrome face, [`ICON_FONT_ID`] the
+    /// window-control icon face. Unknown ids and absent faces fall back to the
+    /// primary face.
     pub fn font_for_id(&self, id: u8) -> (&FontVec, u32) {
         match id {
             0 => (&self.font, self.index),
@@ -184,6 +235,11 @@ impl FontSet {
                 .unwrap_or((&self.font, self.index)),
             UI_FONT_ID => self
                 .ui
+                .as_ref()
+                .map(|face| (&face.font, face.index))
+                .unwrap_or((&self.font, self.index)),
+            ICON_FONT_ID => self
+                .icons
                 .as_ref()
                 .map(|face| (&face.font, face.index))
                 .unwrap_or((&self.font, self.index)),
@@ -201,11 +257,20 @@ impl FontSet {
 
     /// The face and glyph the chrome painter uses for `ch`.
     ///
-    /// The UI face does not map every symbol the chrome draws (`✕`, `⌄`), and
+    /// The icon face wins when it maps `ch`: the window controls, `+` and `✕`
+    /// are drawn from it so the strip shows the same shapes Windows Terminal
+    /// does. It has no letters or digits, so ordinary chrome text falls
+    /// through. The UI face does not map every symbol the chrome draws, and
     /// painting those with it would produce `.notdef` boxes. Falling back to
     /// the same symbol faces the grid uses keeps measurement and ink on one
     /// face, so a centred glyph is actually centred.
     pub fn chrome_glyph(&self, ch: char) -> (u8, ab_glyph::GlyphId) {
+        if let Some(icons) = self.icons.as_ref() {
+            let glyph = icons.font.glyph_id(ch);
+            if glyph.0 != 0 {
+                return (ICON_FONT_ID, glyph);
+            }
+        }
         let (ui_font, _index) = self.font_for_id(UI_FONT_ID);
         let glyph = ui_font.glyph_id(ch);
         if glyph.0 != 0 {
@@ -343,6 +408,43 @@ fn load_ui(database: &Database) -> Option<FontFace> {
         family: UI_FAMILY.to_string(),
         scale: 1.0,
     })
+}
+
+/// Loads the system icon face the window controls are drawn from, or `None`
+/// when neither family is installed so those glyphs fall back to symbols.
+fn load_icons(database: &Database) -> Option<FontFace> {
+    for family in ICON_FAMILIES {
+        let families = [Family::Name(family)];
+        let query = Query {
+            families: &families,
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        };
+        let Some(id) = database.query(&query) else {
+            continue;
+        };
+        let Some((data, index)) = database.with_face_data(id, |data, index| (data.to_vec(), index))
+        else {
+            continue;
+        };
+        let Ok(font) = FontVec::try_from_vec_and_index(data, index) else {
+            continue;
+        };
+        // A family of the same name can exist without the control glyphs;
+        // probing the codepoints keeps an empty face from winning.
+        if !ICON_PROBES.iter().any(|ch| font.glyph_id(*ch).0 != 0) {
+            continue;
+        }
+        tracing::debug!(family = *family, "icon face loaded");
+        return Some(FontFace {
+            font,
+            index,
+            family: (*family).to_string(),
+            scale: 1.0,
+        });
+    }
+    None
 }
 
 fn load_symbols(database: &Database, primary: &str, arabic: Option<&str>) -> Vec<FontFace> {

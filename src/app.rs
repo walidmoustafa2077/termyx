@@ -290,6 +290,11 @@ impl App {
         // the frame and the decorations they were created with.
         #[cfg(target_os = "windows")]
         platform::apply_custom_chrome(&window);
+        // The window was created undecorated, so the Desktop Window Manager has
+        // no frame of its own to round; ask for the Windows 11 corner radius
+        // that every other window on this desktop has.
+        #[cfg(target_os = "windows")]
+        platform::apply_rounded_frame(&window);
         // Center on the primary monitor so the OS never places the window over
         // the taskbar or past the screen edge.
         if let Some(monitor) = event_loop.primary_monitor() {

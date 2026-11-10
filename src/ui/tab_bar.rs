@@ -57,9 +57,9 @@ pub const TITLE_SIZE: f32 = 74.0;
 ///
 /// Windows Terminal's tab ink is a 10 px cap band (y=20..29 of a 32 px tab
 /// body); at 14 px our title ink stands 12 px tall and the tab reads 13 px
-/// wider than the reference. 12.5 keeps the width on the reference and the cap
-/// within a pixel of it.
-pub const TAB_TITLE_SIZE: f32 = 12.5;
+/// wider than the reference. 12.5 kept the width on the reference but left the
+/// ink 11 px tall (y=20..30); 12 is the size whose cap band is also 10 px.
+pub const TAB_TITLE_SIZE: f32 = 12.0;
 /// Inset from the tab's left edge to the shell icon.
 ///
 /// Measured on Windows Terminal 1.24: the icon's 16 px box starts 10 px inside
@@ -84,9 +84,6 @@ pub(crate) const TAB_ICON_GAP: f32 = 10.0;
 /// which is an 8 px radius. At 6 px ours read as a tighter, squarer tab.
 pub(crate) const TAB_RADIUS: f32 = 8.0;
 const CLOSE_SIZE: f32 = 16.0;
-/// Em size of the `✕` ink, smaller than a title so the cross does not fill its
-/// box edge to edge.
-pub(crate) const CLOSE_GLYPH_SIZE: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {

@@ -159,10 +159,18 @@ mod tests {
     #[test]
     fn chrome_glyphs_resolve_to_a_face_that_maps_them() {
         let renderer = crate::render::tests::default_renderer();
-        for ch in ['+', '✕', '⌄', '❐'] {
-            let (face, glyph, advance) = glyph_for(&renderer, ch, UI_SIZE_PX);
+        for glyph in [
+            crate::fonts::GLYPH_ADD,
+            crate::fonts::GLYPH_CHEVRON,
+            crate::fonts::GLYPH_CLOSE,
+            crate::fonts::GLYPH_MINIMIZE,
+            crate::fonts::GLYPH_MAXIMIZE,
+            crate::fonts::GLYPH_RESTORE,
+        ] {
+            let ch = glyph.chars().next().expect("a control glyph is one char");
+            let (face, id, advance) = glyph_for(&renderer, ch, UI_SIZE_PX);
             let (font, _index) = renderer.fonts_face(face);
-            assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");
+            assert_ne!(id.0, 0, "the resolved glyph for {ch:?} must exist");
             assert_ne!(
                 font.glyph_id(ch).0,
                 0,

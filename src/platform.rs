@@ -320,6 +320,60 @@ pub fn apply_custom_chrome(window: &winit::window::Window) {
     }
 }
 
+/// Asks the Desktop Window Manager for Windows 11's rounded window corners.
+///
+/// winit creates the window undecorated, so the system has no frame of its own
+/// to round; asking explicitly is the only way to get the same soft corner as
+/// a normal window. The border-colour attribute is deliberately left alone:
+/// painting a custom frame line is what made the corners read as a drawn
+/// outline instead of the system's edge.
+#[cfg(target_os = "windows")]
+pub fn apply_rounded_frame(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    /// `DWMWA_WINDOW_CORNER_PREFERENCE`.
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    /// `DWMWCP_ROUND`: round every corner to the system radius.
+    const DWMWCP_ROUND: u32 = 2;
+
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut core::ffi::c_void,
+            attribute: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+
+    let preference = DWMWCP_ROUND;
+    // SAFETY: `hwnd` is winit's live window handle and `preference` is a `u32`
+    // that outlives the call; `size` is that value's size.
+    let applied = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        )
+    };
+    // Windows 10 has no corner preference; the square corners there are the
+    // platform's own look, so a failure is only worth a log line.
+    if applied != 0 {
+        tracing::warn!(
+            err = %std::io::Error::last_os_error(),
+            "could not request rounded window corners"
+        );
+    }
+}
+
 /// Opens `path` with the platform's default handler.
 ///
 /// The child is not waited for: the opener outlives the call and the window

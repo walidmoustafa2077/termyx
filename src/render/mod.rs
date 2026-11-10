@@ -17,8 +17,8 @@ use crate::shape;
 use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::ui::tab_bar::{
-    Rect, StripHover, TabBarLayout, CLOSE_GLYPH_SIZE, TAB_ICON_GAP, TAB_ICON_INSET, TAB_ICON_SIZE,
-    TAB_RADIUS, TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
+    Rect, StripHover, TabBarLayout, TAB_ICON_GAP, TAB_ICON_INSET, TAB_ICON_SIZE, TAB_RADIUS,
+    TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
 };
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -49,15 +49,13 @@ pub struct Renderer {
 
 /// The glyph the maximise control paints for the window's current state.
 ///
-/// `❐` (U+2750, upper-right shadowed white square) reads as the two overlapping
-/// windows Windows uses for "restore"; the fallback chain on this machine maps
-/// it, and `the_window_control_glyphs_resolve_to_a_face_that_maps_them` pins
-/// that. The plain `□` stays for the expand state.
+/// Both come from the icon face and match Windows Terminal's: the same two
+/// overlapping squares the system draws for restore and expand.
 fn maximize_glyph(maximized: bool) -> &'static str {
     if maximized {
-        "❐"
+        crate::fonts::GLYPH_RESTORE
     } else {
-        "□"
+        crate::fonts::GLYPH_MAXIMIZE
     }
 }
 
@@ -359,7 +357,7 @@ impl Renderer {
         // The caption controls paint last. Their hover fill stops one pixel
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
-        self.draw_caption_buttons(layout, ui_px, hover);
+        self.draw_caption_buttons(layout, hover);
         self.draw_titles(layout, active, icons, hover);
     }
 
@@ -452,21 +450,34 @@ impl Renderer {
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let foreground = self.theme.foreground;
         let buttons = [
-            ("+", layout.plus, StripHover::Plus),
-            ("⌄", layout.chevron, StripHover::Chevron),
+            (
+                crate::fonts::GLYPH_ADD,
+                layout.plus,
+                StripHover::Plus,
+                ui_px,
+            ),
+            (
+                crate::fonts::GLYPH_CHEVRON,
+                layout.chevron,
+                StripHover::Chevron,
+                crate::fonts::CONTROL_ICON_PX * k,
+            ),
         ];
-        for (glyph, rect, target) in buttons {
+        for (glyph, rect, target, glyph_px) in buttons {
             let hovered = hover == Some(target);
             let color = if hovered {
                 self.theme.control_hover_ink
             } else {
                 foreground
             };
+            let pill = hover_pill(layout, rect);
             if hovered {
-                let pill = hover_pill(layout, rect);
                 self.fill_round_rect(pill, 4.0 * k, self.theme.control_hover);
             }
-            ui_text::draw_text_centred(self, glyph, rect, ui_px, color);
+            // Centred in the pill, not the full-height button: WT's `+` ink is
+            // centred on the 32 px tab body, so a glyph centred in the 40 px
+            // band sits 4 px high inside its own highlight.
+            ui_text::draw_text_centred(self, glyph, pill, glyph_px, color);
         }
         // One separator only, at the `+`/`⌄` boundary. Measured `#3D3D3D`
         // there, so use `tab_separator`, not the tab's darker outline.
@@ -482,32 +493,55 @@ impl Renderer {
     /// The minimise, maximise and close controls at the strip's right end.
     ///
     /// Only the control under the pointer is filled: the close uses the accent
-    /// red, the other two the strip's hover tone, and a resting control has no
+    /// red, the other two the control hover tone, and a resting control has no
     /// fill. The fill stops one pixel above the band rule so painting these
     /// after [`Renderer::draw_band_rule`] leaves it intact. The third control
-    /// shows a restore glyph while the window is maximised: `□` there would
-    /// claim that a click still expands an already-expanded window.
-    fn draw_caption_buttons(
-        &mut self,
-        layout: &TabBarLayout,
-        ui_px: f32,
-        hover: Option<StripHover>,
-    ) {
+    /// shows a restore glyph while the window is maximised: the expand glyph
+    /// there would claim that a click still expands an already-expanded window.
+    /// The glyphs are the icon face's, the same ones the system title bar draws.
+    fn draw_caption_buttons(&mut self, layout: &TabBarLayout, hover: Option<StripHover>) {
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let controls = [
-            ("—", layout.minimize, StripHover::Minimize),
+            (
+                crate::fonts::GLYPH_MINIMIZE,
+                layout.minimize,
+                StripHover::Minimize,
+                0.0,
+            ),
             (
                 maximize_glyph(self.maximized),
                 layout.maximize,
                 StripHover::Maximize,
+                k,
             ),
-            ("✕", layout.close_window, StripHover::CloseWindow),
+            (
+                crate::fonts::GLYPH_CLOSE,
+                layout.close_window,
+                StripHover::CloseWindow,
+                k,
+            ),
         ];
-        for (glyph, rect, target) in controls {
+        for (glyph, rect, target, drop) in controls {
             let (fill, color) = caption_colors(&self.theme, target, hover);
             if let Some(fill) = fill {
                 self.fill_rect(rect.x, rect.y, rect.w, (rect.h - 1.0).max(0.0), fill);
             }
-            ui_text::draw_text_centred(self, glyph, rect, ui_px, color);
+            // The controls are centred on their own ink boxes, so each lands on
+            // the reference row only with its own nudge. WT paints the minimise
+            // bar on row 20, which is what ink centring already gives, and the
+            // boxed glyphs on rows 16..25, one row below where centring puts
+            // them.
+            let centred = Rect {
+                y: rect.y + drop,
+                ..rect
+            };
+            ui_text::draw_text_centred(
+                self,
+                glyph,
+                centred,
+                crate::fonts::CONTROL_ICON_PX * k,
+                color,
+            );
         }
     }
 
@@ -544,8 +578,11 @@ impl Renderer {
             if let Some(icon) = icon {
                 let icon_x = tab.rect.x + icon_inset;
                 // Content is positioned on the tab body, not the band: WT's
-                // icon sits centred in its 32 px card.
-                let icon_y = tab.body.y + (tab.body.h - icon_size) / 2.0;
+                // icon sits centred in its 32 px card. The card's centre lands
+                // one pixel low of centre because the ink runs 19..30 while the
+                // band's centre row is 24: centring the box alone put the ink on
+                // 18..29, so the box shifts down to share the title's row.
+                let icon_y = tab.body.y + (tab.body.h - icon_size) / 2.0 + k;
                 blit_tab_icon(&mut self.pixmap, icon, icon_x, icon_y, icon_size);
             }
             let title = layout.titles.get(tab.index).map_or("", String::as_str);
@@ -585,7 +622,16 @@ impl Renderer {
                 } else {
                     self.theme.tab_close
                 };
-                ui_text::draw_text_centred(self, "✕", tab.close, CLOSE_GLYPH_SIZE * k, ink);
+                // The tab's own ✕ is the icon face's close, not a text glyph:
+                // the text `✕` at 10 px leaves a few strokes of ink and reads
+                // as a hollow box in the pill, while WT's is a 9x9 cross.
+                ui_text::draw_text_centred(
+                    self,
+                    crate::fonts::GLYPH_CLOSE,
+                    tab.close,
+                    crate::fonts::TAB_CLOSE_ICON_PX * k,
+                    ink,
+                );
             }
         }
     }
@@ -1693,25 +1739,35 @@ mod tests {
 
     #[test]
     fn the_window_control_glyphs_resolve_to_a_face_that_maps_them() {
-        // The three caption controls go through the same per-character resolver
-        // as the tab strip's `✕`/`⌄`; an unmapped glyph would paint `.notdef`.
+        // The caption controls and the strip's `+`/`⌄`/`✕` go through the same
+        // per-character resolver; an unmapped glyph would paint `.notdef`.
         use ab_glyph::Font;
 
         let renderer = default_renderer();
-        for ch in ['—', '□', '❐', '✕'] {
-            let (face, glyph) = renderer.fonts().chrome_glyph(ch);
+        for glyph in [
+            crate::fonts::GLYPH_MINIMIZE,
+            crate::fonts::GLYPH_MAXIMIZE,
+            crate::fonts::GLYPH_RESTORE,
+            crate::fonts::GLYPH_CLOSE,
+            crate::fonts::GLYPH_ADD,
+            crate::fonts::GLYPH_CHEVRON,
+        ] {
+            let ch = glyph.chars().next().expect("a control glyph is one char");
+            let (face, id) = renderer.fonts().chrome_glyph(ch);
+            assert_eq!(
+                face,
+                crate::fonts::ICON_FONT_ID,
+                "the system icon face must supply the control glyph {ch:?}"
+            );
             let (font, _index) = renderer.fonts_face(face);
-            assert_ne!(glyph.0, 0, "the resolved glyph for {ch:?} must exist");
+            assert_ne!(id.0, 0, "the resolved glyph for {ch:?} must exist");
             assert_ne!(
                 font.glyph_id(ch).0,
                 0,
                 "face {face} must rasterize {ch:?}, not .notdef"
             );
             assert!(
-                renderer
-                    .fonts()
-                    .ui_width(&ch.to_string(), crate::fonts::UI_SIZE_PX)
-                    > 0.0,
+                renderer.fonts().ui_width(glyph, crate::fonts::UI_SIZE_PX) > 0.0,
                 "{ch:?} must have a positive advance"
             );
         }
@@ -1741,7 +1797,7 @@ mod tests {
         assert_ne!(
             painted(&mut renderer, false),
             painted(&mut renderer, true),
-            "a maximised window must paint the restore glyph, not `□`"
+            "a maximised window must paint the restore glyph, not the expand one"
         );
     }
 
@@ -1979,36 +2035,45 @@ mod tests {
     }
 
     #[test]
-    fn the_plus_glyph_is_vertically_centred() {
+    fn the_plus_glyph_centres_on_the_tab_body_not_the_band() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
-        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        // The band rule crosses the button's last row and the divider runs down
-        // its first column; both are chrome, not glyph ink, so measure the
-        // button without them.
-        let button = crate::ui::tab_bar::Rect {
-            x: layout.plus.x + 1.0,
-            w: layout.plus.w - 1.0,
-            h: layout.plus.h - 1.0,
-            ..layout.plus
-        };
-        assert_centred(&renderer, button, renderer.theme.tab_bar);
+        draw_chrome(
+            &mut renderer,
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Plus),
+        );
+        // WT's `+` is centred on the 32 px tab body (y=24), not on the 40 px
+        // band (y=20): centring it in the button leaves it 4 px high inside the
+        // highlight the pointer brings with it.
+        let pill = hover_pill(&layout, layout.plus);
+        assert_centred(&renderer, pill, renderer.theme.control_hover);
     }
 
     #[test]
-    fn the_chevron_glyph_is_vertically_centred() {
+    fn the_chevron_glyph_centres_on_the_tab_body_not_the_band() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
-        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
-        let button = crate::ui::tab_bar::Rect {
-            x: layout.chevron.x + 1.0,
-            w: layout.chevron.w - 1.0,
-            h: layout.chevron.h - 1.0,
-            ..layout.chevron
+        draw_chrome(
+            &mut renderer,
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Chevron),
+        );
+        let pill = hover_pill(&layout, layout.chevron);
+        // The chevron's separator runs down the button's first column, which
+        // the pill shares; it is chrome, not glyph ink.
+        let pill = crate::ui::tab_bar::Rect {
+            x: pill.x + 1.0,
+            w: pill.w - 1.0,
+            ..pill
         };
-        assert_centred(&renderer, button, renderer.theme.tab_bar);
+        assert_centred(&renderer, pill, renderer.theme.control_hover);
     }
 
     #[test]
@@ -2027,40 +2092,20 @@ mod tests {
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
+        let (left, _, right, _) = ink_bounds(&renderer, close, renderer.theme.tab_active);
+        let painted = right - left + 1.0;
 
-        // Paint the same cross at the title size on the same fill. Comparing
-        // painted ink with painted ink keeps antialiasing and the glyph's side
-        // bearings out of the comparison: only the smaller em size makes the
-        // real `✕` narrower.
-        let mut reference = default_renderer();
-        reference.resize(400, 120);
-        reference.pixmap.fill(reference.theme.tab_active.to_tiny());
-        let reference_color = reference.theme.tab_title;
-        ui_text::draw_text_centred(
-            &mut reference,
-            "✕",
-            close,
-            crate::fonts::UI_SIZE_PX,
-            reference_color,
-        );
-        let ink_width = |renderer: &Renderer| {
-            let (left, _, right, _) = ink_bounds(renderer, close, renderer.theme.tab_active);
-            right - left + 1.0
-        };
-        let painted = ink_width(&renderer);
-        let at_title_size = ink_width(&reference);
-        assert!(
-            painted < at_title_size,
-            "the ✕ ink must be narrower than at the title size ({painted} vs {at_title_size} px)"
-        );
+        // The painted cross must be the icon face's own outline at the size the
+        // tab asks for, not some other em size that happens to look close.
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
-        let (left, _, right, _) = renderer
+        let size = crate::fonts::TAB_CLOSE_ICON_PX * k;
+        let (ink_left, _, ink_right, _) = renderer
             .fonts()
-            .chrome_ink_bounds("✕", CLOSE_GLYPH_SIZE * k)
+            .chrome_ink_bounds(crate::fonts::GLYPH_CLOSE, size)
             .expect("the close glyph must have an outline");
         assert!(
-            (painted - (right - left)).abs() <= 1.0,
-            "the painted ✕ must match the {CLOSE_GLYPH_SIZE} px ink width"
+            (painted - (ink_right - ink_left)).abs() <= 1.0,
+            "the painted ✕ must match the {size} px ink width, got {painted}"
         );
     }
 
@@ -2212,8 +2257,9 @@ mod tests {
             crate::ui::tab_bar::TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
-        // The icon slot starts 12 logical px into the tab and is 16 px square,
-        // centred in the 32 px body, so its middle row is y=24.
+        // The icon slot starts 10 logical px into the tab and is 16 px square,
+        // centred in the 32 px body with its one-pixel drop, so its middle row
+        // is y=24.
         let icon_pixel = pixel_at(&renderer, layout.tabs[0].body.x + 20.0, 24.0);
         assert_ne!(
             icon_pixel, renderer.theme.tab_active,
@@ -2238,9 +2284,9 @@ mod tests {
             size: 16,
         };
         renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &[Some(red)], None);
-        // The icon slot starts 12 px into the tab and is 16 px square.
+        // The icon slot starts 10 px into the tab and is 16 px square.
         assert_eq!(
-            pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0),
+            pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 24.0),
             Rgb::new(255, 0, 0),
             "the tab's own icon must replace the app icon"
         );
