@@ -422,16 +422,13 @@ pub fn default_config_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata)
-                .join("termyx")
-                .join("config.toml");
+            return PathBuf::from(appdata).join("termyx").join("config.toml");
         }
     }
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join("Library/Application Support/termyx/config.toml");
+            return PathBuf::from(home).join("Library/Application Support/termyx/config.toml");
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
