@@ -323,6 +323,30 @@ fn warn_unknown_keys(value: &toml::Value) {
     }
 }
 
+/// The tab title for a profile rebuilt from the legacy `[shell]` key.
+///
+/// A `[shell]` has no `name` of its own, but its tab still has to say which
+/// shell it runs: "Default" hides that. The file stem identifies the program,
+/// and the three shells Windows ships get the names its own terminal gives
+/// them. Any other program keeps its stem exactly as typed, because guessing
+/// a friendly name from an unknown binary would be wrong more often than not.
+fn shell_profile_name(program: &str) -> String {
+    let Some(stem) = Path::new(program)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+    else {
+        // An empty program has no stem; the whole string is the best name
+        // there is, and an empty one keeps the tab on its fallback title.
+        return program.to_string();
+    };
+    match stem.to_ascii_lowercase().as_str() {
+        "powershell" => "Windows PowerShell".to_string(),
+        "pwsh" => "PowerShell".to_string(),
+        "cmd" => "Command Prompt".to_string(),
+        _ => stem.to_string(),
+    }
+}
+
 impl Config {
     /// Parses configuration from TOML text, warning about unknown sections and
     /// keys, and clamping out-of-range values.
@@ -351,7 +375,7 @@ impl Config {
                 ProfileConfig::platform_defaults()
             } else {
                 vec![ProfileConfig {
-                    name: "Default".to_string(),
+                    name: shell_profile_name(&self.shell.program),
                     program: self.shell.program.clone(),
                     args: self.shell.args.clone(),
                 }]
@@ -602,9 +626,24 @@ mod tests {
     fn custom_shell_becomes_the_only_profile() {
         let config = Config::from_toml_str("[shell]\nprogram = \"pwsh.exe\"\n").unwrap();
         assert_eq!(config.profiles.len(), 1);
-        assert_eq!(config.profiles[0].name, "Default");
+        assert_eq!(config.profiles[0].name, "PowerShell");
         assert_eq!(config.profiles[0].program, "pwsh.exe");
         assert_eq!(config.default_profile, 0);
+    }
+
+    #[test]
+    fn a_legacy_shell_profile_is_named_after_its_program() {
+        assert_eq!(shell_profile_name("powershell.exe"), "Windows PowerShell");
+        assert_eq!(shell_profile_name("pwsh.exe"), "PowerShell");
+        assert_eq!(shell_profile_name("cmd.exe"), "Command Prompt");
+        // A program the helper does not know keeps its own stem.
+        assert_eq!(shell_profile_name("nu.exe"), "nu");
+        // The lookup ignores case but the name keeps the stem's.
+        assert_eq!(shell_profile_name("MyShell.EXE"), "MyShell");
+        // A name with no extension is its own stem.
+        assert_eq!(shell_profile_name("busybox"), "busybox");
+        // No stem at all falls back to the whole string.
+        assert_eq!(shell_profile_name(""), "");
     }
 
     #[test]

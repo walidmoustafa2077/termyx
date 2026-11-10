@@ -10,6 +10,7 @@ use tiny_skia::Pixmap;
 
 use crate::bidi;
 use crate::fonts::FontSet;
+use crate::icon::TabIcon;
 use crate::scrollbar;
 use crate::selection::Selection;
 use crate::shape;
@@ -22,12 +23,6 @@ use crate::ui::tab_bar::{
 use crate::visual::VisualMap;
 use atlas::Atlas;
 use glyph_cache::{GlyphCache, GlyphSlot};
-
-/// The bundled app icon, kept as RGBA8 so each tab can be stamped from it.
-pub(crate) struct TabIcon {
-    rgba: Vec<u8>,
-    size: u32,
-}
 
 pub struct Renderer {
     pixmap: Pixmap,
@@ -47,8 +42,9 @@ pub struct Renderer {
     /// glyph for the restore glyph. The app reads this from the live window
     /// before each frame because the WM can maximise it without a click.
     maximized: bool,
-    /// The bundled app icon, decoded once for every tab to stamp from.
-    tab_icon: Option<TabIcon>,
+    /// The bundled app icon, decoded once to fall back on for a tab whose
+    /// profile has no icon of its own.
+    app_icon: Option<TabIcon>,
 }
 
 /// The glyph the maximise control paints for the window's current state.
@@ -96,13 +92,6 @@ impl Renderer {
     pub fn new(fonts: FontSet, theme: Theme, padding: u32) -> anyhow::Result<Self> {
         let pixmap = Pixmap::new(1, 1)
             .ok_or_else(|| anyhow::anyhow!("could not allocate the initial pixmap"))?;
-        let tab_icon = match crate::icon::rgba() {
-            Ok((rgba, size)) => Some(TabIcon { rgba, size }),
-            Err(error) => {
-                tracing::warn!(%error, "no tab icon; the strip will draw without one");
-                None
-            }
-        };
         Ok(Self {
             pixmap,
             pixels: vec![0],
@@ -115,7 +104,7 @@ impl Renderer {
             shape_warned: false,
             scrollbar_hover: false,
             maximized: false,
-            tab_icon,
+            app_icon: crate::icon::app_icon(),
         })
     }
 
@@ -249,13 +238,16 @@ impl Renderer {
     /// a window narrower than the strip never shows grid through it.
     ///
     /// `ui_px` is the physical chrome em size, already scaled by the window's
-    /// DPI factor; `active` indexes the tab the window shows, and `hover` is
-    /// the strip target under the pointer, if any.
+    /// DPI factor; `active` indexes the tab the window shows, `icons` carries
+    /// one square image per tab, index-aligned, and `hover` is the strip target
+    /// under the pointer, if any. A tab with no icon of its own stamps the
+    /// bundled app icon instead, so the strip never shows a hole.
     pub fn draw_chrome(
         &mut self,
         layout: &TabBarLayout,
         ui_px: f32,
         active: usize,
+        icons: &[Option<TabIcon>],
         hover: Option<StripHover>,
     ) {
         if layout.strip_h <= 0.0 || layout.width <= 0.0 {
@@ -272,7 +264,7 @@ impl Renderer {
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
         self.draw_caption_buttons(layout, ui_px, hover);
-        self.draw_titles(layout, ui_px, active, hover);
+        self.draw_titles(layout, ui_px, active, icons, hover);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -405,18 +397,20 @@ impl Renderer {
         }
     }
 
-    /// Tab titles, with the app icon on the left and the close glyph on the
-    /// active tab or whichever tab the pointer is over.
+    /// Tab titles, each with its own icon on the left and the close glyph on
+    /// the active tab or whichever tab the pointer is over.
     ///
-    /// Every tab stamps the app icon before its title, so the strip identifies
-    /// the shell at a glance. The inactive title has its own chrome grey rather
-    /// than the grid's ANSI palette, so the tab on screen reads as the active
-    /// one even when both tabs share a band.
+    /// Every tab stamps the icon of the shell it runs, so the strip identifies
+    /// the program at a glance; a tab whose icon could not be read falls back
+    /// to the bundled app icon. The inactive title has its own chrome grey
+    /// rather than the grid's ANSI palette, so the tab on screen reads as the
+    /// active one even when both tabs share a band.
     fn draw_titles(
         &mut self,
         layout: &TabBarLayout,
         ui_px: f32,
         active: usize,
+        icons: &[Option<TabIcon>],
         hover: Option<StripHover>,
     ) {
         // One scale factor for the whole chrome budget, so the painter and
@@ -430,9 +424,10 @@ impl Renderer {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
             // the layout drops a close box that will not fit.
-            let icon = self
-                .tab_icon
-                .as_ref()
+            let icon = icons
+                .get(tab.index)
+                .and_then(|icon| icon.as_ref())
+                .or(self.app_icon.as_ref())
                 .filter(|_| tab.rect.w >= tab_padding + icon_size);
             if let Some(icon) = icon {
                 let icon_x = tab.rect.x + tab_padding;
@@ -938,15 +933,19 @@ fn blit_tab_icon(pixmap: &mut Pixmap, icon: &TabIcon, x: f32, y: f32, size: f32)
         }
         // The blocks partition the source, and the slot is a small fraction of
         // the icon, so every block holds at least one row and column.
-        let sy0 = (row * src / side) as usize;
-        let sy1 = (((row + 1) * src / side).max(row * src / side + 1)).min(src) as usize;
+        let sy0 = (row as usize * src / side as usize).min(src - 1);
+        let sy1 = ((row as usize + 1) * src / side as usize)
+            .max(sy0 + 1)
+            .min(src);
         for col in 0..side {
             let px = dst_x + col as i32;
             if px < 0 || px >= width {
                 continue;
             }
-            let sx0 = (col * src / side) as usize;
-            let sx1 = (((col + 1) * src / side).max(col * src / side + 1)).min(src) as usize;
+            let sx0 = (col as usize * src / side as usize).min(src - 1);
+            let sx1 = ((col as usize + 1) * src / side as usize)
+                .max(sx0 + 1)
+                .min(src);
             // Average premultiplied colour so fully transparent pixels do not
             // darken the edge they are blended into.
             let mut channels = [0u32; 3];
@@ -954,7 +953,7 @@ fn blit_tab_icon(pixmap: &mut Pixmap, icon: &TabIcon, x: f32, y: f32, size: f32)
             let mut count = 0u32;
             for sy in sy0..sy1 {
                 for sx in sx0..sx1 {
-                    let index = (sy * src as usize + sx) * 4;
+                    let index = (sy * src + sx) * 4;
                     let a = u32::from(icon.rgba[index + 3]);
                     for (channel, value) in channels.iter_mut().zip(&icon.rgba[index..index + 3]) {
                         *channel += u32::from(*value) * a;
@@ -1018,6 +1017,18 @@ mod tests {
     use crate::term::{
         Affinity, Cell, Color, CursorShape, CursorState, LogicalPos, RowSnapshot, Style,
     };
+
+    /// Shorthand for the strip cases that inspect the renderer's own fallback
+    /// icon: they pass no per-tab icon and expect the bundled one.
+    fn draw_chrome(
+        renderer: &mut Renderer,
+        layout: &TabBarLayout,
+        ui_px: f32,
+        active: usize,
+        hover: Option<StripHover>,
+    ) {
+        renderer.draw_chrome(layout, ui_px, active, &[], hover);
+    }
 
     #[test]
     fn glyph_edges_are_grayscale() {
@@ -1091,7 +1102,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         let active = pixel_at(&renderer, layout.tabs[0].rect.x + 4.0, 16.0);
         let inactive = pixel_at(&renderer, layout.tabs[1].rect.x + 4.0, 16.0);
@@ -1105,7 +1116,7 @@ mod tests {
         // The same label on both tabs makes the glyph peaks identical, so only
         // the title colour can explain a difference between them.
         let layout = TabBarLayout::new(600.0, 32.0, &["one", "one"], |_| 100.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
 
         let k = layout.strip_h / TAB_STRIP_HEIGHT;
         let title_rect = |index: usize| {
@@ -1146,7 +1157,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let boundary = layout.tabs[1].rect.x;
         assert_eq!(
             pixel_at(&renderer, boundary, 16.0),
@@ -1164,14 +1175,15 @@ mod tests {
         // A corner the `✕` glyph itself does not cover.
         let square = (close.x + 1.0, close.y + 1.0);
 
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         assert_ne!(
             pixel_at(&renderer, square.0, square.1),
             renderer.theme.tab_close_hover,
             "the close button has no backdrop when the pointer is away"
         );
 
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1212,7 +1224,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let rect = layout.plus;
         let bar = renderer.theme.tab_bar;
         let border = renderer.theme.tab_border;
@@ -1239,7 +1251,13 @@ mod tests {
         let plus = (layout.plus.x + 2.0, 2.0);
         let chevron = (layout.chevron.x + 2.0, 2.0);
 
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(StripHover::Plus));
+        draw_chrome(
+            &mut renderer,
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Plus),
+        );
         assert_eq!(
             pixel_at(&renderer, plus.0, plus.1),
             hover,
@@ -1251,7 +1269,8 @@ mod tests {
             "the un-hovered chevron must stay flat"
         );
 
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1276,7 +1295,8 @@ mod tests {
         let sentinel = Rgb::new(255, 0, 255);
         renderer.pixmap.fill(sentinel.to_tiny());
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1298,7 +1318,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         assert_eq!(
             pixel_at(&renderer, 0.0, layout.strip_h - 1.0),
             renderer.theme.tab_border
@@ -1310,7 +1330,13 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, Some(StripHover::Plus));
+        draw_chrome(
+            &mut renderer,
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            Some(StripHover::Plus),
+        );
         let y = layout.strip_h - 1.0;
         for x in layout.plus.x as u32..(layout.plus.x + layout.plus.w) as u32 {
             assert_eq!(
@@ -1357,7 +1383,7 @@ mod tests {
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
         let painted = |renderer: &mut Renderer, maximized: bool| {
             renderer.set_maximized(maximized);
-            renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+            draw_chrome(renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
             let rect = layout.maximize;
             let mut pixels = Vec::new();
             for y in rect.y as u32..(rect.y + rect.h) as u32 {
@@ -1380,7 +1406,8 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1401,7 +1428,8 @@ mod tests {
 
         // The other two use the strip's own hover tone, and leaving the
         // controls clears their fill.
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1455,7 +1483,8 @@ mod tests {
         // with it instead of bleeding into the neighbour.
         let layout = TabBarLayout::new(100.0, 32.0, &["one", "two"], |_| 20.0);
         assert_eq!(layout.tabs[0].close.w, 0.0, "the layout must drop the box");
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1479,7 +1508,8 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 60.0);
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
@@ -1499,7 +1529,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
         let background = renderer.theme.tab_active;
         let painted = (0..close.h as u32).any(|dy| {
@@ -1543,9 +1573,10 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        renderer.draw_chrome(&layout, 12.0, 0, None);
+        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
         let plain = pixel_at(&renderer, layout.tabs[1].close.x + 8.0, 16.0);
-        renderer.draw_chrome(
+        draw_chrome(
+            &mut renderer,
             &layout,
             12.0,
             0,
@@ -1606,7 +1637,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         // The band rule crosses the button's last row; it is chrome, not glyph
         // ink, so measure the button without it.
         let button = crate::ui::tab_bar::Rect {
@@ -1621,7 +1652,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let button = crate::ui::tab_bar::Rect {
             h: layout.chevron.h - 1.0,
             ..layout.chevron
@@ -1634,7 +1665,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         assert_centred(&renderer, layout.tabs[0].close, renderer.theme.tab_active);
     }
 
@@ -1643,7 +1674,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
 
         // Paint the same cross at the title size on the same fill. Comparing
@@ -1687,7 +1718,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 60.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
         assert!(
             brightest_red(&renderer, close) > renderer.theme.foreground.r,
@@ -1700,7 +1731,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        renderer.draw_chrome(&layout, 12.0, 0, None);
+        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
         let tab = layout.tabs[1].rect;
         let border = renderer.theme.tab_border;
         assert_eq!(
@@ -1725,7 +1756,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let tab = layout.tabs[0].rect;
         // The corner falls outside the rounded fill, so the band shows through
         // instead of the active tab's own colour.
@@ -1743,7 +1774,7 @@ mod tests {
         // A strip too narrow to give either of two tabs its own icon slot:
         // each tab is 20 px wide while the icon alone wants 28.
         let layout = crate::ui::tab_bar::TabBarLayout::new(242.0, 32.0, &["one", "two"], |_| 20.0);
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, None);
+        draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let second = layout.tabs[1].rect;
         for y in 1..layout.strip_h as u32 - 1 {
             for x in 1..second.w as u32 - 1 {
@@ -1761,7 +1792,7 @@ mod tests {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = crate::ui::tab_bar::TabBarLayout::new(400.0, 32.0, &["one", "two"], |_| 100.0);
-        renderer.draw_chrome(&layout, 12.0, 0, None);
+        draw_chrome(&mut renderer, &layout, 12.0, 0, None);
 
         // The icon slot starts 12 logical px into the tab and is 16 px square.
         let icon_pixel = pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0);
@@ -1774,6 +1805,25 @@ mod tests {
             pixel_at(&renderer, layout.tabs[1].rect.x + 20.0, 16.0),
             renderer.theme.tab_bar,
             "every tab, not only the active one, carries the icon"
+        );
+    }
+
+    #[test]
+    fn a_tab_stamps_its_own_icon_instead_of_the_app_icon() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, 32.0, &["one"], |_| 100.0);
+        // Solid red: no pixel of this can come from the bundled app icon.
+        let red = crate::icon::TabIcon {
+            rgba: [255, 0, 0, 255].repeat(16 * 16),
+            size: 16,
+        };
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &[Some(red)], None);
+        // The icon slot starts 12 px into the tab and is 16 px square.
+        assert_eq!(
+            pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 16.0),
+            Rgb::new(255, 0, 0),
+            "the tab's own icon must replace the app icon"
         );
     }
 
@@ -2991,7 +3041,7 @@ mod tests {
 
         // Warm the glyph atlas so the measurement covers drawing, not discovery.
         renderer.draw(&snapshot, &maps, None);
-        renderer.draw_chrome(&layout, ui_px, 0, None);
+        draw_chrome(&mut renderer, &layout, ui_px, 0, None);
         renderer.draw_menu(&menu, ui_px);
 
         const FRAMES: usize = 40;
@@ -3013,7 +3063,7 @@ mod tests {
         for _ in 0..FRAMES {
             let start = Instant::now();
             renderer.draw(&snapshot, &maps, None);
-            renderer.draw_chrome(&layout, ui_px, 0, None);
+            draw_chrome(&mut renderer, &layout, ui_px, 0, None);
             frame_samples.push(start.elapsed());
         }
         frame_samples.sort_unstable();
@@ -3029,7 +3079,7 @@ mod tests {
         // frame can pay for.
         let start = Instant::now();
         renderer.draw(&snapshot, &maps, None);
-        renderer.draw_chrome(&layout, ui_px, 0, None);
+        draw_chrome(&mut renderer, &layout, ui_px, 0, None);
         renderer.draw_menu(&menu, ui_px);
         println!("full frame with chrome and dropdown: {:?}", start.elapsed());
 

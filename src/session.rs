@@ -149,16 +149,26 @@ impl TabSlots {
 /// One shell session: its parser and its child.
 ///
 /// Its title is not stored here: [`TabSlots`] is the single store, and the tab
-/// strip reads it through [`TabSet::titles`].
+/// strip reads it through [`TabSet::titles`]. Its icon is: the program it
+/// started is a property of this session, not of the strip.
 pub struct Session {
     pub id: SessionId,
     pub terminal: Terminal,
     pub pty: PtySession,
+    /// The program's icon, once the app has looked one up.
+    pub icon: Option<crate::icon::TabIcon>,
 }
 
 impl Session {
     pub fn new(id: SessionId, terminal: Terminal, pty: PtySession) -> Self {
-        Self { id, terminal, pty }
+        // A session does not know which profile started it, so the app fills
+        // the icon in once it has resolved the program.
+        Self {
+            id,
+            terminal,
+            pty,
+            icon: None,
+        }
     }
 }
 
@@ -516,6 +526,10 @@ mod tests {
     fn a_session_owns_a_live_parser_and_child() {
         let mut session = test_session(1);
         assert!(!session.terminal.feed(b""));
+        assert!(
+            session.icon.is_none(),
+            "a session starts without an icon; only the app knows its program"
+        );
         session.pty.resize(80, 24).expect("resize the child");
     }
 

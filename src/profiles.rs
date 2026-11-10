@@ -12,9 +12,9 @@ pub struct Profile {
 /// Profiles in menu order.
 ///
 /// A validated config always has at least one profile: `Config::validate`
-/// fills an empty list with the configured `[shell]` (named "Default") or, when
-/// `[shell]` is unset, with the Windows pair. The `[shell]` fallback below only
-/// applies to a config built or edited without validation.
+/// fills an empty list with the configured `[shell]`, named after its program,
+/// or, when `[shell]` is unset, with the Windows pair. The `[shell]` fallback
+/// below only applies to a config built or edited without validation.
 pub fn profiles(config: &Config) -> Vec<Profile> {
     let mut profiles: Vec<Profile> = config
         .profiles

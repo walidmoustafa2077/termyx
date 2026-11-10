@@ -100,6 +100,10 @@ pub struct App {
     cursor_pos: (f64, f64),
     cols: usize,
     rows: usize,
+    /// Program to icon, filled the first time a profile opens a tab. A second
+    /// tab of the same program reuses the parsed icon instead of asking the
+    /// shell API again.
+    icon_cache: std::collections::HashMap<String, Option<icon::TabIcon>>,
 }
 
 impl App {
@@ -134,6 +138,7 @@ impl App {
             cursor_pos: (-1.0, -1.0),
             cols: 80,
             rows: 24,
+            icon_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -485,7 +490,11 @@ impl App {
         // the new session becomes active, or the release would reach the wrong
         // shell and leave the original one stuck down.
         self.release_forwarded_button();
-        self.tabs.push(session);
+        let index = self.tabs.push(session);
+        // Every tab shows the icon of the program it runs; a program whose
+        // icon cannot be read leaves the renderer's bundled fallback in place.
+        let tab_icon = self.cached_icon(&profile.shell.program);
+        self.tabs[index].icon = tab_icon;
         // The tab is named for the profile until the shell names itself.
         self.tabs.set_title(id, &profile.name);
         // The new tab is active, so a selection on the old grid is stale.
@@ -496,6 +505,21 @@ impl App {
             window.request_redraw();
         }
         Ok(())
+    }
+
+    /// The icon for `program`, reading it at most once per program.
+    ///
+    /// The lookup walks `PATH` and asks the shell API for the executable's
+    /// icon, so caching by the profile's program string keeps a second tab of
+    /// the same profile free. `None` is cached too: a program with no icon
+    /// would otherwise repeat the failed lookup on every new tab.
+    fn cached_icon(&mut self, program: &str) -> Option<icon::TabIcon> {
+        if let Some(icon) = self.icon_cache.get(program) {
+            return icon.clone();
+        }
+        let icon = icon::program_icon(program);
+        self.icon_cache.insert(program.to_string(), icon.clone());
+        icon
     }
 
     /// Closes the tab at `index` and shows the neighbour that takes its place
@@ -580,6 +604,12 @@ impl App {
         let Some(active) = self.tabs.active_index() else {
             return;
         };
+        // One square per tab, in strip order. Cloned because the renderer owns
+        // the pixmap during the paint and cannot borrow the sessions at the
+        // same time.
+        let icons: Vec<Option<icon::TabIcon>> = (0..self.tabs.len())
+            .map(|index| self.tabs[index].icon.clone())
+            .collect();
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
             return;
         };
@@ -605,7 +635,7 @@ impl App {
         renderer.set_maximized(maximized);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         if let Some(layout) = self.layout.as_ref() {
-            renderer.draw_chrome(layout, ui_px, active, self.strip_hover);
+            renderer.draw_chrome(layout, ui_px, active, &icons, self.strip_hover);
         }
         if let Some(menu) = self.menu.as_ref() {
             renderer.draw_menu(menu, ui_px);
