@@ -4103,7 +4103,9 @@ fn cell_at(x: f64, y: f64, grid: GridGeometry, cols: usize, rows: usize) -> (usi
 /// emits the OSC 133 `B` mark is checked from that mark, so the prompt and the
 /// command name stay clean; every other program is checked from the start of
 /// the cursor's row, because full-screen interfaces draw their own text and
-/// never send a mark. `cursor.row` is a viewport row and only equals the grid
+/// never send a mark. A mark on a different line is left over from the prompt
+/// such a program has covered, so it is ignored and the cursor row is checked
+/// the same way. `cursor.row` is a viewport row and only equals the grid
 /// line because the `display_offset == 0` gate above rules out a scrolled-back
 /// viewport.
 fn compute_spellcheck_spans(
@@ -4125,8 +4127,10 @@ fn compute_spellcheck_spans(
             let start_col = start.col.min(snapshot.cols);
             spellcheck::scan(&cells, start_col, cursor_col)
         }
-        Some(_) => return Vec::new(),
-        None => spellcheck::scan_anywhere(&cells, cursor_col),
+        // A mark on another line is a leftover from the prompt a full-screen
+        // program has since covered. Its row no longer means anything, so the
+        // cursor row is checked whole rather than the overlay going quiet.
+        _ => spellcheck::scan_anywhere(&cells, cursor_col),
     };
     for span in &mut spans {
         span.row = snapshot.cursor.row;
@@ -6019,12 +6023,33 @@ mod tests {
     }
 
     #[test]
-    fn a_mark_on_another_line_stops_the_fallback() {
-        // A mark whose line has scrolled into history cannot be the cursor's
-        // row, so it is refused even at the bottom of the viewport: the row is
-        // then output, and the mark proves a shell owns the screen.
+    fn a_stale_mark_falls_back_to_the_cursor_row() {
+        // A shell that starts a full-screen program leaves its last mark
+        // behind, often on a row that has scrolled away. The mark is stale, so
+        // the cursor row is still checked rather than the overlay going quiet.
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((-1, 4)));
-        assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
+        assert_eq!(
+            compute_spellcheck_spans(&snapshot, true, false),
+            vec![Misspelling {
+                row: 0,
+                col: 18,
+                len: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn a_mark_on_a_visible_other_row_also_falls_back() {
+        let snapshot = spellcheck_snapshot(4, &["PS> ", "", "", "", "how wes"], Some((2, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        assert_eq!(
+            spans,
+            vec![Misspelling {
+                row: 4,
+                col: 4,
+                len: 3
+            }]
+        );
     }
 
     #[test]

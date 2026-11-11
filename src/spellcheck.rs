@@ -263,6 +263,11 @@ fn is_candidate(word: &str) -> bool {
     if word.starts_with('-') {
         return false;
     }
+    // A hyphen or underscore inside a token means a command name, a flag with a
+    // value, or an identifier (`Get-ChildItem`, `some_key`), not prose.
+    if word.contains('-') || word.contains('_') {
+        return false;
+    }
     // The class check also rejects `\ / : @ $`, quotes, and every non-ASCII
     // character, including accented letters.
     if !word.chars().all(is_word_char) {
@@ -483,6 +488,18 @@ mod tests {
         for line in ["Write-Host www.wrng.example", "Write-Host foo.txt"] {
             let cells = row(line);
             assert!(scan(&cells, 0, cells.len()).is_empty(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn skips_hyphenated_and_underscored_tokens() {
+        // Command names and identifiers are not prose; a full-screen input box
+        // can put one on the cursor row, and flagging it would be noise.
+        for line in ["Get-ChildItem teh", "some_key_word teh"] {
+            let cells = row(line);
+            let found = scan_anywhere(&cells, cells.len());
+            assert_eq!(found.len(), 1, "line: {line}");
+            assert_eq!((found[0].col, found[0].len), (14, 3), "line: {line}");
         }
     }
 
