@@ -80,30 +80,46 @@ pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspellin
     }
 
     let mut found = Vec::new();
-    let mut index = 0usize;
+    // Task 6 hands over the whole visible row plus the column the input starts
+    // at, so the prompt and the command name both live before `start_col`.
+    let mut index = start_col;
     let mut first_token_seen = false;
+    // Quote state survives whitespace: every token from an opening quote to its
+    // closing partner is skipped, however many tokens the span covers.
+    let mut quote: Option<char> = None;
 
     while index < end {
-        let cell = &row[index];
-        let ch = cell.text.chars().next().unwrap_or(' ');
+        let ch = cell_char(&row[index]);
         if ch.is_whitespace() {
             index += 1;
             continue;
         }
 
         let word_start = index;
-        let mut word = String::new();
-        let mut quoted = false;
+        let mut raw = String::new();
+        let mut quoted = quote.is_some();
+
         while index < end {
-            let current = &row[index];
-            let c = current.text.chars().next().unwrap_or(' ');
+            let c = cell_char(&row[index]);
             if c.is_whitespace() {
                 break;
             }
-            if c == '"' || c == '\'' || c == '`' {
-                quoted = true;
+            match quote {
+                Some(open) => {
+                    quoted = true;
+                    if c == open {
+                        quote = None;
+                    }
+                }
+                None => {
+                    if is_quote(c) && opens_a_quote(&raw) {
+                        quote = Some(c);
+                        quoted = true;
+                    } else {
+                        raw.push(c);
+                    }
+                }
             }
-            word.push(c);
             index += 1;
         }
 
@@ -119,7 +135,20 @@ pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspellin
         if quoted {
             continue;
         }
-        if !is_candidate(&word) {
+
+        let leading = raw.len() - raw.trim_start_matches(is_trim_char).len();
+        let word = raw.trim_matches(is_trim_char);
+        let trailing = raw.len() - leading - word.len();
+        let span_start = word_start + leading;
+        // Report the cells the word occupies, not its byte length: `cafe` with
+        // an accent is one cell more than three, and is rejected anyway.
+        let span_len = index - span_start - trailing;
+
+        // Never underline anything that begins before the input area.
+        if span_start < start_col {
+            continue;
+        }
+        if !is_candidate(word) {
             continue;
         }
 
@@ -130,12 +159,43 @@ pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspellin
 
         found.push(Misspelling {
             row: 0,
-            col: word_start.max(start_col),
-            len: word.len(),
+            col: span_start,
+            len: span_len,
         });
     }
 
     found
+}
+
+fn cell_char(cell: &Cell) -> char {
+    cell.text.chars().next().unwrap_or(' ')
+}
+
+fn is_quote(c: char) -> bool {
+    matches!(c, '"' | '\'' | '`')
+}
+
+// A quote opens a quoted span at the start of a token or after punctuation such
+// as the `(` in `Write-Host('wrng')`. Inside a word, as in `don't`, it is a
+// literal apostrophe.
+fn opens_a_quote(prefix: &str) -> bool {
+    match prefix.chars().next_back() {
+        Some(c) => !c.is_ascii_alphanumeric(),
+        None => true,
+    }
+}
+
+// Characters that may belong to a word. The class check in `is_candidate`
+// rejects everything else, including accented letters.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '\'' | '_' | '-')
+}
+
+// Punctuation trimmed off both ends of a token so that `hello,` reports
+// `hello`. Non-ASCII characters are never trimmed: they must reach
+// `is_candidate` and be rejected there.
+fn is_trim_char(c: char) -> bool {
+    c.is_ascii_punctuation() && !matches!(c, '\'' | '_' | '-')
 }
 
 fn is_candidate(word: &str) -> bool {
@@ -145,19 +205,24 @@ fn is_candidate(word: &str) -> bool {
     if word.starts_with('-') {
         return false;
     }
+    // The class check also rejects `\ / : @ $`, quotes, and every non-ASCII
+    // character, including accented letters.
+    if !word.chars().all(is_word_char) {
+        return false;
+    }
     if word.chars().any(|c| c.is_ascii_digit()) {
         return false;
     }
-    if word
-        .chars()
-        .any(|c| matches!(c, '\\' | '/' | ':' | '@' | '$' | '"' | '\'' | '`'))
-    {
+    // Dotted names are file paths or host names, whose trailing dot was already
+    // trimmed: any dot left here is interior, as in `foo.txt`.
+    if word.contains('.') {
         return false;
     }
     if !word.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
         return false;
     }
-    if word.len() >= 4 && word.chars().all(|c| !c.is_ascii_lowercase()) {
+    // Acronyms and environment-variable names are skipped at every length.
+    if word.chars().all(|c| !c.is_ascii_lowercase()) {
         return false;
     }
     true
@@ -276,9 +341,81 @@ mod tests {
     }
 
     #[test]
+    fn finds_nothing_before_the_input_start() {
+        let cells = row("PS> Get-ChildItem wrng");
+        let found = scan(&cells, 4, cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (18, 4));
+
+        // The command name is skipped, and the first checked token is not
+        // clamped back onto the input start.
+        let cells = row("dev box> hello wrng");
+        let found = scan(&cells, 9, cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (15, 4));
+    }
+
+    #[test]
+    fn skips_the_command_name_after_a_prompt() {
+        let prompt = "PS D:\\Development\\termyx> ";
+        let cells = row(&format!("{prompt}Write-Host wrng"));
+        let found = scan(&cells, prompt.len(), cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (prompt.len() + 11, 4));
+    }
+
+    #[test]
     fn skips_quoted_strings() {
         let cells = row("Write-Host \"wrng wrd\"");
         assert!(scan(&cells, 0, cells.len()).is_empty());
+    }
+
+    #[test]
+    fn skips_every_token_in_a_quoted_span() {
+        let cells = row("Write-Host \"a b wrng c d\"");
+        assert!(scan(&cells, 0, cells.len()).is_empty());
+    }
+
+    #[test]
+    fn ignores_trailing_punctuation() {
+        for line in [
+            "Write-Host hello,",
+            "Write-Host hello.",
+            "Write-Host (hello)",
+        ] {
+            let cells = row(line);
+            assert!(scan(&cells, 0, cells.len()).is_empty(), "line: {line}");
+        }
+
+        let cells = row("Write-Host wrng,");
+        let found = scan(&cells, 0, cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (11, 4));
+    }
+
+    #[test]
+    fn skips_dotted_names_and_scheme_less_urls() {
+        for line in ["Write-Host www.wrng.example", "Write-Host foo.txt"] {
+            let cells = row(line);
+            assert!(scan(&cells, 0, cells.len()).is_empty(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn ignores_non_ascii_tokens() {
+        let cells = row("Write-Host caf\u{e9}");
+        assert!(scan(&cells, 0, cells.len()).is_empty());
+    }
+
+    #[test]
+    fn skips_short_all_caps_tokens() {
+        let cells = row("Write-Host ZQX");
+        assert!(scan(&cells, 0, cells.len()).is_empty());
+
+        let cells = row("Write-Host Wrng");
+        let found = scan(&cells, 0, cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (11, 4));
     }
 
     #[test]
