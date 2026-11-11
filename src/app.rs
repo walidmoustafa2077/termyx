@@ -5452,6 +5452,27 @@ mod tests {
     }
 
     #[test]
+    fn prompt_marks_from_the_module_drive_the_underline() {
+        // The bytes below are exactly what `Get-TermyxPromptText` writes:
+        // OSC 133 A, the stock prompt, OSC 133 B, then the typed input. The
+        // installed module once predated those marks and the overlay stayed
+        // silently empty, so the whole chain is pinned here.
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS C:\\Users\\mrlok> \x1b]133;B\x07echo teh");
+        let snapshot = term.snapshot();
+        assert!(snapshot.input_start.is_some(), "the B mark is recorded");
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        assert_eq!(
+            spans,
+            vec![Misspelling {
+                row: 0,
+                col: 24,
+                len: 3
+            }]
+        );
+    }
+
+    #[test]
     fn hit_finds_the_word_under_the_pointer() {
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
         let spans = compute_spellcheck_spans(&snapshot, true, false);
