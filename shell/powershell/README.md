@@ -81,6 +81,21 @@ restored.
   the full input and corrected command lines, so it can contain sensitive text. It is
   append-only and unbounded; no rotation is performed.
 
+## Termyx integration
+
+When the parent terminal is Termyx it sets `TERMYX=1`, and the module wraps the
+prompt in OSC 133 marks (`ESC ] 133 ; A BEL` before the prompt text and
+`ESC ] 133 ; B BEL` after it) so Termyx can underline the input line. Outside
+Termyx no marks are emitted, so the prompt is exactly what it was before. A
+`prompt` function that you defined yourself is remembered and called inside the
+wrapper; `Disable-TermyxAutocorrect` restores it.
+
+`%LOCALAPPDATA%\Termyx\user-words.txt` is shared with Termyx: one word per
+line. The module reads it at import and re-reads it while running whenever its
+timestamp changes, and Termyx appends to it from its right-click menu. A word
+added on either side is therefore known to both without restarting the shell or
+the terminal.
+
 ## Recovery
 
 If the prompt misbehaves, press `Ctrl+Z`, then run one of:

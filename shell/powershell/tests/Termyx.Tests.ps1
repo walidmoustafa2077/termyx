@@ -1057,3 +1057,112 @@ Describe 'Frequency ranked suggestions' {
         [Termyx.Corrector]::SuggestCommand('alphx', 1) | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Spellcheck integration' {
+    BeforeAll {
+        $script:moduleManifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\Termyx.psd1'
+        Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+    }
+
+    BeforeEach {
+        # Reset the prompt bookkeeping without touching the prompt itself; an
+        # earlier Describe may have left stale state behind.
+        & (Get-Module Termyx) {
+            $script:TermyxPromptInstalled = $false
+            $script:TermyxOriginalPrompt = $null
+        }
+    }
+
+    It 'wraps the prompt with OSC 133 marks when TERMYX is set' {
+        $env:TERMYX = '1'
+        $module = Get-Module Termyx
+        $saved = $null
+        try {
+            $saved = & $module { $script:TermyxPromptText }
+            $text = & $module { $script:TermyxPromptText = 'PS> '; Get-TermyxPromptWithMarks }
+
+            $esc = [char]27
+            $bel = [char]7
+            ($text.Contains($esc + ']133;A' + $bel)) | Should -BeTrue
+            ($text.Contains($esc + ']133;B' + $bel)) | Should -BeTrue
+            ($text.StartsWith($esc + ']133;A' + $bel)) | Should -BeTrue
+            ($text.Contains('PS> ' + $esc + ']133;B' + $bel)) | Should -BeTrue
+            ($text.EndsWith($esc + ']133;B' + $bel)) | Should -BeTrue
+        }
+        finally {
+            Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+            & $module { param($value) $script:TermyxPromptText = $value } $saved
+        }
+    }
+
+    It 'leaves the prompt untouched outside Termyx' {
+        Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+        $module = Get-Module Termyx
+        $saved = $null
+        try {
+            $saved = & $module { $script:TermyxPromptText }
+            $text = & $module { $script:TermyxPromptText = 'PS> '; Get-TermyxPromptWithMarks }
+
+            $text | Should -Be 'PS> '
+        }
+        finally {
+            & $module { param($value) $script:TermyxPromptText = $value } $saved
+        }
+    }
+
+    It 'loads words added to the shared file' {
+        $path = Join-Path $TestDrive 'user-words.txt'
+        Set-Content -LiteralPath $path -Value 'zqxjv' -Encoding ASCII
+
+        $module = Get-Module Termyx
+        $savedPath = $null
+        $savedStamp = $null
+        try {
+            $savedPath = & $module { $script:TermyxUserWordsPath }
+            $savedStamp = & $module { $script:TermyxUserWordsStamp }
+            & $module { param($p) $script:TermyxUserWordsPath = $p; $script:TermyxUserWordsStamp = $null } $path
+
+            & $module { Update-TermyxUserWords }
+
+            ([Termyx.Corrector]::IsKnownWord('zqxjv')) | Should -BeTrue
+        }
+        finally {
+            & $module {
+                param($p, $s)
+                $script:TermyxUserWordsPath = $p
+                $script:TermyxUserWordsStamp = $s
+            } $savedPath $savedStamp
+        }
+    }
+
+    It 'installs the prompt idempotently and restores the original' {
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+
+        try {
+            Set-Item -Path Function:\global:prompt -Value { 'original> ' }
+
+            & $module { Enable-TermyxPrompt }
+            & $module { Enable-TermyxPrompt }
+
+            (& $function:prompt) | Should -Be 'original> '
+            (& $module { $script:TermyxPromptInstalled }) | Should -BeTrue
+
+            & $module { Disable-TermyxPrompt }
+            & $module { Disable-TermyxPrompt }
+
+            (& $function:prompt) | Should -Be 'original> '
+        }
+        finally {
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+        }
+    }
+}

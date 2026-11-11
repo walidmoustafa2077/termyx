@@ -67,12 +67,39 @@ function Get-TermyxParameterNames {
     return ,$names
 }
 
+function Update-TermyxUserWords {
+    # Termyx appends to the same user-words file, so the run-time view of the
+    # dictionary has to follow it. A failure here only means a missed word; it
+    # must never break the correction that asked for the reload.
+    try {
+        if (-not $script:TermyxUserWordsPath) { return }
+        if (-not (Test-Path -LiteralPath $script:TermyxUserWordsPath)) { return }
+
+        $stamp = (Get-Item -LiteralPath $script:TermyxUserWordsPath).LastWriteTimeUtc
+        if ($script:TermyxUserWordsStamp -eq $stamp) { return }
+
+        foreach ($word in @(Get-Content -LiteralPath $script:TermyxUserWordsPath -ErrorAction SilentlyContinue)) {
+            $entry = [string]$word
+            $entry = $entry.Trim()
+            if ($entry.Length -gt 0) {
+                [Termyx.Corrector]::AddUserWord($entry)
+            }
+        }
+
+        $script:TermyxUserWordsStamp = $stamp
+    }
+    catch {
+    }
+}
+
 function Invoke-TermyxCorrection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Line,
         [Parameter(Mandatory)][int]$Cursor
     )
+
+    Update-TermyxUserWords
 
     $result = New-TermyxDecisionResult -Line $Line -Cursor $Cursor
 

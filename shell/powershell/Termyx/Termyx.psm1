@@ -18,6 +18,7 @@ $script:TermyxOptions = @{
 
 $cacheDir = Join-Path $env:LOCALAPPDATA 'Termyx'
 $script:TermyxUserWordsPath = Join-Path $cacheDir 'user-words.txt'
+$script:TermyxUserWordsStamp = $null
 $script:TermyxExceptionsPath = Join-Path $cacheDir 'exceptions.txt'
 $script:TermyxLogPath = Join-Path $cacheDir 'corrections.log'
 $script:TermyxExceptions = $null
@@ -30,6 +31,7 @@ $script:TermyxLastCorrection = $null
 . (Join-Path $script:TermyxRoot 'private\Token-Classifier.ps1')
 . (Join-Path $script:TermyxRoot 'private\Decision.ps1')
 . (Join-Path $script:TermyxRoot 'private\KeyHandlers.ps1')
+. (Join-Path $script:TermyxRoot 'private\Prompt.ps1')
 
 function Initialize-TermyxEngine {
     if ('Termyx.Corrector' -as [type]) {
@@ -119,6 +121,15 @@ function Enable-TermyxAutocorrect {
     Set-PSReadLineKeyHandler -Key Spacebar -ScriptBlock (Get-TermyxSpaceHandler)
     $script:TermyxLastCorrection = $null
     $script:TermyxEnabled = $true
+
+    # The prompt marks are an enhancement, never a prerequisite: a prompt that
+    # cannot be installed must not take autocorrect down with it.
+    try {
+        Enable-TermyxPrompt
+    }
+    catch {
+        Write-Warning ('Termyx could not install the prompt marks: ' + $_.Exception.Message)
+    }
 }
 
 function Disable-TermyxAutocorrect {
@@ -135,6 +146,13 @@ function Disable-TermyxAutocorrect {
 
     $script:TermyxEnabled = $false
     $script:TermyxLastCorrection = $null
+
+    try {
+        Disable-TermyxPrompt
+    }
+    catch {
+        Write-Warning ('Termyx could not restore the prompt: ' + $_.Exception.Message)
+    }
 }
 
 function Get-TermyxStatus {
