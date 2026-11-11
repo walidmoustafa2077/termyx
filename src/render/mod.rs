@@ -363,13 +363,14 @@ impl Renderer {
         ui_px: f32,
         active: usize,
         icons: &[Option<TabIcon>],
+        colors: &[Option<Rgb>],
         hover: Option<StripHover>,
     ) {
         if layout.strip_h <= 0.0 || layout.width <= 0.0 {
             return;
         }
         self.fill_band(layout);
-        self.draw_tabs(layout, active, hover);
+        self.draw_tabs(layout, active, colors, hover);
         self.draw_buttons(layout, ui_px, hover);
         // The rule goes down after the buttons: a hovered button's fill starts
         // at the top of the strip, and painting it later would erase a window-
@@ -379,7 +380,7 @@ impl Renderer {
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
         self.draw_caption_buttons(layout, hover);
-        self.draw_titles(layout, active, icons, hover);
+        self.draw_titles(layout, active, icons, colors, hover);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -402,11 +403,21 @@ impl Renderer {
     /// goes `#333333` → `#2E2E2E` → `#0C0C0C` across one pixel: a blend of the
     /// rounded edge with the band, not a `#292929` stroke. Drawing a stroke
     /// made the tab read as a card pasted on the strip.
-    fn draw_tabs(&mut self, layout: &TabBarLayout, active: usize, hover: Option<StripHover>) {
+    fn draw_tabs(
+        &mut self,
+        layout: &TabBarLayout,
+        active: usize,
+        colors: &[Option<Rgb>],
+        hover: Option<StripHover>,
+    ) {
         let radius = TAB_RADIUS * layout.strip_h / TAB_STRIP_HEIGHT;
-        if let Some(tab) = layout.tabs.iter().find(|tab| tab.index == active) {
-            let radius = radius.min(tab.body.w / 2.0);
-            self.fill_round_top(tab.body, radius, self.theme.tab_active);
+        for tab in &layout.tabs {
+            let color = colors.get(tab.index).copied().flatten();
+            let fill = color.or_else(|| (tab.index == active).then_some(self.theme.tab_active));
+            if let Some(fill) = fill {
+                let radius = radius.min(tab.body.w / 2.0);
+                self.fill_round_top(tab.body, radius, fill);
+            }
         }
         self.draw_close_backdrop(layout, hover);
     }
@@ -579,6 +590,7 @@ impl Renderer {
         layout: &TabBarLayout,
         active: usize,
         icons: &[Option<TabIcon>],
+        colors: &[Option<Rgb>],
         hover: Option<StripHover>,
     ) {
         // One scale factor for the whole chrome budget, so the painter and
@@ -610,10 +622,11 @@ impl Renderer {
             // A tab is sized as its title plus `TITLE_SIZE`, so the title owns
             // exactly what the chrome budget leaves.
             let title_width = (tab.rect.w - TITLE_SIZE * k).max(0.0);
-            let color = if tab.index == active {
-                self.theme.tab_title
-            } else {
-                self.theme.tab_title_inactive
+            let color = colors.get(tab.index).copied().flatten();
+            let title_color = match color {
+                Some(color) => self.theme.ink_on(color),
+                None if tab.index == active => self.theme.tab_title,
+                None => self.theme.tab_title_inactive,
             };
             // The title is a size below the rest of the chrome: at `ui_px` its
             // ink is 12 px tall and the tab reads visibly larger than the
@@ -634,7 +647,7 @@ impl Renderer {
             let style = ui_text::TextStyle {
                 face: crate::fonts::SEMIBOLD_FONT_ID,
                 px: title_px,
-                color,
+                color: title_color,
             };
             for dx in [0.0, 0.5 * k] {
                 ui_text::draw_text_ellipsis_in(
@@ -656,7 +669,7 @@ impl Renderer {
                 let ink = if closes {
                     self.theme.tab_close_hover_ink
                 } else {
-                    self.theme.tab_close
+                    title_color
                 };
                 // The tab's own ✕ is the icon face's close, not a text glyph:
                 // the text `✕` at 10 px leaves a few strokes of ink and reads
@@ -1346,7 +1359,7 @@ mod tests {
         active: usize,
         hover: Option<StripHover>,
     ) {
-        renderer.draw_chrome(layout, ui_px, active, &[], hover);
+        renderer.draw_chrome(layout, ui_px, active, &[], &[], hover);
     }
 
     #[test]
@@ -1430,6 +1443,85 @@ mod tests {
         assert_eq!(active, renderer.theme.tab_active);
         assert_eq!(inactive, renderer.theme.tab_bar);
         assert_ne!(active, inactive);
+    }
+
+    #[test]
+    fn tab_color_fills_the_tab_body() {
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
+        let color = Rgb::new(120, 40, 200);
+        let colors = vec![Some(color), None];
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &[], &colors, None);
+        // Both probes sit below the rounded top corners.
+        let colored = pixel_at(&renderer, layout.tabs[0].body.x + 4.0, 16.0);
+        assert_eq!(
+            colored, color,
+            "a tab with a color must fill with that color, not the active tab's"
+        );
+        let uncolored = pixel_at(&renderer, layout.tabs[1].body.x + 4.0, 16.0);
+        assert_eq!(
+            uncolored, renderer.theme.tab_bar,
+            "a tab with no color keeps the band behind it"
+        );
+    }
+
+    #[test]
+    fn tab_color_switches_the_title_ink_for_contrast() {
+        // A dark tab reads the grid's light foreground, the same as an active
+        // tab's own title.
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            &[],
+            &[Some(Rgb::new(20, 20, 20))],
+            None,
+        );
+        let title_rect = {
+            let tab = &layout.tabs[0];
+            crate::ui::tab_bar::Rect {
+                x: tab.body.x + 34.0,
+                y: tab.body.y + 9.0,
+                w: (tab.body.w - 34.0 - 24.0).max(0.0),
+                h: 16.0,
+            }
+        };
+        let peak = brightest_red(&renderer, title_rect);
+        assert!(
+            peak >= renderer.theme.foreground.r - 2,
+            "a dark tab's title must be the bright foreground ink (peak red {peak})"
+        );
+
+        // A light tab flips to the grid's own dark background.
+        let mut renderer = default_renderer();
+        renderer.resize(400, 120);
+        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            &[],
+            &[Some(Rgb::new(240, 240, 240))],
+            None,
+        );
+        let title_rect = {
+            let tab = &layout.tabs[0];
+            crate::ui::tab_bar::Rect {
+                x: tab.body.x + 34.0,
+                y: tab.body.y + 9.0,
+                w: (tab.body.w - 34.0 - 24.0).max(0.0),
+                h: 16.0,
+            }
+        };
+        let trough = darkest_red(&renderer, title_rect);
+        assert!(
+            trough <= renderer.theme.background.r + 2,
+            "a light tab's title must be the dark background ink (trough red {trough})"
+        );
     }
 
     #[test]
@@ -1573,6 +1665,16 @@ mod tests {
             .flat_map(|y| (rect.x as u32..(rect.x + rect.w) as u32).map(move |x| (x, y)))
             .map(|(x, y)| pixel_at(renderer, x as f32, y as f32).r)
             .max()
+            .unwrap_or(0)
+    }
+
+    /// Darkest red channel inside `rect`: the inverse of [`brightest_red`], for
+    /// reading ink that must stay darker than a light fill.
+    fn darkest_red(renderer: &Renderer, rect: crate::ui::tab_bar::Rect) -> u8 {
+        (rect.y as u32..(rect.y + rect.h) as u32)
+            .flat_map(|y| (rect.x as u32..(rect.x + rect.w) as u32).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(renderer, x as f32, y as f32).r)
+            .min()
             .unwrap_or(0)
     }
 
@@ -2165,25 +2267,24 @@ mod tests {
     }
 
     #[test]
-    fn the_close_glyph_uses_the_tab_close_grey() {
+    fn the_close_glyph_shares_the_title_ink() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
         draw_chrome(&mut renderer, &layout, crate::fonts::UI_SIZE_PX, 0, None);
         let close = layout.tabs[0].close;
         let peak = brightest_red(&renderer, close);
-        // WT paints the `✕` grey, never white. The peak may fall a little short
-        // of the token if no pixel reaches full coverage, so allow a few units
-        // below it but never above.
+        // The resting ✕ shares the title's ink so it stays readable on a
+        // colored tab. On the uncolored active tab that ink is the title white,
+        // so the ✕ must be white, not the old grey.
         assert!(
-            peak <= renderer.theme.tab_close.r + 1,
-            "the ✕ must not be brighter than the tab-close grey, got {peak}"
+            peak >= renderer.theme.tab_title.r - 2,
+            "the ✕ must match the title ink, got {peak}"
         );
         assert!(
             peak > renderer.theme.tab_bar.r,
             "the ✕ must still stand out on the #0C0C0C tab, got {peak}"
         );
-        assert!(renderer.theme.tab_close.r < renderer.theme.tab_title.r);
     }
 
     #[test]
@@ -2338,7 +2439,14 @@ mod tests {
             rgba: [255, 0, 0, 255].repeat(16 * 16),
             size: 16,
         };
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &[Some(red)], None);
+        renderer.draw_chrome(
+            &layout,
+            crate::fonts::UI_SIZE_PX,
+            0,
+            &[Some(red)],
+            &[],
+            None,
+        );
         // The icon slot starts 10 px into the tab and is 16 px square.
         assert_eq!(
             pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 24.0),

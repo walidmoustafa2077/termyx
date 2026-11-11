@@ -356,10 +356,24 @@ impl App {
 
     /// Performs one of the tab context menu's commands on `target`.
     ///
-    /// A later task wires each arm; until then no command does anything, so
-    /// the caller keeps the window open.
-    fn run_tab_command(&mut self, _target: SessionId, _command: TabCommand) -> bool {
-        false
+    /// Only the color change is wired so far; a later task extends the match,
+    /// so every other command still does nothing and the caller keeps the
+    /// window open.
+    fn run_tab_command(&mut self, target: SessionId, command: TabCommand) -> bool {
+        match command {
+            TabCommand::ChangeColor(color) => {
+                if let Some(index) = self.tabs.position(target) {
+                    let id = self.tabs[index].id;
+                    if self.tabs.set_color(id, color) {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Begins editing the title of the tab `id` inline, seeding the editor with
@@ -1000,6 +1014,9 @@ impl App {
         let icons: Vec<Option<icon::TabIcon>> = (0..self.tabs.len())
             .map(|index| self.tabs[index].icon.clone())
             .collect();
+        let colors: Vec<Option<Rgb>> = (0..self.tabs.len())
+            .map(|index| self.tabs[index].color)
+            .collect();
         let (window_width, window_height) = self.window.as_ref().map_or((0.0, 0.0), |window| {
             let size = window.inner_size();
             (size.width as f32, size.height as f32)
@@ -1043,7 +1060,7 @@ impl App {
         renderer.set_maximized(maximized);
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         if let Some(layout) = self.layout.as_ref() {
-            renderer.draw_chrome(layout, ui_px, active, &icons, self.strip_hover);
+            renderer.draw_chrome(layout, ui_px, active, &icons, &colors, self.strip_hover);
         }
         if let Some((index, current)) = rename_overlay.as_ref() {
             if let (Some(rename), Some(layout)) = (self.rename.as_ref(), self.layout.as_ref()) {

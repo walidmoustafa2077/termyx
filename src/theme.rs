@@ -66,8 +66,11 @@ pub struct Theme {
     /// over the tab body: one step lighter than the tab it sits on, and still
     /// darker than the band.
     pub tab_close_hover: Rgb,
-    /// Ink of the tab's `✕`. WT draws it grey (`#989898` in the capture),
-    /// never white: closing a tab is secondary to the title.
+    /// Ink of the tab's `✕` when at rest. The close glyph now shares the
+    /// title's ink (see [`Theme::ink_on`]) so it stays readable on a colored
+    /// tab, so this grey is no longer painted; it is kept as the measured
+    /// reference value.
+    #[allow(dead_code)]
     pub tab_close: Rgb,
     /// The `✕` ink while the pill behind it is shown.
     pub tab_close_hover_ink: Rgb,
