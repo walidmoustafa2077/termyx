@@ -201,7 +201,10 @@ pub struct SpellcheckConfig {
     /// them off for the rest of the session without rewriting this setting.
     pub enabled: bool,
     /// Export `TERMYX_AUTOCORRECT=1` (or `0`) to every child shell. The
-    /// PowerShell module reads it to enable its autocorrect on the same line.
+    /// PowerShell module reads it to enable or disable its autocorrect on the
+    /// same line. The prompt marks are independent: even with `false`, the
+    /// module still wraps the prompt when `TERMYX=1`, so the underlines and the
+    /// right-click menu keep working while the shell does not autocorrect.
     pub autocorrect: bool,
     /// `#rrggbb` for the underline band. Invalid values fall back to
     /// `#d19a66`; the field is a string so the parser stays in [`crate::theme`].

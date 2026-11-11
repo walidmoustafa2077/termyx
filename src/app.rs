@@ -1229,8 +1229,9 @@ impl App {
             .iter()
             .map(|line| VisualMap::for_row(line, &self.config.bidi))
             .collect();
-        // The spans and the anchor are frame state: the draw below paints them
-        // and the right-click hit test reads the very same rectangles.
+        // The spans are frame state for the draw below. The right-click hit
+        // test does not read them: it recomputes from a fresh snapshot so a
+        // word painted after this frame is still clickable.
         self.spellcheck_spans = compute_spellcheck_spans(
             &snapshot,
             self.config.spellcheck.enabled,
@@ -1238,11 +1239,12 @@ impl App {
         );
         // The menu hangs from its token: the row, column and cell count were
         // recorded when it opened, so a later frame cannot slide it onto a
-        // different word.
+        // different word. The row's visual map keeps the anchor on the token
+        // when bidi reorders the line.
         self.spellcheck_anchor = self
             .spellcheck_menu
             .as_ref()
-            .map(|menu| menu_anchor(renderer, menu));
+            .map(|menu| menu_anchor(renderer, menu, maps.get(menu.row)));
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.set_maximized(maximized);
         renderer.draw_with_spellcheck(
@@ -1669,7 +1671,14 @@ impl App {
         let menu = self.spellcheck_menu.as_ref()?;
         let renderer = self.renderer.as_ref()?;
         let window = self.window.as_ref()?;
-        let anchor = menu_anchor(renderer, menu);
+        // The press path has no frame map yet, so build the same row map the
+        // render pass would: the anchor must agree with the painted underline.
+        let snapshot = self.tabs.active()?.terminal.snapshot();
+        let map = snapshot
+            .lines
+            .get(menu.row)
+            .map(|line| VisualMap::for_row(line, &self.config.bidi));
+        let anchor = menu_anchor(renderer, menu, map.as_ref());
         let viewport = grid_viewport(renderer, window.inner_size().width as f32, self.rows);
         Some(menu.layout(anchor, viewport, renderer.scale_factor()))
     }
@@ -1716,9 +1725,11 @@ impl App {
                 let cells = snapshot.row_cells(menu.row);
                 let Some(token) = revalidate_span(
                     &menu.token,
+                    menu.row,
                     menu.col,
                     menu.len,
                     &cells,
+                    snapshot.cursor.row,
                     snapshot.cursor.logical,
                 ) else {
                     return;
@@ -2279,10 +2290,6 @@ impl App {
             // keeps its old meaning.
             if button == MouseButton::Right {
                 if let Some(menu) = self.spellcheck_menu_at(self.cursor_pos) {
-                    self.spellcheck_anchor = self
-                        .renderer
-                        .as_ref()
-                        .map(|renderer| menu_anchor(renderer, &menu));
                     self.spellcheck_menu = Some(menu);
                     self.app_mouse_button = None;
                     if let Some(window) = &self.window {
@@ -3633,10 +3640,27 @@ fn compute_spellcheck_spans(
     spans
 }
 
+/// The visual column a token starts at on a row.
+///
+/// The underline paints through [`VisualMap::visual_of`], so the panel must map
+/// both ends of the span the same way and take the smaller column as the left
+/// edge; a logical column would detach the panel on a mixed-direction line.
+fn token_columns(col: usize, len: usize, map: Option<&VisualMap>) -> usize {
+    match map {
+        Some(map) => {
+            let first = map.visual_of(col);
+            let last = map.visual_of(col + len.saturating_sub(1));
+            first.min(last)
+        }
+        None => col,
+    }
+}
+
 /// The rectangle a token occupies on the grid, in physical pixels.
 ///
 /// The menu hangs from the token itself rather than the input line's left edge,
-/// so a long line does not push the panel away from the word it acts on.
+/// so a long line does not push the panel away from the word it acts on. `col`
+/// is the token's first visual column.
 fn token_anchor(
     padding: f32,
     grid_top: f32,
@@ -3655,7 +3679,7 @@ fn token_anchor(
 }
 
 /// The anchor for `menu`, derived from the token it was opened on.
-fn menu_anchor(renderer: &Renderer, menu: &SpellcheckMenu) -> Rect {
+fn menu_anchor(renderer: &Renderer, menu: &SpellcheckMenu, map: Option<&VisualMap>) -> Rect {
     let (padding, grid_top) = renderer.grid_origin();
     token_anchor(
         padding,
@@ -3663,7 +3687,7 @@ fn menu_anchor(renderer: &Renderer, menu: &SpellcheckMenu) -> Rect {
         renderer.fonts().cell_w as f32,
         renderer.fonts().cell_h as f32,
         menu.row,
-        menu.col,
+        token_columns(menu.col, menu.len, map),
         menu.len,
     )
 }
@@ -3741,17 +3765,20 @@ fn spellcheck_menu_for(
 /// Re-derives the token a menu was opened on from the live grid.
 ///
 /// Returns the current text only when the grid still satisfies every rule the
-/// menu relied on: the span still starts at `col`, still has `len` cells, still
-/// spells `token`, and still ends at the cursor. Any mismatch means a click
-/// would delete the wrong text, so the caller sends nothing.
+/// menu relied on: the input line is still at `row`, the span still starts at
+/// `col`, still has `len` cells, still spells `token`, and still ends at the
+/// cursor. Any mismatch means a click would delete the wrong text, so the
+/// caller sends nothing.
 fn revalidate_span(
     token: &str,
+    row: usize,
     col: usize,
     len: usize,
     cells: &[Cell],
+    cursor_row: usize,
     cursor_col: usize,
 ) -> Option<String> {
-    if col.checked_add(len)? != cursor_col {
+    if row != cursor_row || col.checked_add(len)? != cursor_col {
         return None;
     }
     let live: String = cells
@@ -3783,10 +3810,25 @@ fn replacement_bytes(token: &str, len: usize, replacement: &str) -> Vec<u8> {
 
 /// Appends one word as a line, creating the directory and the file.
 ///
+/// A word already present, compared case-insensitively, is not appended: the
+/// PowerShell module dedupes the same way and the overlay paints from one set.
+/// The append itself stays append-only, so a concurrent writer cannot lose a
+/// line to a read-modify-write.
+///
 /// Returns whether the word is now on disk. The caller must not mark a word
 /// known when this returns `false`: the next run would underline it again.
 fn append_user_word(path: &Path, word: &str) -> bool {
     use std::io::Write;
+
+    let word = word.trim();
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        if contents
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case(word))
+        {
+            return true;
+        }
+    }
 
     let write = || -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -5504,6 +5546,10 @@ mod tests {
 
         assert!(append_user_word(&path, "wrng"), "the directory is created");
         assert!(append_user_word(&path, "teh"), "the file is appended");
+        assert!(
+            append_user_word(&path, "TEH"),
+            "an existing word is already saved"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).expect("the file exists"),
             "wrng\nteh\n"
@@ -5543,6 +5589,31 @@ mod tests {
     }
 
     #[test]
+    fn anchor_maps_logical_columns_through_the_bidi_row() {
+        use crate::config::BaseDirection;
+
+        let row = RowSnapshot {
+            cells: ["a", "b", "c", " ", "\u{645}", "\u{631}", "\u{62d}"]
+                .iter()
+                .map(|text| Cell {
+                    text: text.to_string(),
+                    width: 1,
+                    style: Style::default(),
+                })
+                .collect(),
+            wrapped: false,
+        };
+        let map = VisualMap::from_bidi(&row, BaseDirection::Ltr);
+
+        // The RTL run reverses: logical 4 and 6 land on visual 6 and 4.
+        assert_eq!(map.visual_of(4), 6);
+        assert_eq!(map.visual_of(6), 4);
+        assert_eq!(token_columns(4, 3, Some(&map)), 4);
+        assert_eq!(token_columns(0, 3, Some(&map)), 0);
+        assert_eq!(token_columns(4, 3, None), 4);
+    }
+
+    #[test]
     fn viewport_excludes_the_scrollbar_gutter() {
         let rect = grid_viewport_rect(800.0, 10, 4.0, 10.0, 16.0, (4.0, 20.0));
         assert_eq!(
@@ -5563,7 +5634,7 @@ mod tests {
         let spans = compute_spellcheck_spans(&snapshot, true, false);
         let span = spans[0];
         assert_eq!(
-            revalidate_span("teh", span.col, span.len, &cells, span.col + span.len),
+            revalidate_span("teh", 0, span.col, span.len, &cells, 0, span.col + span.len),
             Some("teh".to_string())
         );
     }
@@ -5576,25 +5647,40 @@ mod tests {
         let span = spans[0];
 
         assert_eq!(
-            revalidate_span("teh", span.col, span.len, &cells, span.col + span.len + 1),
+            revalidate_span(
+                "teh",
+                0,
+                span.col,
+                span.len,
+                &cells,
+                0,
+                span.col + span.len + 1
+            ),
             None,
             "the cursor moved off the end of the token"
         );
         assert_eq!(
-            revalidate_span("tea", span.col, span.len, &cells, span.col + span.len),
+            revalidate_span("tea", 0, span.col, span.len, &cells, 0, span.col + span.len),
             None,
             "the grid no longer spells the token the menu recorded"
         );
         assert_eq!(
             revalidate_span(
                 "teh",
+                0,
                 span.col + 1,
                 span.len,
                 &cells,
+                0,
                 span.col + 1 + span.len
             ),
             None,
             "the span moved away from the column the menu recorded"
+        );
+        assert_eq!(
+            revalidate_span("teh", 0, span.col, span.len, &cells, 1, span.col + span.len),
+            None,
+            "the input line moved away from the row the menu recorded"
         );
     }
 }

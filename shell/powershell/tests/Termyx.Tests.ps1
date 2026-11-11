@@ -1402,6 +1402,74 @@ Describe 'Spellcheck integration' {
         }
     }
 
+    It 'installs the prompt marks when autocorrect is disabled' {
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $oldTermyx = $env:TERMYX
+        $oldAutocorrect = $env:TERMYX_AUTOCORRECT
+
+        try {
+            Set-Item -Path Function:\global:prompt -Value { 'disabled> ' }
+            $env:TERMYX = '1'
+            $env:TERMYX_AUTOCORRECT = '0'
+            Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+
+            $text = & $function:prompt
+            $esc = [char]27
+            $bel = [char]7
+            ($text.Contains($esc + ']133;A' + $bel + 'disabled> ' + $esc + ']133;B' + $bel)) | Should -BeTrue
+            (Get-TermyxStatus).Enabled | Should -BeFalse
+            (Get-TermyxStatus).InitError | Should -Be 'Disabled by TERMYX_AUTOCORRECT=0'
+        }
+        finally {
+            if ($null -eq $oldTermyx) { Remove-Item Env:TERMYX -ErrorAction SilentlyContinue }
+            else { $env:TERMYX = $oldTermyx }
+            if ($null -eq $oldAutocorrect) { Remove-Item Env:TERMYX_AUTOCORRECT -ErrorAction SilentlyContinue }
+            else { $env:TERMYX_AUTOCORRECT = $oldAutocorrect }
+            Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+        }
+    }
+
+    It 'leaves the prompt byte-identical when autocorrect is disabled outside Termyx' {
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $oldTermyx = $env:TERMYX
+        $oldAutocorrect = $env:TERMYX_AUTOCORRECT
+
+        try {
+            Set-Item -Path Function:\global:prompt -Value { 'plain> ' }
+            Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+            $env:TERMYX_AUTOCORRECT = '0'
+            $before = (& $function:prompt)
+
+            Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+
+            (& $function:prompt) | Should -BeExactly $before
+            (Get-TermyxStatus).Enabled | Should -BeFalse
+        }
+        finally {
+            if ($null -eq $oldTermyx) { Remove-Item Env:TERMYX -ErrorAction SilentlyContinue }
+            else { $env:TERMYX = $oldTermyx }
+            if ($null -eq $oldAutocorrect) { Remove-Item Env:TERMYX_AUTOCORRECT -ErrorAction SilentlyContinue }
+            else { $env:TERMYX_AUTOCORRECT = $oldAutocorrect }
+            Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+        }
+    }
+
     It 'skips the shared file when its timestamp has not changed' {
         $path = Join-Path $TestDrive 'stamp-words.txt'
         Set-Content -LiteralPath $path -Value 'zqxjs' -Encoding ASCII

@@ -271,6 +271,19 @@ Export-ModuleMember -Function @(
 if ($env:TERMYX_AUTOCORRECT -eq '0') {
     $script:TermyxEnabled = $false
     $script:TermyxInitError = 'Disabled by TERMYX_AUTOCORRECT=0'
+
+    # The prompt marks are independent of autocorrect: the wrapper only wraps
+    # the prompt and needs nothing from the engine. Inside Termyx the marks
+    # must still be installed so the underlines and menu keep working. A
+    # failure here must not change the disabled state.
+    if ($env:TERMYX -eq '1') {
+        try {
+            Enable-TermyxPrompt
+        }
+        catch {
+            Write-Warning ('Termyx could not install the prompt marks: ' + $_.Exception.Message)
+        }
+    }
 }
 else {
     try {

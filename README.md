@@ -104,9 +104,16 @@ the line the prompt wrapper marks with OSC 133 `B`.
   hide the underlines for the rest of the session. Underlines appear only on
   the live screen: once the viewport is scrolled back, nothing is checked or
   drawn. `false` turns the feature off entirely.
+- The overlay needs the Termyx PowerShell module imported in the tab and
+  `TERMYX=1` in the child environment (Termyx sets it automatically). Without
+  the OSC 133 marks the module emits in that mode, nothing is drawn: the
+  terminal cannot see where the input line begins. See
+  `shell/powershell/README.md` for importing the module.
 - `autocorrect` exports `TERMYX_AUTOCORRECT=1` to every child shell so the
-  PowerShell module autocorrects the same line; `false` exports `0`. Termyx also
-  exports `TERMYX=1` so the module can tell it is running inside this terminal.
+  PowerShell module autocorrects the same line; `false` exports `0`. The marks
+  are independent: `autocorrect = false` stops the shell from autocorrecting,
+  while the underlines and the menu keep working as long as the module is
+  imported and `TERMYX=1` is set.
 - `underline_color` is the color of the underline band; an invalid value falls
   back to `#d19a66`.
 
@@ -289,7 +296,8 @@ the same VT path but were not run on this machine.
 - Text uses grayscale antialiasing with a mild gamma lift, not ClearType
   subpixel rendering.
 - OSC 8 hyperlinks are ignored; links are not shown and cannot be opened.
-- OSC 133 shell integration is not parsed; prompts and command marks are not
-  exposed to the terminal.
+- OSC 133 `A` and `B` marks are parsed to find where the shell's input line
+  starts; they are used only by the spellcheck overlay. Command-end marks and
+  the rest of the shell-integration protocol are ignored.
 - IME preedit is not shown; only committed text reaches the shell.
 - Splits, search, images, and AI are later phases.

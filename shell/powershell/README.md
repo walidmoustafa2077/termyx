@@ -92,9 +92,9 @@ wrapper; `Disable-TermyxAutocorrect` restores it.
 
 `%LOCALAPPDATA%\Termyx\user-words.txt` is shared with Termyx: one word per
 line. The module reads it at import and re-reads it while running whenever its
-timestamp changes, and Termyx appends to it from its right-click menu. A word
-added on either side is therefore known to both without restarting the shell or
-the terminal.
+timestamp changes, so a word added through Termyx is known to the shell without
+a restart. Termyx reads the file once at startup, so a word added in the shell
+shows up in Termyx after the terminal is restarted.
 
 ## Recovery
 
