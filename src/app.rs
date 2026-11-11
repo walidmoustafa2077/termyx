@@ -758,6 +758,9 @@ impl App {
         self.release_forwarded_button();
         let _ = self.tabs.remove(index);
         self.selection = None;
+        // The tab being renamed may have been closed while its editor was open;
+        // dropping the state stops the dead editor from swallowing keys.
+        self.rename = None;
         // The drag that was extending a selection in this tab has nothing left
         // to extend.
         self.mouse_down = false;
