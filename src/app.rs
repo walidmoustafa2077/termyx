@@ -27,6 +27,7 @@ use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
+use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
@@ -72,6 +73,14 @@ struct TooltipHover {
     shown: bool,
 }
 
+/// The open tab context menu, if any: its panel chain plus the tab it acts
+/// on. While it is `Some` the menu owns the pointer, like [`App::menu`], and
+/// the two close each other so only one can be open.
+struct TabMenuState {
+    menu: ContextMenu,
+    target: SessionId,
+}
+
 pub struct App {
     config: Config,
     /// The file the Settings tab shows and polls, resolved once at startup so
@@ -92,6 +101,9 @@ pub struct App {
     /// The open `⌄` dropdown, if any. While it is `Some` the menu owns the
     /// pointer: presses, motion, the wheel, and Escape all route to it.
     menu: Option<MenuLayout>,
+    /// The open tab context menu, if any. Mutually exclusive with `menu`:
+    /// opening one closes the other.
+    tab_menu: Option<TabMenuState>,
     /// What the pointer is over in the strip, painted as hover. The `+` and `⌄`
     /// buttons highlight too; empty band paints nothing.
     strip_hover: Option<StripHover>,
@@ -147,6 +159,7 @@ impl App {
             tabs: TabSet::new(),
             layout: None,
             menu: None,
+            tab_menu: None,
             strip_hover: None,
             tooltip_hover: None,
             clipboard: None,
@@ -281,6 +294,68 @@ impl App {
                 window.request_redraw();
             }
         }
+    }
+
+    /// Opens the tab context menu for the tab at `index`, anchored to its
+    /// card and hovering the row under the pointer.
+    ///
+    /// The menu acts on the tab it opened from, so the tab is selected first:
+    /// rename and color feedback paint on the tab the menu targets, and the
+    /// strip matches the target.
+    fn open_tab_menu(&mut self, index: usize) {
+        self.close_menu();
+        self.clear_tooltip();
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.select(index);
+        self.selection = None;
+        self.rebuild_layout();
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(tab) = layout.tabs.get(index) else {
+            return;
+        };
+        let Some(session) = self.tabs.active() else {
+            return;
+        };
+        let target = session.id;
+        let total = self.tabs.len();
+        let can_duplicate = session.profile.is_some();
+        let colors = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.theme.normal)
+            .unwrap_or([crate::theme::Rgb::new(0, 0, 0); 8]);
+        let items = crate::ui::tab_menu::rows(index, total, can_duplicate, &colors);
+        let (width, height) = self.window.as_ref().map_or((0.0, 0.0), |window| {
+            let size = window.inner_size();
+            (size.width as f32, size.height as f32)
+        });
+        let scale = layout.strip_h / TAB_STRIP_HEIGHT;
+        let mut menu = ContextMenu::new(tab.body, items, width, height, scale);
+        menu.hover(self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+        self.tab_menu = Some(TabMenuState { menu, target });
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn close_tab_menu(&mut self) {
+        if self.tab_menu.take().is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Performs one of the tab context menu's commands on `target`.
+    ///
+    /// A later task wires each arm; until then no command does anything, so
+    /// the caller keeps the window open.
+    fn run_tab_command(&mut self, _target: SessionId, _command: TabCommand) -> bool {
+        false
     }
 
     /// Maximises a normal window and restores a maximised one.
@@ -729,7 +804,7 @@ impl App {
     /// carries nothing. While the menu is open it owns the pointer, so nothing
     /// beneath it shows a tooltip.
     fn tooltip_target(&self, x: f64, y: f64) -> Option<(String, Rect)> {
-        if self.menu.is_some() {
+        if self.menu.is_some() || self.tab_menu.is_some() {
             return None;
         }
         let layout = self.layout.as_ref()?;
@@ -877,6 +952,9 @@ impl App {
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &icons, self.strip_hover);
         }
+        if let Some(tab_menu) = self.tab_menu.as_ref() {
+            renderer.draw_context_menu(&tab_menu.menu);
+        }
         if let Some(menu) = self.menu.as_ref() {
             renderer.draw_menu(menu, &menu_icons);
         }
@@ -928,6 +1006,16 @@ impl App {
         // Typing always reveals the cursor, so a keystroke is never typed into
         // a cursor that happens to be in its hidden phase.
         self.blink.restart(Instant::now());
+        // The tab context menu is a layer over the grid: Escape dismisses it,
+        // and any other key dismisses the layer and falls through to the
+        // terminal or a shortcut.
+        if self.tab_menu.is_some() {
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                self.close_tab_menu();
+                return false;
+            }
+            self.close_tab_menu();
+        }
         // The dropdown is a layer over the grid: Escape dismisses it rather
         // than reaching the shell.
         if self.menu.is_some() && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
@@ -1206,6 +1294,15 @@ impl App {
 
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        if let Some(tab_menu) = self.tab_menu.as_mut() {
+            // The context menu owns the pointer while it is open: motion steps
+            // the row highlight and opens or closes submenus beneath it.
+            tab_menu.menu.hover(x as f32, y as f32);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             // The dropdown owns the pointer while it is open: motion picks the
             // row under it and nothing beneath the panel reacts.
@@ -1349,12 +1446,22 @@ impl App {
             let (chain, double) = next_strip_click(
                 self.last_strip_click,
                 press,
-                button == MouseButton::Left && in_strip && self.menu.is_none(),
+                button == MouseButton::Left
+                    && in_strip
+                    && self.menu.is_none()
+                    && self.tab_menu.is_none(),
                 Instant::now(),
                 self.cursor_pos,
             );
             self.last_strip_click = chain;
-            strip = strip_press(press, button, in_strip, self.menu.is_some(), double, action);
+            strip = strip_press(
+                press,
+                button,
+                in_strip,
+                self.menu.is_some() || self.tab_menu.is_some(),
+                double,
+                action,
+            );
         }
         let Some(input_button) = map_mouse_button(button) else {
             return false;
@@ -1362,6 +1469,44 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
+            // The tab context menu owns the pointer while it is open: a press
+            // on a row runs its command, a press outside dismisses, and a
+            // right press on a row keeps the menu open rather than running it.
+            if let Some(tab_menu) = self.tab_menu.as_ref() {
+                let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                let press = match button {
+                    MouseButton::Left => tab_menu.menu.press(x, y),
+                    _ if tab_menu.menu.hit(x, y) == ContextHit::Outside => ContextPress::Dismiss,
+                    _ => ContextPress::KeepOpen,
+                };
+                let target = tab_menu.target;
+                self.release_forwarded_button();
+                self.mouse_down = false;
+                self.click_count = 0;
+                self.last_click = None;
+                self.press_in_chrome = true;
+                match press {
+                    ContextPress::Dismiss => self.close_tab_menu(),
+                    ContextPress::OpenSubmenu(row) => {
+                        if let Some(tab_menu) = self.tab_menu.as_mut() {
+                            tab_menu.menu.open_submenu(0, row);
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    ContextPress::Run(command) => {
+                        self.close_tab_menu();
+                        let exit = self.run_tab_command(target, command);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return exit;
+                    }
+                    ContextPress::KeepOpen => {}
+                }
+                return false;
+            }
             // With the dropdown open it owns the pointer: a press on a row is
             // consumed (running its action is a later task), and a press
             // anywhere else dismisses the panel. Neither reaches the strip or
@@ -1420,6 +1565,10 @@ impl App {
                 StripPress::ToggleMaximize => {
                     self.toggle_maximized();
                     self.set_strip_hover(None);
+                    return false;
+                }
+                StripPress::OpenTabMenu(index) => {
+                    self.open_tab_menu(index);
                     return false;
                 }
                 StripPress::Act(action) => {
@@ -1993,6 +2142,8 @@ enum StripPress {
     Drag,
     /// A miss on empty band, second press: toggle maximise.
     ToggleMaximize,
+    /// A right press on a tab or its `✕`: open that tab's context menu.
+    OpenTabMenu(usize),
     /// A painted control: run its action. A non-left press in the band gets
     /// [`StripAction::Ignore`] (or a close for a middle press on a tab body),
     /// which consumes it without running a left-button action.
@@ -2019,12 +2170,21 @@ fn strip_press(
     if !in_strip || menu_open {
         return StripPress::Ignore;
     }
+    if button == MouseButton::Right {
+        // A right press on a tab or its `✕` opens that tab's context menu;
+        // anywhere else in the band it is swallowed without an action.
+        return match action {
+            Some(StripAction::Select(index)) | Some(StripAction::Close(index)) => {
+                StripPress::OpenTabMenu(index)
+            }
+            _ => StripPress::Act(StripAction::Ignore),
+        };
+    }
     if button != MouseButton::Left {
         // A middle press on a tab body closes that tab, the browser-style
         // gesture. A middle press on any other target - the close box, `+`,
         // `⌄`, a caption control, or the empty band - is still chrome's but
-        // has no action. So is every right press. None may drag the window or
-        // reach the grid.
+        // has no action. None may drag the window or reach the grid.
         return StripPress::Act(match (button, action) {
             (MouseButton::Middle, Some(StripAction::Select(index))) => StripAction::Close(index),
             _ => StripAction::Ignore,
@@ -2449,6 +2609,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
+                // The menu's anchor and window bounds both changed.
+                self.close_tab_menu();
                 self.resize_surface(size.width, size.height);
                 if self.resize_grid(size.width, size.height) {
                     // Reflow invalidates logical selection positions.
@@ -2475,6 +2637,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_strip_hover(None);
                 self.clear_tooltip();
                 self.set_scrollbar_hover(false);
+                if let Some(tab_menu) = self.tab_menu.as_mut() {
+                    let was_shown = tab_menu
+                        .menu
+                        .panels
+                        .iter()
+                        .any(|panel| panel.hovered.is_some());
+                    tab_menu.menu.clear_hover();
+                    if was_shown {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                }
                 if let Some(menu) = self.menu.as_mut() {
                     if menu.hovered.take().is_some() {
                         if let Some(window) = &self.window {
@@ -2509,6 +2684,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // not still suppress copy-on-select in the grid.
                     self.press_in_chrome = false;
                     self.scrollbar_drag = false;
+                    self.close_tab_menu();
                     let (x, y) = self.cursor_pos;
                     self.set_scrollbar_hover(self.scrollbar_hit(x, y).is_some());
                 }
@@ -3494,6 +3670,51 @@ mod tests {
                 "{press:?} with {action:?} must not run a left-button action"
             );
         }
+    }
+
+    #[test]
+    fn right_press_on_a_tab_opens_its_menu() {
+        assert_eq!(
+            strip_press(
+                ChromePress::Tab,
+                MouseButton::Right,
+                true,
+                false,
+                false,
+                Some(StripAction::Select(2)),
+            ),
+            StripPress::OpenTabMenu(2)
+        );
+    }
+
+    #[test]
+    fn right_press_on_a_close_button_opens_the_menu_for_that_tab() {
+        assert_eq!(
+            strip_press(
+                ChromePress::Tab,
+                MouseButton::Right,
+                true,
+                false,
+                false,
+                Some(StripAction::Close(3)),
+            ),
+            StripPress::OpenTabMenu(3)
+        );
+    }
+
+    #[test]
+    fn right_press_on_empty_strip_is_ignored() {
+        assert_eq!(
+            strip_press(
+                ChromePress::Drag,
+                MouseButton::Right,
+                true,
+                false,
+                false,
+                None
+            ),
+            StripPress::Act(StripAction::Ignore)
+        );
     }
 
     #[test]

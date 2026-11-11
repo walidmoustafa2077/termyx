@@ -19,9 +19,7 @@ use crate::ui::context_menu::{ContextItem, TabCommand};
 /// tabs lose the rows that could not move or close anything they have. A
 /// page tab sets `can_duplicate` to `false`, having no shell to spawn again.
 /// `colors` are the swatch choices, one row each under the Default swatch.
-// Wired to the right-click handler in a later task; the tests pin the rows
-// now.
-#[allow(dead_code)]
+// Built by the right-click handler; the tests pin the rows here.
 pub fn rows(index: usize, total: usize, can_duplicate: bool, colors: &[Rgb]) -> Vec<ContextItem> {
     let mut duplicate =
         ContextItem::action("Duplicate tab", GLYPH_DUPLICATE, TabCommand::Duplicate);

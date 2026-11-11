@@ -17,9 +17,6 @@ use crate::ui::tab_bar::Rect;
 pub const CONTEXT_MENU_WIDTH: f32 = 320.0;
 
 /// What performing one of the context menu's rows asks the app to do.
-// The right-click handler consumes this in a later task; the tests pin the
-// set now.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabCommand {
     /// Colors the tab; the inner `None` is the Default swatch.
@@ -240,9 +237,8 @@ fn carve(
     }
 }
 
-// The whole chain is wired to the right-click handler in a later task; the
-// tests pin the geometry now.
-#[allow(dead_code)]
+// The whole chain is wired to the right-click handler; the tests pin the
+// geometry here.
 impl ContextMenu {
     /// Opens the menu for the tab card `anchor`: the root panel hangs from
     /// its bottom edge by [`MENU_GAP`], clamped inside the window on both

@@ -10,9 +10,7 @@ use crate::ui::menu::{
 };
 use crate::ui::tab_bar::Rect;
 
-// The window's right-click handler calls this in a later task; the tests pin
-// the paint now.
-#[allow(dead_code)]
+// The window's right-click handler calls this; the tests pin the paint here.
 impl Renderer {
     /// Paints the chain of panels `menu` describes over whatever is already on
     /// the surface.
