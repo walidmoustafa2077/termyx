@@ -4099,10 +4099,13 @@ fn cell_at(x: f64, y: f64, grid: GridGeometry, cols: usize, rows: usize) -> (usi
 /// Misspelled spans on the shell's live input line, as grid rows.
 ///
 /// Nothing is reported unless the feature is on, the underlines have not been
-/// hidden for this session, the viewport is at the bottom, and the OSC 133 `B`
-/// mark sits on the cursor's row. `cursor.row` is a viewport row and only
-/// equals the mark's grid line because the `display_offset == 0` gate above
-/// rules out a scrolled-back viewport.
+/// hidden for this session, and the viewport is at the bottom. A shell that
+/// emits the OSC 133 `B` mark is checked from that mark, so the prompt and the
+/// command name stay clean; every other program is checked from the start of
+/// the cursor's row, because full-screen interfaces draw their own text and
+/// never send a mark. `cursor.row` is a viewport row and only equals the grid
+/// line because the `display_offset == 0` gate above rules out a scrolled-back
+/// viewport.
 fn compute_spellcheck_spans(
     snapshot: &GridSnapshot,
     enabled: bool,
@@ -4111,21 +4114,22 @@ fn compute_spellcheck_spans(
     if !enabled || hide_underlines || snapshot.display_offset != 0 {
         return Vec::new();
     }
-    let Some(start) = snapshot.input_start else {
-        return Vec::new();
-    };
-    if start.row < 0 || start.row as usize != snapshot.cursor.row {
-        return Vec::new();
-    }
 
     let cursor_col = snapshot.cursor.logical.min(snapshot.cols);
-    // The producer can report the mark at the row's last column, which is one
-    // past the last cell, so both ends are clamped before `scan` indexes.
-    let start_col = start.col.min(snapshot.cols);
     let cells = snapshot.row_cells(snapshot.cursor.row);
-    let mut spans = spellcheck::scan(&cells, start_col, cursor_col);
+    let mut spans = match snapshot.input_start {
+        Some(start) if start.row >= 0 && start.row as usize == snapshot.cursor.row => {
+            // The producer can report the mark at the row's last column, which
+            // is one past the last cell, so both ends are clamped before
+            // `scan` indexes.
+            let start_col = start.col.min(snapshot.cols);
+            spellcheck::scan(&cells, start_col, cursor_col)
+        }
+        Some(_) => return Vec::new(),
+        None => spellcheck::scan_anywhere(&cells, cursor_col),
+    };
     for span in &mut spans {
-        span.row = start.row as usize;
+        span.row = snapshot.cursor.row;
     }
     spans
 }
@@ -6015,12 +6019,10 @@ mod tests {
     }
 
     #[test]
-    fn no_spans_without_a_mark() {
-        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], None);
-        assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
-
+    fn a_mark_on_another_line_stops_the_fallback() {
         // A mark whose line has scrolled into history cannot be the cursor's
-        // row, so it is refused even at the bottom of the viewport.
+        // row, so it is refused even at the bottom of the viewport: the row is
+        // then output, and the mark proves a shell owns the screen.
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((-1, 4)));
         assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
     }
@@ -6037,6 +6039,35 @@ mod tests {
                 col: 18,
                 len: 4
             }]
+        );
+    }
+
+    #[test]
+    fn spans_follow_the_cursor_row_without_a_prompt_mark() {
+        // A full-screen program such as an editor never sends the marks, so
+        // the cursor row is checked whole - the first word included, because
+        // there is no command name to protect there.
+        let snapshot = spellcheck_snapshot(4, &["", "", "", "", "how wes tha ablilty"], None);
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        assert_eq!(
+            spans,
+            vec![
+                Misspelling {
+                    row: 4,
+                    col: 4,
+                    len: 3
+                },
+                Misspelling {
+                    row: 4,
+                    col: 8,
+                    len: 3
+                },
+                Misspelling {
+                    row: 4,
+                    col: 12,
+                    len: 7
+                },
+            ]
         );
     }
 

@@ -112,6 +112,26 @@ pub fn load_user_words(path: &Path) {
 }
 
 pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspelling> {
+    scan_from(row, start_col, cursor_col, true)
+}
+
+/// Checks every word on `row` up to the cursor, with no prompt mark to go by.
+///
+/// Full-screen programs draw their own interface and never emit the OSC 133
+/// marks, so a shell-only rule would leave every editor and TUI unchecked.
+/// The cursor row is the best guess available: it is where the text being
+/// typed appears. Nothing is skipped, because an input box has no command
+/// name - the first word is as likely to be mistyped as the last.
+pub fn scan_anywhere(row: &[Cell], cursor_col: usize) -> Vec<Misspelling> {
+    scan_from(row, 0, cursor_col, false)
+}
+
+fn scan_from(
+    row: &[Cell],
+    start_col: usize,
+    cursor_col: usize,
+    skip_first_token: bool,
+) -> Vec<Misspelling> {
     let end = cursor_col.min(row.len());
     if end <= start_col {
         return Vec::new();
@@ -166,7 +186,7 @@ pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspellin
             continue;
         }
 
-        if !first_token_seen {
+        if skip_first_token && !first_token_seen {
             first_token_seen = true;
             continue;
         }
@@ -359,6 +379,21 @@ mod tests {
     // Build cells the way the existing render tests do (see
     // `single_cell_snapshot` in `src/render/mod.rs:2552`). `Style` implements
     // `Default`, so the default style is what those tests use too.
+    #[test]
+    fn anywhere_flags_the_first_word_too() {
+        // No prompt mark means no command name to protect, so the first word
+        // on the row is checked like every other one.
+        let spans = scan_anywhere(&row("teh word"), 8);
+        assert_eq!(
+            spans,
+            vec![Misspelling {
+                row: 0,
+                col: 0,
+                len: 3
+            }]
+        );
+    }
+
     fn row(text: &str) -> Vec<crate::term::Cell> {
         text.chars()
             .map(|c| crate::term::Cell {
