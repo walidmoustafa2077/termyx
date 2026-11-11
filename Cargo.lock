@@ -1397,34 +1397,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termyx"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "alacritty_terminal",
- "anyhow",
- "arboard",
- "fontdb",
- "png 0.17.16",
- "portable-pty",
- "rfd",
- "rustybuzz",
- "serde",
- "softbuffer",
- "thiserror 2.0.21",
- "tiny-skia",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
- "ttf-parser",
- "unicode-bidi",
- "unicode-width",
- "vte",
- "winit",
- "winresource",
-]
-
-[[package]]
 name = "nix"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2576,6 +2548,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5d9cf598a6d7ce700a4e6a9199da127e6819a61e64b68609683cc9a01b5683a"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "termyx"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "alacritty_terminal",
+ "anyhow",
+ "arboard",
+ "fontdb",
+ "png 0.17.16",
+ "portable-pty",
+ "rfd",
+ "rustybuzz",
+ "serde",
+ "softbuffer",
+ "thiserror 2.0.21",
+ "tiny-skia",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "ttf-parser",
+ "unicode-bidi",
+ "unicode-width",
+ "vte",
+ "winit",
+ "winresource",
 ]
 
 [[package]]

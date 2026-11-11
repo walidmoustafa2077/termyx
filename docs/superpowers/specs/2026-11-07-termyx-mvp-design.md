@@ -367,7 +367,9 @@ Frame composition, per row:
 ### 8.4 Geometry
 
 - Cell size is derived from the primary font's advance and line height, rounded to whole pixels.
-- DPI changes trigger font reload, atlas clear, and a full redraw.
+- DPI changes re-derive the font set, the tab strip height, the window padding
+  and the scrollbar's widths from the configured logical values, clear the
+  atlas, and force a full redraw.
 - Grid size = `floor((width - padding) / cell_w)`, `floor((height - padding) / cell_h)`.
 - Minimum window size: 20×5 cells.
 
@@ -399,7 +401,7 @@ base_direction = "ltr"   # ltr | rtl | auto
 [window]
 width = 1200
 height = 800
-padding = 4
+padding = 4              # logical px, scaled by the display
 
 [scrollback]
 lines = 10000
@@ -525,7 +527,7 @@ Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "
 
 ## 14. Future phases (not in MVP)
 
-- **Phase 4 — Terminal UI:** tabs, splits, profiles, command palette, in-terminal search, theme hot reload, mouse reporting to applications, block selection, scrollbar.
+- **Phase 4 — Terminal UI:** tabs, splits, profiles, command palette, in-terminal search, theme hot reload, mouse reporting to applications, block selection, scrollbar. Tabs and the profile menu (the tab strip, `+`/`⌄`, `Ctrl+Tab`, `Ctrl+Shift+T`/`W`, `Ctrl+Shift+1..5`, `[[profiles]]`, and the menu's settings/about rows) are delivered. The custom window chrome (the strip as the title bar, painted minimise/maximise/close, and drag from the empty strip) is implemented on Windows; other platforms keep native decorations. The DPI rebuild is implemented; the real 150 % check is outstanding.
 - **Phase 5 — AI layer:** consume `SessionEvent` output, add OSC 133 shell integration for command boundaries, and surface an AI assistant or AI shell. The exact product shape is an open question (§15) and does not affect the MVP.
 
 ---

@@ -87,6 +87,81 @@ then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`
 with contextual forms, either as a single lam-alef ligature or as connected
 two-glyph forms. See `assets/fonts/README.md`.
 
+## Mouse
+
+- Drag to select text; double-click selects a word and triple-click selects the
+  line.
+- Right-click or middle-click the grid pastes the clipboard.
+- While an application reports the mouse, hold **Shift** to select locally.
+- Middle-click a tab, active or not, closes it; the tab's `✕` does the same on
+  a left click.
+
+## Tabs
+
+Each tab runs its own shell; the strip above the grid shows one tab per
+session.
+
+- `+` opens a tab with the `default_profile` shell, and `⌄` opens the menu.
+- `Ctrl+Shift+T` opens a tab and `Ctrl+Shift+W` closes the active one.
+- `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle forward and back.
+- `Ctrl+Shift+1` … `Ctrl+Shift+5` open the first five profiles directly.
+- The `⌄` menu lists every profile, then `Settings` (opens the config file, or
+  its folder on a first run), `Command palette` (not available yet; the row
+  only logs), and `About`. No key opens `Settings` or the palette.
+
+`Ctrl+Shift+W` closes the shell in the active tab immediately; there is no
+confirmation and no undo.
+
+Profiles come from `[[profiles]]` tables, and `default_profile` picks the one a
+bare launch, `Ctrl+Shift+T`, and `+` open:
+
+```toml
+default_profile = 0
+
+[[profiles]]
+name = "PowerShell"
+program = "powershell.exe"
+
+[[profiles]]
+name = "Command Prompt"
+program = "cmd.exe"
+args = ["/k"]
+```
+
+## Window chrome
+
+The tab strip is the window's title bar on Windows. There the client area starts
+at the window's top edge: there is no caption row, no app icon, and no window
+title text in the chrome. The restored Windows frame provides the resize border
+and edge/corner resizing; Aero Snap and the drop shadow were not verified in
+this environment, so they are not claimed. Other platforms keep their native
+window decorations, including the native title bar, and the strip is painted
+inside the client area below it.
+
+- The three window controls are painted into the right end of the strip: `—`
+  minimises, `□` maximises and `❐` restores, and `✕` closes. Each is 46 logical
+  px wide and the full strip height.
+- Drag the empty part of the strip — after the last tab and its `+`/`⌄` buttons,
+  before the controls — to move the window, as a caption would. A 24 logical px
+  gutter is reserved there even when the tabs are crowded, so the gesture is
+  always reachable.
+- Double-click that same empty space to maximise, and again to restore.
+- On Windows, the top 6 physical px of the strip is the window's resize border,
+  exactly as on a native framed window: a press there starts a resize, not a
+  click.
+- The window cannot be made smaller than 320 × 200 logical px, the floor at
+  which the three controls and the `+`/`⌄` pair still fit without overlapping.
+
+Out of scope for now:
+
+- The Snap Layouts flyout that Windows shows when hovering a native maximise
+  button. Painted buttons cannot summon it. Dragging the window to a screen edge
+  is expected to snap through the restored Windows frame, but that behaviour was
+  not verified here and is not claimed.
+- Mirroring the three controls to the left edge under a right-to-left system
+  locale.
+- Taskbar jump lists, thumbnail toolbars, and DWM Mica/Acrylic backdrops.
+
 ## Terminal protocol support
 
 The VT parser and grid come from `alacritty_terminal`, so standard terminal
@@ -159,6 +234,27 @@ lam-alef aligned), pure Arabic, right-to-left drag selection with
 without a panic. The Persian/Urdu and harakat examples above were not
 separately re-run in this check.
 
+## MVP acceptance (M5)
+
+Measured on Windows 11 x64, AMD Ryzen 5 2600 (6 cores / 12 threads,
+3.4 GHz), release build, 2026-11-10:
+
+| Check | Target | Measured |
+| --- | --- | --- |
+| Full-frame redraw at 200x50 | < 8 ms | 7.08 ms fastest, 7.57 ms median over 40 frames |
+| Input-to-paint | < 16 ms | 9.6 ms median, 5.9 ms fastest over 24 keystrokes |
+| Cold start | < 300 ms | 47 ms warm, 510 ms on the first launch after a build |
+| Resident memory, idle | < 80 MB | 41.1 MB working set / 32.2 MB private |
+| Resident memory, 10,000 scrollback lines | < 80 MB | 71.7 MB working set / 65.3 MB private |
+| Release binary | < 15 MB | 4.05 MB |
+| Code page | 65001 | `chcp` reports 65001 and UTF-8 survives the PTY round trip |
+
+The renderer budget is checked by an ignored test; run
+`cargo test --release full_frame_redraw -- --ignored --nocapture`. Arabic,
+lam-alef, selection, and resize behavior is covered by the test suite and the
+Phase 2 acceptance run above. PowerShell was exercised here; bash and zsh use
+the same VT path but were not run on this machine.
+
 ## Known limitations
 
 - Bidi is per row. A soft-wrapped RTL paragraph is ordered row by row.
@@ -168,8 +264,8 @@ separately re-run in this check.
   boundary; the ligature is still drawn once.
 - Text uses grayscale antialiasing with a mild gamma lift, not ClearType
   subpixel rendering.
-- OSC 8 hyperlinks are parsed and stored per cell but are not clickable yet.
+- OSC 8 hyperlinks are ignored; links are not shown and cannot be opened.
 - OSC 133 shell integration is not parsed; prompts and command marks are not
   exposed to the terminal.
 - IME preedit is not shown; only committed text reaches the shell.
-- Tabs, splits, profiles, search, images, and AI are later phases.
+- Splits, search, images, and AI are later phases.

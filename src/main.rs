@@ -4,17 +4,23 @@ mod app;
 mod bidi;
 mod config;
 mod event;
+mod find;
 mod fonts;
 mod icon;
 mod input;
+mod page;
 mod platform;
+mod profiles;
 mod pty;
 mod render;
 mod scrollbar;
 mod selection;
+mod session;
+mod settings;
 mod shape;
 mod term;
 mod theme;
+mod ui;
 mod visual;
 
 use std::path::PathBuf;
@@ -45,7 +51,8 @@ fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let config = match config::Config::load(config_path_from_args()?.as_deref()) {
+    let requested_path = config_path_from_args()?;
+    let config = match config::Config::load(requested_path.as_deref()) {
         Ok(config) => config,
         Err(err) => {
             tracing::error!("{err:#}");
@@ -62,7 +69,10 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<event::UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut app = app::App::new(config, proxy);
+    // The Settings page and its live poll need the same path that was loaded,
+    // including an explicit `--config` override.
+    let config_path = requested_path.unwrap_or_else(config::default_config_path);
+    let mut app = app::App::new(config, config_path, proxy);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

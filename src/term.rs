@@ -79,6 +79,19 @@ pub struct LogicalPos {
     pub col: usize,
 }
 
+/// One occurrence of a search needle in the grid.
+///
+/// `line` is a grid line index: `0` is the viewport's top row, negative values
+/// reach back into scrollback, and `start`/`end` are logical column indices
+/// (half-open) within that line. A match is always row-local: text split across
+/// a wrapped line is not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Match {
+    pub line: i32,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridSnapshot {
     pub cols: usize,
@@ -114,14 +127,17 @@ impl Dimensions for TermSize {
 
 #[derive(Clone)]
 struct EventProxy {
-    proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+    /// The UI event loop and the session this parser belongs to. `None` in
+    /// tests, which have no event loop to notify.
+    events: Option<(EventLoopProxy<crate::event::UserEvent>, u64)>,
 }
 
-/// Map the terminal events Termyx observes onto UI-thread events.
-fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
+/// Map the terminal events Termyx observes onto UI-thread events, tagged with the
+/// session whose parser raised them.
+fn user_event_for(session: u64, event: Event) -> Option<crate::event::UserEvent> {
     match event {
-        Event::Title(title) => Some(crate::event::UserEvent::Title(title)),
-        Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle),
+        Event::Title(title) => Some(crate::event::UserEvent::Title { session, title }),
+        Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle { session }),
         Event::ClipboardStore(_, text) => Some(crate::event::UserEvent::ClipboardStore(text)),
         _ => None,
     }
@@ -129,7 +145,10 @@ fn user_event_for(event: Event) -> Option<crate::event::UserEvent> {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let (Some(proxy), Some(event)) = (&self.proxy, user_event_for(event)) {
+        let Some((proxy, session)) = &self.events else {
+            return;
+        };
+        if let Some(event) = user_event_for(*session, event) {
             let _ = proxy.send_event(event);
         }
     }
@@ -153,7 +172,7 @@ impl Terminal {
         cols: usize,
         rows: usize,
         scrollback: usize,
-        proxy: Option<EventLoopProxy<crate::event::UserEvent>>,
+        events: Option<(EventLoopProxy<crate::event::UserEvent>, u64)>,
     ) -> Self {
         let size = TermSize {
             cols,
@@ -171,7 +190,7 @@ impl Terminal {
             },
             ..TermConfig::default()
         };
-        let term = Term::new(config, &size, EventProxy { proxy });
+        let term = Term::new(config, &size, EventProxy { events });
         Self {
             term,
             processor: Processor::new(),
@@ -363,6 +382,88 @@ impl Terminal {
         }
     }
 
+    /// Collects the scrollback and the viewport as plain text, one row per
+    /// line. Trailing blanks inside a row and the unused rows below the cursor
+    /// are trimmed, and the result keeps a single final newline.
+    pub fn all_text(&self) -> String {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let rows = self.size.rows as i32;
+        let mut out = String::new();
+        for line in -history..rows {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for cell in row[..].iter() {
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(extra) = cell.zerowidth() {
+                    for ch in extra {
+                        text.push(*ch);
+                    }
+                }
+            }
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out
+    }
+
+    /// Finds every occurrence of `needle` in the full grid, including scrollback.
+    ///
+    /// The match is ASCII case-insensitive and row-local: a needle split across
+    /// a wrapped line is not reported. Returns one [`Match`] per occurrence in
+    /// grid order (history first, then the viewport).
+    pub fn find(&self, needle: &str) -> Vec<Match> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let needle: Vec<char> = needle.chars().collect();
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let rows = self.size.rows as i32;
+        let mut hits = Vec::new();
+        for line in -history..rows {
+            let row = &grid[Line(line)];
+            let cells: Vec<char> = row[..].iter().map(|cell| cell.c).collect();
+            if cells.len() < needle.len() {
+                continue;
+            }
+            for start in 0..=cells.len() - needle.len() {
+                let matched = cells[start..start + needle.len()]
+                    .iter()
+                    .zip(&needle)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b));
+                if matched {
+                    hits.push(Match {
+                        line,
+                        start,
+                        end: start + needle.len(),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// Scrolls the viewport so the grid line `line` is visible.
+    ///
+    /// Negative `line` values name history rows; a non-negative line is already
+    /// in the viewport, so the display snaps back to the bottom.
+    pub fn reveal_line(&mut self, line: i32) {
+        let history = self.history_size() as i32;
+        let current_top = -(self.display_offset() as i32);
+        let desired_top = if line < 0 { line.clamp(-history, 0) } else { 0 };
+        let delta = current_top - desired_top;
+        if delta != 0 {
+            self.scroll_display(delta);
+        }
+    }
+
     /// Number of screen rows up to and including the last row with written content,
     /// and the cursor's screen row.
     fn content_extent(&self) -> (usize, usize) {
@@ -477,6 +578,10 @@ fn named_index(named: NamedColor) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal(cols: usize, rows: usize, scrollback: usize) -> Terminal {
+        Terminal::new(cols, rows, scrollback)
+    }
 
     #[test]
     fn feed_plain_text_and_track_cursor() {
@@ -733,24 +838,90 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_are_bridged_to_user_events() {
-        match user_event_for(alacritty_terminal::event::Event::Title("build".into())) {
-            Some(crate::event::UserEvent::Title(title)) => assert_eq!(title, "build"),
-            other => panic!("expected title event, got {other:?}"),
+    fn title_events_carry_the_session_id() {
+        match user_event_for(7, alacritty_terminal::event::Event::Title("build".into())) {
+            Some(crate::event::UserEvent::Title { session, title }) => {
+                assert_eq!(session, 7);
+                assert_eq!(title, "build");
+            }
+            _ => panic!("expected a Title event"),
         }
+    }
 
-        assert!(matches!(
-            user_event_for(alacritty_terminal::event::Event::ResetTitle),
-            Some(crate::event::UserEvent::ResetTitle)
-        ));
-        match user_event_for(alacritty_terminal::event::Event::ClipboardStore(
-            alacritty_terminal::term::ClipboardType::Clipboard,
-            "copied".into(),
-        )) {
-            Some(crate::event::UserEvent::ClipboardStore(text)) => assert_eq!(text, "copied"),
-            other => panic!("expected clipboard event, got {other:?}"),
+    #[test]
+    fn reset_title_and_clipboard_events_carry_the_session_id() {
+        match user_event_for(3, alacritty_terminal::event::Event::ResetTitle) {
+            Some(crate::event::UserEvent::ResetTitle { session }) => assert_eq!(session, 3),
+            _ => panic!("expected a ResetTitle event"),
         }
-        assert!(user_event_for(alacritty_terminal::event::Event::Bell).is_none());
+        match user_event_for(
+            4,
+            alacritty_terminal::event::Event::ClipboardStore(
+                alacritty_terminal::term::ClipboardType::Clipboard,
+                "copied".into(),
+            ),
+        ) {
+            Some(crate::event::UserEvent::ClipboardStore(text)) => assert_eq!(text, "copied"),
+            _ => panic!("expected a ClipboardStore event"),
+        }
+    }
+
+    #[test]
+    fn unrelated_terminal_events_are_not_bridged() {
+        assert!(user_event_for(1, alacritty_terminal::event::Event::Bell).is_none());
+    }
+
+    #[test]
+    fn all_text_includes_scrollback_and_trimmed_rows() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        terminal.feed(b"first\r\nsecond   \r\n");
+        let text = terminal.all_text();
+        assert!(text.contains("first\nsecond"));
+        // An ordinary buffer keeps one final newline while the unused
+        // viewport rows collapse.
+        assert_eq!(text, "first\nsecond\n");
+    }
+
+    #[test]
+    fn all_text_keeps_rows_above_the_viewport() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        for index in 0..6 {
+            terminal.feed(format!("line{index}\r\n").as_bytes());
+        }
+        assert!(terminal.history_size() > 0);
+        let text = terminal.all_text();
+        assert!(text.starts_with("line0\nline1\n"), "got {text:?}");
+        assert!(text.ends_with("line5\n"), "got {text:?}");
+    }
+
+    #[test]
+    fn all_text_keeps_combining_marks() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        terminal.feed("بَ\r\n".as_bytes());
+        let text = terminal.all_text();
+        assert!(text.contains("بَ"), "got {text:?}");
+    }
+
+    #[test]
+    fn find_is_ascii_case_insensitive_and_reports_columns() {
+        let mut terminal = terminal(20, 3, 100);
+        terminal.feed(b"alpha BETA\r\nbeta\r\n");
+        let hits = terminal.find("beta");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0],
+            crate::term::Match {
+                line: 0,
+                start: 6,
+                end: 10
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_query_has_no_matches() {
+        let terminal = terminal(20, 3, 100);
+        assert!(terminal.find("").is_empty());
     }
 
     #[test]

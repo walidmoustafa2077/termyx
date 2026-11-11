@@ -50,12 +50,12 @@ impl<'a> Faces<'a> {
     ///
     /// [`FontSet`]: crate::fonts::FontSet
     pub fn from_fonts(fonts: &'a crate::fonts::FontSet) -> Option<Self> {
-        let primary = Face::from_slice(&fonts.data, fonts.index)?;
+        let primary = Face::from_slice(fonts.font.as_slice(), fonts.index)?;
         let arabic = if fonts.has_arabic() {
             fonts
                 .arabic
                 .as_ref()
-                .and_then(|face| Face::from_slice(&face.data, face.index))
+                .and_then(|face| Face::from_slice(face.font.as_slice(), face.index))
         } else {
             None
         };
@@ -282,10 +282,11 @@ pub fn shape_row(
 
             let mut clusters = Vec::with_capacity(groups.len());
             for (cluster, glyphs) in groups {
+                // The successor in the sorted cluster starts, found without a
+                // linear scan: long rows make the naive search quadratic.
                 let next = starts
-                    .iter()
+                    .get(starts.partition_point(|candidate| *candidate <= cluster))
                     .copied()
-                    .find(|candidate| *candidate > cluster)
                     .unwrap_or(end);
                 let first = row.cell_of_byte(cluster);
                 let mut last = row.cell_of_byte(next.saturating_sub(1).max(cluster));
