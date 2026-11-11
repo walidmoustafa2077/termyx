@@ -2012,6 +2012,10 @@ impl App {
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
+        // Typing, pasting, or walking the caret abandons a highlight. A line
+        // selection left behind would paint over the text being edited and
+        // would survive every keystroke until the user clicked or scrolled.
+        self.selection = None;
         let Some(session) = self.tabs.active_mut() else {
             return;
         };
