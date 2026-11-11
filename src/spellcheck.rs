@@ -1,6 +1,7 @@
 //! Offline spellcheck for the shell input line.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::term::Cell;
@@ -79,6 +80,35 @@ pub fn add_word(token: &str) {
     }
     let mut guard = data().write().expect("spellcheck lock");
     guard.added.insert(lower);
+}
+
+/// The user-word file the PowerShell module also reads.
+///
+/// `None` when the platform has no `LOCALAPPDATA`; the caller then still adds
+/// the word to this session's in-memory set.
+pub fn user_words_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(base)
+            .join("Termyx")
+            .join("user-words.txt"),
+    )
+}
+
+/// Loads every saved user word into the in-memory set.
+///
+/// One word per line, trimmed, with blank lines skipped. A missing file and an
+/// IO error are silent: the word list is a convenience, not a prerequisite.
+pub fn load_user_words(path: &Path) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in contents.lines() {
+        let word = line.trim();
+        if !word.is_empty() {
+            add_word(word);
+        }
+    }
 }
 
 pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspelling> {
@@ -491,5 +521,57 @@ mod tests {
     fn added_word_stops_being_unknown() {
         add_word("zqxjv");
         assert!(is_known("zqxjv"));
+    }
+
+    fn temp_words(tag: &str) -> (PathBuf, PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("termyx-load-{tag}-{}-{stamp}", std::process::id()));
+        let path = dir.join("user-words.txt");
+        (dir, path)
+    }
+
+    #[test]
+    fn loads_every_saved_user_word() {
+        let (dir, path) = temp_words("words");
+        std::fs::create_dir_all(&dir).expect("the directory is created");
+        std::fs::write(&path, "zqloadone\nzqloadtwo\n").expect("the file is written");
+
+        load_user_words(&path);
+
+        assert!(is_known("zqloadone"));
+        assert!(is_known("zqloadtwo"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_a_missing_file_is_a_no_op() {
+        let (dir, path) = temp_words("missing");
+        load_user_words(&path);
+        assert!(!is_known("zqmissingword"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_skips_blank_lines() {
+        let (dir, path) = temp_words("blank");
+        std::fs::create_dir_all(&dir).expect("the directory is created");
+        std::fs::write(&path, "  \n zqblankword \n\n").expect("the file is written");
+
+        load_user_words(&path);
+
+        assert!(is_known("zqblankword"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_words_path_names_the_shared_file() {
+        let Some(path) = user_words_path() else {
+            return;
+        };
+        assert!(path.ends_with("Termyx/user-words.txt"));
     }
 }

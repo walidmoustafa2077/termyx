@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn spawn_session_has_the_signature_the_app_calls() {
-        // Pins the public signature until the app has a call site to break.
+        // Pins the public signature the app's call site relies on.
         let _ = spawn_session
             as fn(
                 SessionId,

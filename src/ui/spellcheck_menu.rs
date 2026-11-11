@@ -70,6 +70,11 @@ pub struct SpellcheckMenu {
     pub row: usize,
     /// Grid column of the misspelled token's first cell.
     pub col: usize,
+    /// The token's cell count: how many DELs a replacement sends.
+    ///
+    /// This is not `token.len()`: [`crate::term::Cell::text`] may carry
+    /// combining marks while the scanner reports one cell per grapheme.
+    pub len: usize,
     /// The token itself, the text a suggestion would replace.
     pub token: String,
     /// Suggestions first, then the two actions; never empty.
@@ -77,7 +82,10 @@ pub struct SpellcheckMenu {
     /// Whether replacement is possible. Gates [`MenuItem::Suggest`] only: the
     /// two actions stay live even when the cursor has moved off the token.
     pub enabled: bool,
-    /// Why replacement is unavailable, kept for the window to show or log.
+    /// Why replacement is unavailable.
+    ///
+    /// Informational only: the painter does not display it, and the window
+    /// re-checks the grid before sending any replacement bytes.
     pub disabled_reason: Option<&'static str>,
     /// Row under the pointer, filled by the window and read by the painter.
     pub hovered: Option<usize>,
@@ -85,13 +93,14 @@ pub struct SpellcheckMenu {
 
 impl SpellcheckMenu {
     /// Builds the menu for `token`, whose suggestions are given in the order
-    /// the speller ranked them.
+    /// the speller ranked them. `len` is the token's cell count.
     ///
     /// The actions are appended unconditionally, so a token with no
     /// suggestions still opens a menu with two usable rows.
     pub fn new(
         row: usize,
         col: usize,
+        len: usize,
         token: String,
         suggestions: Vec<String>,
         can_replace: bool,
@@ -110,6 +119,7 @@ impl SpellcheckMenu {
         Self {
             row,
             col,
+            len,
             token,
             items,
             enabled: can_replace,
@@ -233,6 +243,7 @@ mod tests {
         SpellcheckMenu::new(
             3,
             4,
+            3,
             "teh".to_string(),
             vec!["the".to_string(), "tea".to_string()],
             true,
@@ -242,14 +253,22 @@ mod tests {
 
     #[test]
     fn lists_suggestions_then_actions() {
-        let menu =
-            SpellcheckMenu::new(3, 4, "teh".to_string(), vec!["the".to_string()], true, None);
+        let menu = SpellcheckMenu::new(
+            3,
+            4,
+            3,
+            "teh".to_string(),
+            vec!["the".to_string()],
+            true,
+            None,
+        );
         assert_eq!(menu.items.len(), 3);
         assert!(matches!(menu.items[0], MenuItem::Suggest(ref s) if s == "the"));
         assert_eq!(menu.items[1], MenuItem::AddToDictionary);
         assert_eq!(menu.items[2], MenuItem::HideUnderlines);
         assert!(menu.enabled, "replacement is possible at the last token");
         assert_eq!(menu.token, "teh");
+        assert_eq!(menu.len, 3);
         assert_eq!((menu.row, menu.col), (3, 4));
     }
 
@@ -265,6 +284,7 @@ mod tests {
         let menu = SpellcheckMenu::new(
             0,
             0,
+            3,
             "teh".to_string(),
             vec!["the".to_string()],
             false,
@@ -279,13 +299,13 @@ mod tests {
 
     #[test]
     fn a_missing_reason_falls_back_to_the_cursor_hint() {
-        let menu = SpellcheckMenu::new(0, 0, "teh".to_string(), vec![], false, None);
+        let menu = SpellcheckMenu::new(0, 0, 3, "teh".to_string(), vec![], false, None);
         assert_eq!(menu.disabled_reason, Some(SPELLCHECK_NOT_LAST_WORD));
     }
 
     #[test]
     fn keeps_actions_when_there_are_no_suggestions() {
-        let menu = SpellcheckMenu::new(0, 0, "teh".to_string(), vec![], true, None);
+        let menu = SpellcheckMenu::new(0, 0, 3, "teh".to_string(), vec![], true, None);
         assert_eq!(menu.items.len(), 2);
         assert_eq!(menu.items[0], MenuItem::AddToDictionary);
         assert_eq!(menu.items[1], MenuItem::HideUnderlines);
@@ -364,8 +384,15 @@ mod tests {
             w: 800.0,
             h: 50.0,
         };
-        let menu =
-            SpellcheckMenu::new(0, 0, "teh".to_string(), vec!["the".to_string()], true, None);
+        let menu = SpellcheckMenu::new(
+            0,
+            0,
+            3,
+            "teh".to_string(),
+            vec!["the".to_string()],
+            true,
+            None,
+        );
         let layout = menu.layout(anchor(10.0, 40.0), viewport, 1.0);
         assert_eq!(
             layout.panel.y, viewport.y,

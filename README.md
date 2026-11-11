@@ -114,7 +114,8 @@ the line the prompt wrapper marks with OSC 133 `B`.
 
 - Drag to select text; double-click selects a word and triple-click selects the
   line.
-- Right-click or middle-click the grid pastes the clipboard.
+- Right-click or middle-click the grid pastes the clipboard, except over an
+  underlined word: right-click there opens the spelling menu instead.
 - While an application reports the mouse, hold **Shift** to select locally.
 - Middle-click a tab, active or not, closes it; the tab's `✕` does the same on
   a left click.

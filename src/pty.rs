@@ -57,6 +57,9 @@ impl PtySession {
     /// Spawns the configured shell and forwards output chunks to `on_output`,
     /// then calls `on_exit` once the reader loop ends.
     ///
+    /// `autocorrect` enables the PowerShell module's on-enter correction pass
+    /// for the child it starts.
+    ///
     /// The reader thread owns both callbacks and exits when the PTY closes.
     pub fn spawn_with<F, G>(
         config: &ShellConfig,

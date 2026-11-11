@@ -96,6 +96,7 @@ mod tests {
         SpellcheckMenu::new(
             2,
             4,
+            3,
             "teh".to_string(),
             vec!["the".to_string(), "tea".to_string()],
             true,
@@ -191,6 +192,7 @@ mod tests {
         let menu = SpellcheckMenu::new(
             2,
             4,
+            3,
             "teh".to_string(),
             vec!["the".to_string()],
             false,
@@ -222,8 +224,15 @@ mod tests {
         // to the foreground ink: a painter that always dimmed `Suggest` rows
         // would otherwise satisfy every assertion above.
         let mut enabled_renderer = menu_renderer();
-        let enabled =
-            SpellcheckMenu::new(2, 4, "teh".to_string(), vec!["the".to_string()], true, None);
+        let enabled = SpellcheckMenu::new(
+            2,
+            4,
+            3,
+            "teh".to_string(),
+            vec!["the".to_string()],
+            true,
+            None,
+        );
         enabled_renderer.draw_spellcheck_menu(&enabled, anchor(), viewport());
         let enabled_layout = enabled.layout(anchor(), viewport(), enabled_renderer.scale_factor);
         let brightened = peak_red(&enabled_renderer, enabled_layout.rows[0]);
@@ -243,7 +252,7 @@ mod tests {
         // Zero suggestions is a normal case: the two actions must still paint
         // and still be told apart from the panel.
         let mut renderer = menu_renderer();
-        let menu = SpellcheckMenu::new(0, 0, "teh".to_string(), vec![], true, None);
+        let menu = SpellcheckMenu::new(0, 0, 3, "teh".to_string(), vec![], true, None);
         renderer.draw_spellcheck_menu(&menu, anchor(), viewport());
         let layout = menu.layout(anchor(), viewport(), renderer.scale_factor);
         assert_eq!(layout.rows.len(), 2);
