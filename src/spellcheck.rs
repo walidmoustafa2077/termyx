@@ -370,6 +370,18 @@ mod tests {
     }
 
     #[test]
+    fn reports_nothing_on_a_line_of_real_words() {
+        // The line from a live session: the command name is never checked, and
+        // every argument is a dictionary word. `fer` is a dialect word in the
+        // bundled list, so it is not a misspelling as far as this module knows.
+        let text = "PS C:\\Users\\mrlok> miss if gone fer away from the";
+        let cells = row(text);
+        assert_eq!(text.len(), 49);
+        assert!(scan(&cells, 19, 49).is_empty());
+        assert!(is_known("fer"));
+    }
+
+    #[test]
     fn skips_the_command_name() {
         let cells = row("Get-ChildItem wrng");
         let found = scan(&cells, 0, cells.len());
