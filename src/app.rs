@@ -2674,7 +2674,37 @@ impl App {
                 }
             }
 
-            if forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key()) {
+            let forwards = forwards_mouse_press(self.app_mouse_mode(), self.modifiers.shift_key());
+
+            // A right-click on a spelled word opens its suggestion menu even
+            // inside an application that reports the mouse. A miss keeps its
+            // old meaning, so a TUI's own right-click still works.
+            if button == MouseButton::Right {
+                let menu = self.spellcheck_menu_at(self.cursor_pos);
+                match right_press_route(menu.is_some(), forwards) {
+                    RightPressRoute::Spellcheck => {
+                        self.spellcheck_menu = menu;
+                        self.app_mouse_button = None;
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return false;
+                    }
+                    RightPressRoute::Forward => {
+                        self.app_mouse_button = Some(input_button);
+                        self.mouse_down = false;
+                        self.send_mouse(input::MouseEventKind::Press, Some(input_button));
+                        return false;
+                    }
+                    RightPressRoute::Paste => {
+                        self.app_mouse_button = None;
+                        self.paste_clipboard();
+                        return false;
+                    }
+                }
+            }
+
+            if forwards {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
                 self.send_mouse(input::MouseEventKind::Press, Some(input_button));
@@ -2684,23 +2714,8 @@ impl App {
             // Shift+drag and non-reporting apps keep local text selection.
             self.app_mouse_button = None;
 
-            // A right-click on a spelled word opens its suggestion menu. A miss
-            // falls through to the paste below, so every other right-click
-            // keeps its old meaning.
-            if button == MouseButton::Right {
-                if let Some(menu) = self.spellcheck_menu_at(self.cursor_pos) {
-                    self.spellcheck_menu = Some(menu);
-                    self.app_mouse_button = None;
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                    return false;
-                }
-            }
-
-            // A right or middle click that stays local pastes; the forwarding
-            // branch above has already claimed the click for mouse-reporting
-            // apps.
+            // A middle click that stays local pastes; the forwarding branch
+            // above has already claimed it for mouse-reporting apps.
             if pastes_locally(button) {
                 self.paste_clipboard();
                 return false;
@@ -3990,11 +4005,36 @@ fn forwards_mouse_press(mode: TermMode, shift: bool) -> bool {
     mode.intersects(TermMode::MOUSE_MODE) && !shift
 }
 
+/// What a right press does, in priority order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RightPressRoute {
+    /// Open the suggestion menu for the spelled word under the pointer.
+    Spellcheck,
+    /// Report the press to the application.
+    Forward,
+    /// Paste the clipboard.
+    Paste,
+}
+
+/// A spelled word under the pointer outranks forwarding: the word is the
+/// terminal's to explain, and a forwarded press would leave an application
+/// that reports the mouse waiting for a release it never gets.
+fn right_press_route(menu_hit: bool, forwards: bool) -> RightPressRoute {
+    if menu_hit {
+        RightPressRoute::Spellcheck
+    } else if forwards {
+        RightPressRoute::Forward
+    } else {
+        RightPressRoute::Paste
+    }
+}
+
 /// Buttons that paste the clipboard when the press stays local.
 ///
-/// The forwarding branch in [`App::on_mouse`] runs first, so an application
-/// that reports the mouse still receives a right or middle press. A local left
-/// press keeps its selection behavior.
+/// A right press is routed by [`right_press_route`] before this: a spelled
+/// word under the pointer opens its menu, and only a miss falls through to
+/// forwarding or pasting. A middle press still forwards when the application
+/// reports the mouse.
 fn pastes_locally(button: MouseButton) -> bool {
     matches!(button, MouseButton::Right | MouseButton::Middle)
 }
@@ -4699,6 +4739,24 @@ mod tests {
         for button in [MouseButton::Left, MouseButton::Back, MouseButton::Forward] {
             assert!(!pastes_locally(button), "{button:?} must not paste locally");
         }
+    }
+
+    #[test]
+    fn a_right_press_on_a_word_opens_its_menu_even_when_mouse_is_reported() {
+        // OpenCode and other full-screen programs report the mouse, so this
+        // press used to reach them and the menu never appeared.
+        assert_eq!(
+            right_press_route(true, true),
+            RightPressRoute::Spellcheck,
+            "a spelled word must win over forwarding"
+        );
+        assert_eq!(right_press_route(true, false), RightPressRoute::Spellcheck);
+    }
+
+    #[test]
+    fn a_right_press_off_a_word_keeps_its_old_meaning() {
+        assert_eq!(right_press_route(false, true), RightPressRoute::Forward);
+        assert_eq!(right_press_route(false, false), RightPressRoute::Paste);
     }
 
     #[test]
