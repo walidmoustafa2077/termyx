@@ -2022,6 +2022,11 @@ impl App {
         };
         self.tabs.select(index);
         self.selection = None;
+        // The OS title is only set by the layout rebuild, and the rebuild after
+        // closing the palette named its neighbour.
+        self.release_forwarded_button();
+        self.close_find();
+        self.rebuild_layout();
     }
 
     /// Regenerates a page's grid from live data. Called on open, on every
