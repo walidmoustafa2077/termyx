@@ -983,7 +983,7 @@ git -c user.name=Termyx -c user.email=dev@localhost commit -m "feat(palette): op
 - Consumes: nothing new.
 - Produces: documentation only.
 
-- [ ] **Step 1: Fix the stale palette sentence in `README.md`**
+- [x] **Step 1: Fix the stale palette sentence in `README.md`**
 
 In the Tabs section, the paragraph at `README.md:138-141` currently reads:
 
@@ -995,7 +995,7 @@ Replace it with:
 
 Keep the rest of the Tabs section unchanged.
 
-- [ ] **Step 2: Add a Command palette section after Tabs**
+- [x] **Step 2: Add a Command palette section after Tabs**
 
 ```markdown
 ## Command palette
@@ -1013,11 +1013,11 @@ Tab commands act on the tab that was active when the palette opened, so
 is already open reuses its tab and clears the filter.
 ```
 
-- [ ] **Step 3: Correct Known limitations**
+- [x] **Step 3: Correct Known limitations**
 
 `README.md:303` currently reads `- Splits, search, images, and AI are later phases.` Replace it with `- Splits, images, and AI are later phases.` Do not add a limitation for anything this plan shipped.
 
-- [ ] **Step 4: Update `AGENTS.md` current scope**
+- [x] **Step 4: Update `AGENTS.md` current scope**
 
 `AGENTS.md:68-71` currently reads:
 
@@ -1048,8 +1048,11 @@ Run `cargo run --release`, then:
 6. `Esc` closes the palette. Reopen with the chevron menu; the same tab reappears with an empty filter.
 7. Open the palette twice with `Ctrl+Shift+P`: the second press focuses the existing palette tab rather than adding a second one.
 8. Resize the window while the palette is open; rows reflow without leaving history behind.
+9. With three tabs, open the palette from the middle tab and press `Esc`; the middle tab must be active again.
 
-- [ ] **Step 6: Run every gate**
+Pending: performed by the controller with the user; this task only prepares the steps.
+
+- [x] **Step 6: Run every gate**
 
 Run:
 
@@ -1062,7 +1065,7 @@ cargo build --release
 
 Expected: all clean, zero test failures.
 
-- [ ] **Step 7: Tick this plan and commit**
+- [x] **Step 7: Tick this plan and commit**
 
 Mark the completed boxes in this file, then:
 

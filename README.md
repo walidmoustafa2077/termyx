@@ -137,8 +137,8 @@ session.
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle forward and back.
 - `Ctrl+Shift+1` … `Ctrl+Shift+5` open the first five profiles directly.
 - The `⌄` menu lists every profile, then `Settings` (opens the config file, or
-  its folder on a first run), `Command palette` (not available yet; the row
-  only logs), and `About`. No key opens `Settings` or the palette.
+  its folder on a first run), `Command palette` (or `Ctrl+Shift+P`), and
+  `About`. No key opens `Settings`.
 
 `Ctrl+Shift+W` closes the shell in the active tab immediately; there is no
 confirmation and no undo.
@@ -158,6 +158,20 @@ name = "Command Prompt"
 program = "cmd.exe"
 args = ["/k"]
 ```
+
+## Command palette
+
+`Ctrl+Shift+P`, or `Command palette` in the `⌄` menu, opens a launcher in its own
+tab. Type to filter, `Up`/`Down` to move, `Enter` to run, `Esc` to close.
+
+It lists the configured profiles (new tab), tab commands (close, duplicate, move,
+close others, close to the right, next, previous), and `Settings`, `Find`,
+`Export text`, and `About`. Rows that cannot act on the current strip are
+omitted, and the right-hand hints name only keys that really work.
+
+Tab commands act on the tab that was active when the palette opened, so
+`Close tab` never closes the palette itself. Opening the palette again while it
+is already open reuses its tab and clears the filter.
 
 ## Window chrome
 
@@ -300,4 +314,4 @@ the same VT path but were not run on this machine.
   starts; they are used only by the spellcheck overlay. Command-end marks and
   the rest of the shell-integration protocol are ignored.
 - IME preedit is not shown; only committed text reaches the shell.
-- Splits, search, images, and AI are later phases.
+- Splits, images, and AI are later phases.
