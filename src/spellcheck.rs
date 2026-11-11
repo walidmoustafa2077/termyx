@@ -111,8 +111,13 @@ pub fn load_user_words(path: &Path) {
     }
 }
 
+/// Checks every word on the shell input line from `start_col` up to the cursor.
+///
+/// The prompt itself lives before `start_col` and is never inspected, but the
+/// command name at `start_col` is: a misspelt command is exactly the mistake
+/// the underline exists to catch.
 pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspelling> {
-    scan_from(row, start_col, cursor_col, true)
+    scan_from(row, start_col, cursor_col)
 }
 
 /// Checks every word on `row` up to the cursor, with no prompt mark to go by.
@@ -120,18 +125,12 @@ pub fn scan(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspellin
 /// Full-screen programs draw their own interface and never emit the OSC 133
 /// marks, so a shell-only rule would leave every editor and TUI unchecked.
 /// The cursor row is the best guess available: it is where the text being
-/// typed appears. Nothing is skipped, because an input box has no command
-/// name - the first word is as likely to be mistyped as the last.
+/// typed appears.
 pub fn scan_anywhere(row: &[Cell], cursor_col: usize) -> Vec<Misspelling> {
-    scan_from(row, 0, cursor_col, false)
+    scan_from(row, 0, cursor_col)
 }
 
-fn scan_from(
-    row: &[Cell],
-    start_col: usize,
-    cursor_col: usize,
-    skip_first_token: bool,
-) -> Vec<Misspelling> {
+fn scan_from(row: &[Cell], start_col: usize, cursor_col: usize) -> Vec<Misspelling> {
     let end = cursor_col.min(row.len());
     if end <= start_col {
         return Vec::new();
@@ -139,9 +138,8 @@ fn scan_from(
 
     let mut found = Vec::new();
     // Task 6 hands over the whole visible row plus the column the input starts
-    // at, so the prompt and the command name both live before `start_col`.
+    // at, so the prompt text lives before `start_col`.
     let mut index = start_col;
-    let mut first_token_seen = false;
     // Quote state survives whitespace: every token from an opening quote to its
     // closing partner is skipped, however many tokens the span covers.
     let mut quote: Option<char> = None;
@@ -186,10 +184,6 @@ fn scan_from(
             continue;
         }
 
-        if skip_first_token && !first_token_seen {
-            first_token_seen = true;
-            continue;
-        }
         if quoted {
             continue;
         }
@@ -322,23 +316,25 @@ pub fn suggestions(token: &str, limit: usize) -> Vec<String> {
         std::mem::take(&mut one_edit)
     };
 
-    // A shorter candidate never wins while a same-length or longer one exists,
-    // then the lowest frequency rank decides. Words absent from the frequency
+    // The most common word wins: an edit that lands on a frequent word is the
+    // likelier intent than one that lands on a rare word of the same distance,
+    // whether the candidate is shorter or not. Words absent from the frequency
     // list sort last but remain usable when they are the only candidate.
-    let mut ranked: Vec<(bool, usize, &String)> = candidates
+    let mut ranked: Vec<(usize, &String)> = candidates
         .into_iter()
         .map(|word| {
-            let shorter = word.len() < lower.len();
-            let rank = guard.rank.get(word).copied().unwrap_or(usize::MAX / 2);
-            (shorter, rank, word)
+            (
+                guard.rank.get(word).copied().unwrap_or(usize::MAX / 2),
+                word,
+            )
         })
         .collect();
 
-    ranked.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
     ranked
         .into_iter()
         .take(limit)
-        .map(|(_, _, word)| word.clone())
+        .map(|(_, word)| word.clone())
         .collect()
 }
 
@@ -422,7 +418,15 @@ mod tests {
     }
 
     #[test]
-    fn skips_the_command_name() {
+    fn checks_the_command_name() {
+        let cells = row("onrce goes");
+        let found = scan(&cells, 0, cells.len());
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].col, found[0].len), (0, 5));
+    }
+
+    #[test]
+    fn still_skips_a_hyphenated_command_name() {
         let cells = row("Get-ChildItem wrng");
         let found = scan(&cells, 0, cells.len());
         assert_eq!(found.len(), 1);
@@ -437,8 +441,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].col, found[0].len), (18, 4));
 
-        // The command name is skipped, and the first checked token is not
-        // clamped back onto the input start.
+        // The prompt is never inspected; the first checked token starts at the
+        // input start and is not clamped back onto it.
         let cells = row("dev box> hello wrng");
         let found = scan(&cells, 9, cells.len());
         assert_eq!(found.len(), 1);
@@ -446,12 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn skips_the_command_name_after_a_prompt() {
+    fn checks_the_command_name_after_a_prompt() {
         let prompt = "PS D:\\Development\\termyx> ";
-        let cells = row(&format!("{prompt}Write-Host wrng"));
+        let cells = row(&format!("{prompt}onrce wrng"));
         let found = scan(&cells, prompt.len(), cells.len());
-        assert_eq!(found.len(), 1);
-        assert_eq!((found[0].col, found[0].len), (prompt.len() + 11, 4));
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].col, found[0].len), (prompt.len(), 5));
+        assert_eq!((found[1].col, found[1].len), (prompt.len() + 6, 4));
     }
 
     #[test]
@@ -574,6 +579,14 @@ mod tests {
             suggestions("recieve", 5).first().map(String::as_str),
             Some("receive")
         );
+    }
+
+    #[test]
+    fn ranks_a_common_shorter_word_first() {
+        // The likeliest intent beats length: a shorter candidate used to be
+        // pushed behind every equally close longer one.
+        assert_eq!(suggestions("aman", 1), vec!["man".to_string()]);
+        assert_eq!(suggestions("hoase", 1), vec!["house".to_string()]);
     }
 
     #[test]
