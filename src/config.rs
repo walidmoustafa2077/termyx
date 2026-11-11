@@ -55,6 +55,7 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     pub selection: SelectionConfig,
     pub theme: ThemeConfig,
+    pub spellcheck: SpellcheckConfig,
     pub shell: ShellConfig,
     #[serde(default)]
     pub profiles: Vec<ProfileConfig>,
@@ -71,6 +72,7 @@ impl Default for Config {
             scrollback: ScrollbackConfig::default(),
             selection: SelectionConfig::default(),
             theme: ThemeConfig::default(),
+            spellcheck: SpellcheckConfig::default(),
             shell: ShellConfig::default(),
             profiles: ProfileConfig::platform_defaults(),
             default_profile: 0,
@@ -189,6 +191,36 @@ impl Default for SelectionConfig {
     }
 }
 
+/// The `[spellcheck]` section: whether to decorate misspellings and whether the
+/// child shell gets the autocorrect environment.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpellcheckConfig {
+    /// Underline misspelled words on the shell's live input line. A scrolled-back
+    /// viewport shows none, and "Hide underlines" in the right-click menu turns
+    /// them off for the rest of the session without rewriting this setting.
+    pub enabled: bool,
+    /// Export `TERMYX_AUTOCORRECT=1` (or `0`) to every child shell. The
+    /// PowerShell module reads it to enable or disable its autocorrect on the
+    /// same line. The prompt marks are independent: even with `false`, the
+    /// module still wraps the prompt when `TERMYX=1`, so the underlines and the
+    /// right-click menu keep working while the shell does not autocorrect.
+    pub autocorrect: bool,
+    /// `#rrggbb` for the underline band. Invalid values fall back to
+    /// `#d19a66`; the field is a string so the parser stays in [`crate::theme`].
+    pub underline_color: String,
+}
+
+impl Default for SpellcheckConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            autocorrect: true,
+            underline_color: "#d19a66".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ThemeConfig {
@@ -256,6 +288,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("window", &["width", "height", "padding", "dynamic_title"]),
     ("scrollback", &["lines"]),
     ("selection", &["trim_trailing", "copy_on_select"]),
+    ("spellcheck", &["enabled", "autocorrect", "underline_color"]),
     (
         "theme",
         &[
@@ -370,6 +403,9 @@ impl Config {
         self.window.width = self.window.width.clamp(200, 10_000);
         self.window.height = self.window.height.clamp(200, 10_000);
         self.window.padding = self.window.padding.clamp(0, 64);
+        if crate::theme::Rgb::from_hex(&self.spellcheck.underline_color).is_none() {
+            self.spellcheck.underline_color = SpellcheckConfig::default().underline_color;
+        }
         if self.profiles.is_empty() {
             self.profiles = if self.shell == ShellConfig::default() {
                 ProfileConfig::platform_defaults()
@@ -717,6 +753,55 @@ mod tests {
         assert_eq!(c.bidi.base_direction, BaseDirection::Ltr);
         let c = Config::from_toml_str("[bidi]\nbase_direction = \"rtl\"\n").unwrap();
         assert_eq!(c.bidi.base_direction, BaseDirection::Rtl);
+    }
+
+    #[test]
+    fn spellcheck_defaults_are_on() {
+        let config = Config::default();
+        assert!(config.spellcheck.enabled);
+        assert!(config.spellcheck.autocorrect);
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
+    }
+
+    #[test]
+    fn spellcheck_reads_from_table() {
+        let config = Config::from_toml_str(
+            "[spellcheck]\nenabled = false\nautocorrect = false\nunderline_color = \"#ff0000\"\n",
+        )
+        .expect("parse");
+        assert!(!config.spellcheck.enabled);
+        assert!(!config.spellcheck.autocorrect);
+        assert_eq!(config.spellcheck.underline_color, "#ff0000");
+
+        // A partial table leaves the other two keys at their defaults.
+        let config =
+            Config::from_toml_str("[spellcheck]\nenabled = false\n").expect("partial parse");
+        assert!(!config.spellcheck.enabled);
+        assert!(config.spellcheck.autocorrect);
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
+    }
+
+    #[test]
+    fn invalid_underline_color_falls_back() {
+        let config = Config::from_toml_str("[spellcheck]\nunderline_color = \"not-a-colour\"\n")
+            .expect("parse");
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
+
+        let config =
+            Config::from_toml_str("[spellcheck]\nunderline_color = \"\"\n").expect("empty parse");
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
+    }
+
+    #[test]
+    fn spellcheck_keys_are_known() {
+        // A warning-only unknown-key path cannot fail a parse, so pin the
+        // schema itself: every key the table documents must be listed.
+        let keys = KNOWN_KEYS
+            .iter()
+            .find(|(section, _)| *section == "spellcheck")
+            .map(|(_, keys)| *keys)
+            .expect("spellcheck must be a known section");
+        assert_eq!(keys, ["enabled", "autocorrect", "underline_color"]);
     }
 
     #[test]

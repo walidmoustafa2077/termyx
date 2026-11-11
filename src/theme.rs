@@ -1,6 +1,6 @@
 //! Color palette and appearance settings.
 
-use crate::config::ThemeConfig;
+use crate::config::{SpellcheckConfig, ThemeConfig};
 use tiny_skia::Color as SkColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,11 @@ pub struct Theme {
     /// One-pixel edge around a tooltip. Without it the panel would merge into
     /// a tab of the same colour behind it.
     pub tooltip_border: Rgb,
+    /// The band under a misspelled word. It is the only theme colour not read
+    /// from `[theme]`: it comes from `[spellcheck] underline_color`, which
+    /// [`Theme::apply_spellcheck_color`] applies. Kept here so the renderer
+    /// reads one palette for every pixel it paints.
+    pub spellcheck_underline: Rgb,
 }
 
 impl Theme {
@@ -176,6 +181,22 @@ impl Theme {
             find_current: Rgb::new(128, 112, 34),
             tooltip_background: Rgb::new(44, 44, 44),
             tooltip_border: Rgb::new(61, 61, 61),
+            spellcheck_underline: Rgb::new(0xD1, 0x9A, 0x66),
+        }
+    }
+
+    /// Applies `[spellcheck] underline_color` to the palette. An unparsable
+    /// colour keeps the current value, which `from_config` starts at the
+    /// default `#d19a66`; `Config::validate` already resets bad input, so the
+    /// warning here only fires for callers that skip validation.
+    pub fn apply_spellcheck_color(&mut self, config: &SpellcheckConfig) {
+        match Rgb::from_hex(&config.underline_color) {
+            Some(rgb) => self.spellcheck_underline = rgb,
+            None => tracing::warn!(
+                "invalid spellcheck underline_color {:?}; keeping {:?}",
+                config.underline_color,
+                self.spellcheck_underline
+            ),
         }
     }
 
@@ -234,6 +255,29 @@ mod tests {
         assert_eq!(Rgb::from_hex("ccCCcc"), Some(Rgb::new(204, 204, 204)));
         assert_eq!(Rgb::from_hex("#fff"), None);
         assert_eq!(Rgb::from_hex("zzzzzz"), None);
+    }
+
+    #[test]
+    fn spellcheck_colour_comes_from_config() {
+        let mut theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        let config = SpellcheckConfig {
+            underline_color: "#ff0000".to_string(),
+            ..SpellcheckConfig::default()
+        };
+        theme.apply_spellcheck_color(&config);
+        assert_eq!(theme.spellcheck_underline, Rgb::new(255, 0, 0));
+    }
+
+    #[test]
+    fn invalid_spellcheck_colour_keeps_the_default() {
+        let mut theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        assert_eq!(theme.spellcheck_underline, Rgb::new(0xD1, 0x9A, 0x66));
+        let config = SpellcheckConfig {
+            underline_color: "not-a-colour".to_string(),
+            ..SpellcheckConfig::default()
+        };
+        theme.apply_spellcheck_color(&config);
+        assert_eq!(theme.spellcheck_underline, Rgb::new(0xD1, 0x9A, 0x66));
     }
 
     #[test]

@@ -87,11 +87,42 @@ then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`
 with contextual forms, either as a single lam-alef ligature or as connected
 two-glyph forms. See `assets/fonts/README.md`.
 
+## Spellcheck
+
+```toml
+[spellcheck]
+enabled = true            # underline misspelled words on the shell input line
+autocorrect = true        # export TERMYX_AUTOCORRECT=1 to child shells
+underline_color = "#d19a66"   # #rrggbb
+```
+
+These keys configure the spellcheck overlay for the shell input line, which is
+the line the prompt wrapper marks with OSC 133 `B`.
+
+- `enabled` draws the underlines. Right-click an underlined word for spelling
+  suggestions, to add it to `%LOCALAPPDATA%\Termyx\user-words.txt`, or to
+  hide the underlines for the rest of the session. Underlines appear only on
+  the live screen: once the viewport is scrolled back, nothing is checked or
+  drawn. `false` turns the feature off entirely.
+- The overlay needs the Termyx PowerShell module imported in the tab and
+  `TERMYX=1` in the child environment (Termyx sets it automatically). Without
+  the OSC 133 marks the module emits in that mode, nothing is drawn: the
+  terminal cannot see where the input line begins. See
+  `shell/powershell/README.md` for importing the module.
+- `autocorrect` exports `TERMYX_AUTOCORRECT=1` to every child shell so the
+  PowerShell module autocorrects the same line; `false` exports `0`. The marks
+  are independent: `autocorrect = false` stops the shell from autocorrecting,
+  while the underlines and the menu keep working as long as the module is
+  imported and `TERMYX=1` is set.
+- `underline_color` is the color of the underline band; an invalid value falls
+  back to `#d19a66`.
+
 ## Mouse
 
 - Drag to select text; double-click selects a word and triple-click selects the
   line.
-- Right-click or middle-click the grid pastes the clipboard.
+- Right-click or middle-click the grid pastes the clipboard, except over an
+  underlined word: right-click there opens the spelling menu instead.
 - While an application reports the mouse, hold **Shift** to select locally.
 - Middle-click a tab, active or not, closes it; the tab's `✕` does the same on
   a left click.
@@ -265,7 +296,8 @@ the same VT path but were not run on this machine.
 - Text uses grayscale antialiasing with a mild gamma lift, not ClearType
   subpixel rendering.
 - OSC 8 hyperlinks are ignored; links are not shown and cannot be opened.
-- OSC 133 shell integration is not parsed; prompts and command marks are not
-  exposed to the terminal.
+- OSC 133 `A` and `B` marks are parsed to find where the shell's input line
+  starts; they are used only by the spellcheck overlay. Command-end marks and
+  the rest of the shell-integration protocol are ignored.
 - IME preedit is not shown; only committed text reaches the shell.
 - Splits, search, images, and AI are later phases.

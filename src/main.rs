@@ -18,6 +18,7 @@ mod selection;
 mod session;
 mod settings;
 mod shape;
+mod spellcheck;
 mod term;
 mod theme;
 mod ui;
