@@ -4,6 +4,7 @@ mod app;
 mod bidi;
 mod config;
 mod event;
+mod find;
 mod fonts;
 mod icon;
 mod input;

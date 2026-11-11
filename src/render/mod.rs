@@ -2,6 +2,7 @@
 
 mod atlas;
 mod context_menu;
+mod find_bar;
 mod glyph_cache;
 mod menu;
 mod rename;
@@ -12,6 +13,7 @@ use ab_glyph::GlyphId;
 use tiny_skia::Pixmap;
 
 use crate::bidi;
+use crate::find::FindState;
 use crate::fonts::FontSet;
 use crate::icon::TabIcon;
 use crate::scrollbar;
@@ -236,6 +238,7 @@ impl Renderer {
         snapshot: &GridSnapshot,
         maps: &[VisualMap],
         selection: Option<&Selection>,
+        find: Option<&FindState>,
     ) {
         self.shape_cache.clear();
         self.draw_background();
@@ -245,6 +248,37 @@ impl Renderer {
         let top = self.grid_top();
 
         self.draw_cell_backgrounds(snapshot, maps, selection, cell_w, cell_h);
+
+        if let Some(find) = find {
+            for (index, hit) in find.matches.iter().enumerate() {
+                let row = hit.line + snapshot.display_offset as i32;
+                if row < 0 || row as usize >= snapshot.lines.len() {
+                    continue;
+                }
+                let color = if index == find.current {
+                    self.theme.find_current
+                } else {
+                    self.theme.find_match
+                };
+                // Map logical columns to visual columns with the row's VisualMap.
+                let cols = snapshot.lines[row as usize].cells.len();
+                let start = hit.start.min(cols);
+                let end = hit.end.min(cols);
+                let map = &maps[row as usize];
+                let mut columns: Vec<usize> = (start..end).map(|col| map.visual_of(col)).collect();
+                columns.sort_unstable();
+                columns.dedup();
+                for col in columns {
+                    self.fill_rect(
+                        padding + col as f32 * cell_w,
+                        top + row as f32 * cell_h,
+                        cell_w,
+                        cell_h,
+                        color,
+                    );
+                }
+            }
+        }
 
         let cursor = if snapshot.display_offset == 0 && snapshot.cursor.visible {
             maps.get(snapshot.cursor.row).map(|map| {
@@ -1373,7 +1407,7 @@ mod tests {
             width: 1,
             style: Style::default(),
         });
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let width = renderer.pixmap.width() as usize;
         let background = packed(renderer.theme.background);
@@ -1411,7 +1445,7 @@ mod tests {
                 ..Style::default()
             },
         });
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let width = renderer.pixmap.width() as usize;
         let background = packed(renderer.theme.background);
@@ -2478,7 +2512,7 @@ mod tests {
             width: 1,
             style: Style::default(),
         });
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
 
         let rows = painted_rows(&renderer);
@@ -2611,7 +2645,7 @@ mod tests {
         snapshot.cursor.row = 0;
         snapshot.cursor.shape = shape;
         snapshot.cursor.visible = visible;
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         renderer.pixels().to_vec()
     }
@@ -2749,7 +2783,7 @@ mod tests {
                 style: Style::default(),
             },
         ]);
-        renderer.draw(&snapshot, &[VisualMap::identity(4)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(4)], None, None);
         renderer.sync();
         let padding = renderer.padding();
         let columns = painted_columns(&renderer);
@@ -2791,7 +2825,7 @@ mod tests {
             },
         ]);
         let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         renderer.sync();
         let start = renderer.padding();
         let columns = painted_columns(&renderer);
@@ -2845,7 +2879,7 @@ mod tests {
         renderer.resize(cell_w * (cols + 2), cell_h * 2);
         let snapshot = row_snapshot(cells);
         let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         renderer.sync();
 
         let columns = painted_columns(&renderer);
@@ -2881,7 +2915,7 @@ mod tests {
         let map = VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr);
         let run = &map.runs()[0];
         let run_end = renderer.padding() + run.slots.end as u32 * cell_w;
-        renderer.draw(&snapshot, &[map], None);
+        renderer.draw(&snapshot, &[map], None, None);
         renderer.sync();
 
         let columns = painted_columns(&renderer);
@@ -2917,7 +2951,7 @@ mod tests {
         assert!(map.rtl_base());
         let run = &map.runs()[0];
         let run_start = renderer.padding() + run.slots.start as u32 * cell_w;
-        renderer.draw(&snapshot, &[map], None);
+        renderer.draw(&snapshot, &[map], None, None);
         renderer.sync();
 
         let columns = painted_columns(&renderer);
@@ -2978,7 +3012,7 @@ mod tests {
         let mut selection = Selection::new(LogicalPos { row: 0, col: 4 });
         selection.update(LogicalPos { row: 0, col: 5 });
         let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
-        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.draw(&snapshot, &maps, Some(&selection), None);
         renderer.sync();
         let selection_color = packed(renderer.theme.selection);
         let padding = renderer.padding();
@@ -3012,7 +3046,7 @@ mod tests {
         let mut selection = Selection::new(LogicalPos { row: 0, col: 0 });
         selection.update(LogicalPos { row: 0, col: 0 });
         let maps = [VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
-        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.draw(&snapshot, &maps, Some(&selection), None);
         renderer.sync();
 
         let width = renderer.pixmap.width() as usize;
@@ -3106,7 +3140,7 @@ mod tests {
         let maps: Vec<VisualMap> = (0..2).map(|_| VisualMap::identity(3)).collect();
         let mut selection = Selection::block(LogicalPos { row: 0, col: 0 });
         selection.update(LogicalPos { row: 1, col: 1 });
-        renderer.draw(&snapshot, &maps, Some(&selection));
+        renderer.draw(&snapshot, &maps, Some(&selection), None);
         renderer.sync();
         let padding = renderer.padding();
         let width = renderer.pixmap.width() as usize;
@@ -3133,7 +3167,7 @@ mod tests {
             style: Style::default(),
         });
         snapshot.cursor.row = 0;
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding() as usize;
         let width = renderer.pixmap.width() as usize;
@@ -3156,7 +3190,7 @@ mod tests {
         let cell_h = renderer.fonts.cell_h;
         renderer.resize(cell_w * 2, cell_h * 2);
         let snapshot = cursor_snapshot(CursorShape::Block, false);
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding() as usize;
         let index = padding * renderer.pixmap.width() as usize + padding;
@@ -3170,7 +3204,7 @@ mod tests {
         let cell_h = renderer.fonts.cell_h;
         renderer.resize(cell_w * 2, cell_h * 2);
         let snapshot = cursor_snapshot(CursorShape::Beam, true);
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding() as usize;
         let width = renderer.pixmap.width() as usize;
@@ -3200,7 +3234,7 @@ mod tests {
         let cell_h = renderer.fonts.cell_h;
         renderer.resize(cell_w * 2, cell_h * 2);
         let snapshot = cursor_snapshot(CursorShape::Underline, true);
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding() as usize;
         let width = renderer.pixmap.width() as usize;
@@ -3232,7 +3266,7 @@ mod tests {
         let cell_h = renderer.fonts.cell_h;
         renderer.resize(cell_w * 2, cell_h * 2);
         let snapshot = cursor_snapshot(CursorShape::HollowBlock, true);
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding() as usize;
         let width = renderer.pixmap.width() as usize;
@@ -3301,7 +3335,7 @@ mod tests {
             width: 1,
             style: Style::default(),
         }]);
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         assert!(painted_rows(&renderer).is_empty());
     }
@@ -3321,7 +3355,12 @@ mod tests {
             width: 1,
             style,
         };
-        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.draw(
+            &single_cell_snapshot(cell),
+            &[VisualMap::identity(1)],
+            None,
+            None,
+        );
         renderer.sync();
         let padding = renderer.padding() as usize;
         let index = padding * renderer.pixmap.width() as usize + padding;
@@ -3352,7 +3391,12 @@ mod tests {
             width: 1,
             style,
         };
-        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.draw(
+            &single_cell_snapshot(cell),
+            &[VisualMap::identity(1)],
+            None,
+            None,
+        );
         renderer.sync();
         let padding = renderer.padding() as usize;
         let width = renderer.pixmap.width() as usize;
@@ -3390,7 +3434,12 @@ mod tests {
             width: 1,
             style,
         };
-        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.draw(
+            &single_cell_snapshot(cell),
+            &[VisualMap::identity(1)],
+            None,
+            None,
+        );
         renderer.sync();
         assert!(painted_rows(&renderer).is_empty());
     }
@@ -3410,7 +3459,12 @@ mod tests {
             width: 1,
             style,
         };
-        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.draw(
+            &single_cell_snapshot(cell),
+            &[VisualMap::identity(1)],
+            None,
+            None,
+        );
         renderer.sync();
         let rows = painted_rows(&renderer);
         assert!(!rows.is_empty());
@@ -3436,7 +3490,12 @@ mod tests {
             width: 1,
             style,
         };
-        renderer.draw(&single_cell_snapshot(cell), &[VisualMap::identity(1)], None);
+        renderer.draw(
+            &single_cell_snapshot(cell),
+            &[VisualMap::identity(1)],
+            None,
+            None,
+        );
         renderer.sync();
         let rows = painted_rows(&renderer);
         assert!(!rows.is_empty());
@@ -3454,7 +3513,7 @@ mod tests {
         let maps: Vec<_> = (0..snapshot.rows)
             .map(|_| VisualMap::identity(snapshot.cols))
             .collect();
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         renderer.sync();
 
         let geom = crate::scrollbar::geometry(
@@ -3489,7 +3548,7 @@ mod tests {
         let maps: Vec<_> = (0..snapshot.rows)
             .map(|_| VisualMap::identity(snapshot.cols))
             .collect();
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         renderer.sync();
 
         let top = *painted_rows(&renderer)
@@ -3511,7 +3570,7 @@ mod tests {
             .map(|_| VisualMap::identity(snapshot.cols))
             .collect();
         renderer.set_scrollbar_hover(true);
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         renderer.sync();
 
         let rest = crate::scrollbar::geometry(
@@ -3571,7 +3630,7 @@ mod tests {
             width: 1,
             style: Style::default(),
         });
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         let padding = renderer.padding();
         let columns = painted_columns(&renderer);
@@ -3590,7 +3649,7 @@ mod tests {
         // ink above came from the fallback path rather than from .notdef.
         let with_fallback = renderer.pixels().to_vec();
         renderer.fonts.symbols.clear();
-        renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+        renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
         renderer.sync();
         assert_ne!(
             with_fallback,
@@ -3629,7 +3688,7 @@ mod tests {
         let cell_h = with.fonts.cell_h;
         for renderer in [&mut with, &mut without] {
             renderer.resize(cell_w * 2, cell_h * 2);
-            renderer.draw(&snapshot, &[VisualMap::identity(1)], None);
+            renderer.draw(&snapshot, &[VisualMap::identity(1)], None, None);
             renderer.sync();
         }
         assert_eq!(
@@ -3719,7 +3778,7 @@ mod tests {
         };
 
         // Warm the glyph atlas so the measurement covers drawing, not discovery.
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         draw_chrome(&mut renderer, &layout, ui_px, 0, None);
         renderer.draw_menu(&menu, &[]);
 
@@ -3727,7 +3786,7 @@ mod tests {
         let mut render_samples = Vec::with_capacity(FRAMES);
         for _ in 0..FRAMES {
             let start = Instant::now();
-            renderer.draw(&snapshot, &maps, None);
+            renderer.draw(&snapshot, &maps, None, None);
             render_samples.push(start.elapsed());
         }
         render_samples.sort_unstable();
@@ -3741,7 +3800,7 @@ mod tests {
         let mut frame_samples = Vec::with_capacity(FRAMES);
         for _ in 0..FRAMES {
             let start = Instant::now();
-            renderer.draw(&snapshot, &maps, None);
+            renderer.draw(&snapshot, &maps, None, None);
             draw_chrome(&mut renderer, &layout, ui_px, 0, None);
             frame_samples.push(start.elapsed());
         }
@@ -3757,7 +3816,7 @@ mod tests {
         // One frame with the dropdown open covers the third painter a real
         // frame can pay for.
         let start = Instant::now();
-        renderer.draw(&snapshot, &maps, None);
+        renderer.draw(&snapshot, &maps, None, None);
         draw_chrome(&mut renderer, &layout, ui_px, 0, None);
         renderer.draw_menu(&menu, &[]);
         println!("full frame with chrome and dropdown: {:?}", start.elapsed());

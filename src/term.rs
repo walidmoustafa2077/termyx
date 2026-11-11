@@ -79,6 +79,19 @@ pub struct LogicalPos {
     pub col: usize,
 }
 
+/// One occurrence of a search needle in the grid.
+///
+/// `line` is a grid line index: `0` is the viewport's top row, negative values
+/// reach back into scrollback, and `start`/`end` are logical column indices
+/// (half-open) within that line. A match is always row-local: text split across
+/// a wrapped line is not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Match {
+    pub line: i32,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridSnapshot {
     pub cols: usize,
@@ -400,6 +413,57 @@ impl Terminal {
         out
     }
 
+    /// Finds every occurrence of `needle` in the full grid, including scrollback.
+    ///
+    /// The match is ASCII case-insensitive and row-local: a needle split across
+    /// a wrapped line is not reported. Returns one [`Match`] per occurrence in
+    /// grid order (history first, then the viewport).
+    pub fn find(&self, needle: &str) -> Vec<Match> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let needle: Vec<char> = needle.chars().collect();
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let rows = self.size.rows as i32;
+        let mut hits = Vec::new();
+        for line in -history..rows {
+            let row = &grid[Line(line)];
+            let cells: Vec<char> = row[..].iter().map(|cell| cell.c).collect();
+            if cells.len() < needle.len() {
+                continue;
+            }
+            for start in 0..=cells.len() - needle.len() {
+                let matched = cells[start..start + needle.len()]
+                    .iter()
+                    .zip(&needle)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b));
+                if matched {
+                    hits.push(Match {
+                        line,
+                        start,
+                        end: start + needle.len(),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// Scrolls the viewport so the grid line `line` is visible.
+    ///
+    /// Negative `line` values name history rows; a non-negative line is already
+    /// in the viewport, so the display snaps back to the bottom.
+    pub fn reveal_line(&mut self, line: i32) {
+        let history = self.history_size() as i32;
+        let current_top = -(self.display_offset() as i32);
+        let desired_top = if line < 0 { line.clamp(-history, 0) } else { 0 };
+        let delta = current_top - desired_top;
+        if delta != 0 {
+            self.scroll_display(delta);
+        }
+    }
+
     /// Number of screen rows up to and including the last row with written content,
     /// and the cursor's screen row.
     fn content_extent(&self) -> (usize, usize) {
@@ -514,6 +578,10 @@ fn named_index(named: NamedColor) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal(cols: usize, rows: usize, scrollback: usize) -> Terminal {
+        Terminal::new(cols, rows, scrollback)
+    }
 
     #[test]
     fn feed_plain_text_and_track_cursor() {
@@ -832,6 +900,28 @@ mod tests {
         terminal.feed("بَ\r\n".as_bytes());
         let text = terminal.all_text();
         assert!(text.contains("بَ"), "got {text:?}");
+    }
+
+    #[test]
+    fn find_is_ascii_case_insensitive_and_reports_columns() {
+        let mut terminal = terminal(20, 3, 100);
+        terminal.feed(b"alpha BETA\r\nbeta\r\n");
+        let hits = terminal.find("beta");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0],
+            crate::term::Match {
+                line: 0,
+                start: 6,
+                end: 10
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_query_has_no_matches() {
+        let terminal = terminal(20, 3, 100);
+        assert!(terminal.find("").is_empty());
     }
 
     #[test]

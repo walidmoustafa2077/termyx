@@ -108,14 +108,10 @@ pub struct Theme {
     /// Ink of a context-menu row that cannot act, measured `#8A8A8A`: dimmer
     /// than the resting label so the name still reads but takes the hint.
     pub menu_disabled: Rgb,
-    /// The band behind a `Find` match, measured `#484822`. The find painter
-    /// reads it in a later task.
-    #[allow(dead_code)]
+    /// The band behind a `Find` match, measured `#484822`.
     pub find_match: Rgb,
     /// The band behind the `Find` match under the caret, measured `#807022`:
-    /// a step brighter than [`Theme::find_match`]. The find painter reads it
-    /// in a later task.
-    #[allow(dead_code)]
+    /// a step brighter than [`Theme::find_match`].
     pub find_current: Rgb,
     /// Tooltip panel. Shares the flyout's recessed value so the two floating
     /// surfaces read as one family.

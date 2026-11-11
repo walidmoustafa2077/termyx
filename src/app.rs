@@ -16,6 +16,7 @@ use winit::window::{Window, WindowId};
 
 use crate::config::{BidiConfig, Config};
 use crate::event::UserEvent;
+use crate::find::FindState;
 use crate::fonts::{FontSet, UI_SIZE_PX};
 use crate::icon;
 use crate::input::{self, KeyInput, Mods};
@@ -28,6 +29,7 @@ use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
 use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
+use crate::ui::find_bar::{FindBar, FindHit};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
 use crate::ui::rename::RenameState;
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
@@ -107,6 +109,9 @@ pub struct App {
     tab_menu: Option<TabMenuState>,
     /// The inline rename editor over a tab, if one is being edited.
     rename: Option<RenameState>,
+    /// The find-in-buffer overlay, if it is open. Mutually exclusive with the
+    /// rename editor: opening one closes the other.
+    find: Option<FindState>,
     /// What the pointer is over in the strip, painted as hover. The `+` and `⌄`
     /// buttons highlight too; empty band paints nothing.
     strip_hover: Option<StripHover>,
@@ -164,6 +169,7 @@ impl App {
             menu: None,
             tab_menu: None,
             rename: None,
+            find: None,
             strip_hover: None,
             tooltip_hover: None,
             clipboard: None,
@@ -309,6 +315,7 @@ impl App {
     fn open_tab_menu(&mut self, index: usize) {
         self.close_menu();
         self.clear_tooltip();
+        self.close_find();
         if index >= self.tabs.len() {
             return;
         }
@@ -392,6 +399,7 @@ impl App {
             .unwrap_or(FALLBACK_TITLE)
             .to_string();
         self.close_tab_menu();
+        self.close_find();
         self.rename = Some(RenameState::new(id, &current));
         self.selection = None;
         self.rebuild_layout();
@@ -442,6 +450,91 @@ impl App {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Opens the find bar and begins a fresh search over the active tab.
+    ///
+    /// The rename editor and the tab menu are both closed first, so the find
+    /// bar is the only overlay on screen.
+    fn start_find(&mut self) {
+        self.close_tab_menu();
+        self.rename = None;
+        self.find = Some(FindState::default());
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Closes the find bar, repainting only when one was actually open.
+    fn close_find(&mut self) {
+        if self.find.take().is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Recomputes the matches for the current query and reveals the first one.
+    fn refresh_find(&mut self) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let query = find.query.clone();
+        let matches = self
+            .tabs
+            .active()
+            .map(|session| session.terminal.find(&query))
+            .unwrap_or_default();
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        find.set_matches(matches);
+        if let Some(first) = find.current() {
+            if let Some(session) = self.tabs.active_mut() {
+                session.terminal.reveal_line(first.line);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Routes a key to the open find bar. Escape closes it, Enter/Shift+Enter
+    /// step to the next/previous match, Backspace removes a character, and a
+    /// printable character appends. Modified shortcuts are ignored, so typing
+    /// never reaches the shell while the bar is open. Returns `false`: the find
+    /// bar never closes the window.
+    fn find_key(&mut self, event: &KeyEvent) -> bool {
+        let shift = self.modifiers.shift_key();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.close_find(),
+            Key::Named(NamedKey::Enter) => {
+                let Some(find) = self.find.as_mut() else {
+                    return false;
+                };
+                let hit = if shift { find.previous() } else { find.next() };
+                if let (Some(hit), Some(session)) = (hit, self.tabs.active_mut()) {
+                    session.terminal.reveal_line(hit.line);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(find) = self.find.as_mut() {
+                    find.backspace();
+                }
+                self.refresh_find();
+            }
+            Key::Character(text) if !self.modifiers.control_key() && !self.modifiers.alt_key() => {
+                if let Some(find) = self.find.as_mut() {
+                    find.push_str(text);
+                }
+                self.refresh_find();
             }
             _ => {}
         }
@@ -775,6 +868,8 @@ impl App {
         // The tab being renamed may have been closed while its editor was open;
         // dropping the state stops the dead editor from swallowing keys.
         self.rename = None;
+        // A find bar anchored to the closed tab's grid is stale too.
+        self.close_find();
         // The drag that was extending a selection in this tab has nothing left
         // to extend.
         self.mouse_down = false;
@@ -965,6 +1060,15 @@ impl App {
         }
     }
 
+    /// The find bar's geometry for the current window, or `None` before the
+    /// window and renderer exist. Physical pixels, scaled once like the chrome.
+    fn find_bar_geometry(&self) -> Option<FindBar> {
+        let window_width = self.window.as_ref()?.inner_size().width as f32;
+        let top = self.renderer.as_ref()?.top_inset() as f32;
+        let scale = self.scale_factor() as f32;
+        Some(FindBar::new(window_width, top, scale))
+    }
+
     /// The parser of the tab the window shows.
     fn active_terminal(&mut self) -> Option<&mut Terminal> {
         Some(&mut self.tabs.active_mut()?.terminal)
@@ -977,6 +1081,7 @@ impl App {
             .as_ref()
             .is_some_and(|window| window.is_maximized());
         let ui_px = UI_SIZE_PX * self.scale_factor() as f32;
+        let scale = self.scale_factor() as f32;
         // The dropdown shows one icon per profile row. Resolving a program's
         // icon may call the shell API, so the programs are collected first and
         // the bitmaps resolved before the renderer borrow starts; this also has
@@ -1058,7 +1163,12 @@ impl App {
             .collect();
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.set_maximized(maximized);
-        renderer.draw(&snapshot, &maps, self.selection.as_ref());
+        renderer.draw(
+            &snapshot,
+            &maps,
+            self.selection.as_ref(),
+            self.find.as_ref(),
+        );
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &icons, &colors, self.strip_hover);
         }
@@ -1073,6 +1183,12 @@ impl App {
                     );
                 }
             }
+        }
+        // The find bar floats over the grid, below the chrome and the rename
+        // editor, and above the menus.
+        if let Some(find) = self.find.as_ref() {
+            let bar = FindBar::new(window_width, renderer.top_inset() as f32, scale);
+            renderer.draw_find_bar(&bar, find);
         }
         if let Some(tab_menu) = self.tab_menu.as_ref() {
             renderer.draw_context_menu(&tab_menu.menu);
@@ -1132,6 +1248,19 @@ impl App {
         // so a title edit never reaches the shell.
         if self.rename.is_some() {
             return self.rename_key(&event);
+        }
+        // The find bar owns every key while it is open, so typing a search
+        // never reaches the shell.
+        if self.find.is_some() {
+            return self.find_key(&event);
+        }
+        // Ctrl+F opens the find bar. Checked before the terminal paths so the
+        // shortcut is never sent to the shell.
+        if self.modifiers.control_key()
+            && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("f"))
+        {
+            self.start_find();
+            return false;
         }
         // The tab context menu is a layer over the grid: Escape dismisses it,
         // and any other key dismisses the layer and falls through to the
@@ -1394,6 +1523,7 @@ impl App {
         self.tabs.select(next);
         // The keyboard switch paints the tab the same way a click does.
         self.selection = None;
+        self.close_find();
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1596,6 +1726,27 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
+            // The find bar owns presses inside it while it is open: the close
+            // box dismisses it, the field consumes the press, and a press
+            // outside falls through to the grid (so the user can click back
+            // into the terminal with the bar still open).
+            if self.find.is_some() {
+                if let Some(bar) = self.find_bar_geometry() {
+                    let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                    match bar.hit(x, y) {
+                        FindHit::Close => {
+                            self.close_find();
+                            return false;
+                        }
+                        FindHit::Field => {
+                            self.press_in_chrome = true;
+                            self.mouse_down = false;
+                            return false;
+                        }
+                        FindHit::Outside => {}
+                    }
+                }
+            }
             // The tab context menu owns the pointer while it is open: a press
             // on a row runs its command, a press outside dismisses, and a
             // right press on a row keeps the menu open rather than running it.
@@ -1703,6 +1854,7 @@ impl App {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
                             self.selection = None;
+                            self.close_find();
                             self.rebuild_layout();
                         }
                         StripAction::Close(index) => return self.close_tab(index),
@@ -2860,6 +3012,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                } else if let Some(find) = self.find.as_mut() {
+                    find.push_str(&text);
+                    self.refresh_find();
                 } else {
                     self.send_text(&text);
                 }

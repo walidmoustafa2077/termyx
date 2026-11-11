@@ -4,6 +4,7 @@
 //! be tested without a window.
 
 pub mod context_menu;
+pub mod find_bar;
 pub mod menu;
 pub mod rename;
 pub mod tab_bar;
