@@ -180,6 +180,10 @@ fn corner_coverage(
     hits as f32 / (CORNER_SAMPLES * CORNER_SAMPLES) as f32
 }
 
+/// Placeholder underline colour until Task 4 wires `[spellcheck] underline_color`
+/// through `Theme`.
+const SPELLCHECK_UNDERLINE: Rgb = Rgb::new(0xD1, 0x9A, 0x66);
+
 impl Renderer {
     /// Builds a renderer with a one-pixel surface.
     ///
@@ -239,6 +243,20 @@ impl Renderer {
         maps: &[VisualMap],
         selection: Option<&Selection>,
         find: Option<&FindState>,
+    ) {
+        self.draw_with_spellcheck(snapshot, maps, selection, find, &[]);
+    }
+
+    /// Draws the grid, then the spellcheck underlines for `spans`. Separate
+    /// from [`Renderer::draw`] so the 34 existing call sites keep their four
+    /// arguments until the app is switched over.
+    pub fn draw_with_spellcheck(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        selection: Option<&Selection>,
+        find: Option<&FindState>,
+        spellcheck: &[crate::spellcheck::Misspelling],
     ) {
         self.shape_cache.clear();
         self.draw_background();
@@ -355,6 +373,8 @@ impl Renderer {
         }
 
         self.draw_decorations(snapshot, maps, cell_w, cell_h);
+
+        self.draw_spellcheck_underlines(snapshot, maps, spellcheck, cell_w, cell_h);
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
@@ -934,6 +954,54 @@ impl Renderer {
                 if cell.style.strikethrough {
                     self.fill_rect(x, y + (cell_h / 2.0).round(), span, 1.0, foreground);
                 }
+            }
+        }
+    }
+
+    /// Paints one underline band at the bottom of every visual cell a span
+    /// covers. Runs after the decorations and before the scrollbar so it sits
+    /// over glyph ink but under the chrome.
+    fn draw_spellcheck_underlines(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        spans: &[crate::spellcheck::Misspelling],
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        if spans.is_empty() {
+            return;
+        }
+        let thickness = (2.0 * self.scale_factor).round().max(1.0);
+
+        for span in spans {
+            let row = span.row as i32 + snapshot.display_offset as i32;
+            if row < 0 || row as usize >= snapshot.lines.len() {
+                continue;
+            }
+            let Some(map) = maps.get(row as usize) else {
+                continue;
+            };
+            let cols = snapshot.lines[row as usize].cells.len();
+            if span.col >= cols {
+                continue;
+            }
+            let start = span.col;
+            let end = (span.col + span.len.max(1)).min(cols);
+            // Map every logical column, not just the span's ends, so bidi
+            // reordering and wide cells land on the right visual cells.
+            let mut columns: Vec<usize> = (start..end).map(|col| map.visual_of(col)).collect();
+            columns.sort_unstable();
+            columns.dedup();
+            let y = self.grid_top() + row as f32 * cell_h + (cell_h - thickness);
+            for col in columns {
+                self.fill_rect(
+                    self.padding as f32 + col as f32 * cell_w,
+                    y,
+                    cell_w,
+                    thickness,
+                    SPELLCHECK_UNDERLINE,
+                );
             }
         }
     }
@@ -2569,6 +2637,168 @@ mod tests {
             input_start: None,
             history: 0,
         }
+    }
+
+    /// One row holding one cell per `char` of `text`, numbered `cols` wide.
+    /// `single_cell_snapshot` cannot back the multi-column spellcheck cases
+    /// because it hard-codes `cols: 1` and ignores the cell's width.
+    fn text_snapshot(text: &str) -> GridSnapshot {
+        let cells: Vec<Cell> = text
+            .chars()
+            .map(|c| Cell {
+                text: c.to_string(),
+                width: 1,
+                style: Style::default(),
+            })
+            .collect();
+        let cols = cells.len();
+        GridSnapshot {
+            cols,
+            rows: 1,
+            lines: vec![RowSnapshot {
+                cells,
+                wrapped: false,
+            }],
+            cursor: CursorState {
+                row: 0,
+                logical: 0,
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                // The block cursor would cover the underline band; the
+                // spellcheck cases only care about the decoration pass.
+                visible: false,
+                blinking: false,
+            },
+            display_offset: 0,
+            input_start: None,
+            history: 0,
+        }
+    }
+
+    /// Sizes the surface to hold `snapshot` in one row plus padding and draws
+    /// it through the span-aware entry point.
+    fn render_spellcheck(
+        renderer: &mut Renderer,
+        snapshot: &GridSnapshot,
+        spans: &[crate::spellcheck::Misspelling],
+    ) {
+        resize_and_draw(renderer, snapshot, |renderer, maps| {
+            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans);
+        });
+    }
+
+    /// Resizes and draws `snapshot` with one identity `VisualMap` per row,
+    /// letting `paint` choose the entry point.
+    fn resize_and_draw(
+        renderer: &mut Renderer,
+        snapshot: &GridSnapshot,
+        paint: impl FnOnce(&mut Renderer, &[VisualMap]),
+    ) {
+        let width = renderer.padding * 2 + renderer.fonts.cell_w * snapshot.cols as u32 + 8;
+        let height = renderer.padding * 2 + renderer.fonts.cell_h * 2;
+        renderer.resize(width, height);
+        let maps: Vec<VisualMap> = (0..snapshot.lines.len())
+            .map(|_| VisualMap::identity(snapshot.cols))
+            .collect();
+        paint(renderer, &maps);
+    }
+
+    /// The pixel at the bottom row of a cell, inside the underline band.
+    fn underline_pixel(renderer: &Renderer, col: usize) -> Rgb {
+        let x = renderer.padding as f32 + col as f32 * renderer.fonts.cell_w as f32 + 1.0;
+        let y = renderer.grid_top() + renderer.fonts.cell_h as f32 - 1.0;
+        pixel_at(renderer, x, y)
+    }
+
+    #[test]
+    fn draws_underline_under_a_span() {
+        let mut renderer = default_renderer();
+        let snapshot = text_snapshot("ab");
+        let spans = vec![crate::spellcheck::Misspelling {
+            row: 0,
+            col: 0,
+            len: 2,
+        }];
+        render_spellcheck(&mut renderer, &snapshot, &spans);
+
+        assert_eq!(
+            underline_pixel(&renderer, 0),
+            SPELLCHECK_UNDERLINE,
+            "the span must paint the bottom of its first cell"
+        );
+        assert_eq!(
+            underline_pixel(&renderer, 1),
+            SPELLCHECK_UNDERLINE,
+            "the span must cover its second cell too"
+        );
+    }
+
+    #[test]
+    fn draws_nothing_without_spans() {
+        let mut renderer = default_renderer();
+        let snapshot = text_snapshot("ab");
+        render_spellcheck(&mut renderer, &snapshot, &[]);
+        let without = renderer.pixmap.data().to_vec();
+        assert_eq!(
+            underline_pixel(&renderer, 0),
+            renderer.theme.background,
+            "no span means no decoration in the band"
+        );
+
+        // `draw` delegates to the span-aware pass with an empty slice, so the
+        // two entry points must agree pixel for pixel.
+        resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
+            renderer.draw(&snapshot, maps, None, None);
+        });
+        assert_eq!(
+            renderer.pixmap.data(),
+            without.as_slice(),
+            "draw and draw_with_spellcheck(&[]) agree"
+        );
+    }
+
+    #[test]
+    fn underlines_only_the_covered_columns() {
+        let mut renderer = default_renderer();
+        let snapshot = text_snapshot("abcd");
+        let spans = vec![crate::spellcheck::Misspelling {
+            row: 0,
+            col: 1,
+            len: 2,
+        }];
+        render_spellcheck(&mut renderer, &snapshot, &spans);
+
+        assert_eq!(underline_pixel(&renderer, 0), renderer.theme.background);
+        assert_eq!(underline_pixel(&renderer, 1), SPELLCHECK_UNDERLINE);
+        assert_eq!(underline_pixel(&renderer, 2), SPELLCHECK_UNDERLINE);
+        assert_eq!(underline_pixel(&renderer, 3), renderer.theme.background);
+    }
+
+    #[test]
+    fn skips_spans_outside_the_row() {
+        let mut renderer = default_renderer();
+        let snapshot = text_snapshot("abcd");
+        render_spellcheck(&mut renderer, &snapshot, &[]);
+        let baseline = renderer.pixmap.data().to_vec();
+
+        let spans = vec![
+            crate::spellcheck::Misspelling {
+                row: 0,
+                col: 99,
+                len: 4,
+            },
+            crate::spellcheck::Misspelling {
+                row: 5,
+                col: 0,
+                len: 4,
+            },
+        ];
+        render_spellcheck(&mut renderer, &snapshot, &spans);
+        assert_eq!(
+            renderer.pixmap.data(),
+            baseline.as_slice(),
+            "out-of-range spans must paint nothing"
+        );
     }
 
     #[test]
