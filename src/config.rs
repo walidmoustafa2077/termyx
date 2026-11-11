@@ -398,7 +398,7 @@ impl Config {
         self.window.height = self.window.height.clamp(200, 10_000);
         self.window.padding = self.window.padding.clamp(0, 64);
         if crate::theme::Rgb::from_hex(&self.spellcheck.underline_color).is_none() {
-            self.spellcheck.underline_color = "#d19a66".to_string();
+            self.spellcheck.underline_color = SpellcheckConfig::default().underline_color;
         }
         if self.profiles.is_empty() {
             self.profiles = if self.shell == ShellConfig::default() {
@@ -601,12 +601,23 @@ mod tests {
         assert!(!config.spellcheck.enabled);
         assert!(!config.spellcheck.autocorrect);
         assert_eq!(config.spellcheck.underline_color, "#ff0000");
+
+        // A partial table leaves the other two keys at their defaults.
+        let config =
+            Config::from_toml_str("[spellcheck]\nenabled = false\n").expect("partial parse");
+        assert!(!config.spellcheck.enabled);
+        assert!(config.spellcheck.autocorrect);
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
     }
 
     #[test]
     fn invalid_underline_color_falls_back() {
         let config = Config::from_toml_str("[spellcheck]\nunderline_color = \"not-a-colour\"\n")
             .expect("parse");
+        assert_eq!(config.spellcheck.underline_color, "#d19a66");
+
+        let config =
+            Config::from_toml_str("[spellcheck]\nunderline_color = \"\"\n").expect("empty parse");
         assert_eq!(config.spellcheck.underline_color, "#d19a66");
     }
 

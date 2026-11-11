@@ -91,15 +91,12 @@ two-glyph forms. See `assets/fonts/README.md`.
 
 ```toml
 [spellcheck]
-enabled = true            # false removes the underlines from the grid
-autocorrect = true        # false leaves the child shell's autocorrect env unset
-underline_color = "#d19a66"
+enabled = true            # spellcheck overlay
+autocorrect = true        # autocorrect on the shell input line
+underline_color = "#d19a66"   # #rrggbb
 ```
 
-The three keys default to the values above. `enabled = false` removes the
-underlines under misspelled words; `autocorrect = false` only clears the
-autocorrect environment handed to the child shell, so spellchecking still runs
-but the shell is not told to autocorrect what is typed.
+These keys configure the spellcheck overlay for the shell input line.
 
 ## Mouse
 

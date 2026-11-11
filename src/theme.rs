@@ -1,6 +1,6 @@
 //! Color palette and appearance settings.
 
-use crate::config::ThemeConfig;
+use crate::config::{SpellcheckConfig, ThemeConfig};
 use tiny_skia::Color as SkColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +189,7 @@ impl Theme {
     /// colour keeps the current value, which `from_config` starts at the
     /// default `#d19a66`; `Config::validate` already resets bad input, so the
     /// warning here only fires for callers that skip validation.
-    pub fn apply_spellcheck_color(&mut self, config: &crate::config::SpellcheckConfig) {
+    pub fn apply_spellcheck_color(&mut self, config: &SpellcheckConfig) {
         match Rgb::from_hex(&config.underline_color) {
             Some(rgb) => self.spellcheck_underline = rgb,
             None => tracing::warn!(
@@ -262,9 +262,9 @@ mod tests {
     #[test]
     fn spellcheck_colour_comes_from_config() {
         let mut theme = Theme::from_config(&crate::config::ThemeConfig::default());
-        let config = crate::config::SpellcheckConfig {
+        let config = SpellcheckConfig {
             underline_color: "#ff0000".to_string(),
-            ..crate::config::SpellcheckConfig::default()
+            ..SpellcheckConfig::default()
         };
         theme.apply_spellcheck_color(&config);
         assert_eq!(theme.spellcheck_underline, Rgb::new(255, 0, 0));
@@ -274,9 +274,9 @@ mod tests {
     fn invalid_spellcheck_colour_keeps_the_default() {
         let mut theme = Theme::from_config(&crate::config::ThemeConfig::default());
         assert_eq!(theme.spellcheck_underline, Rgb::new(0xD1, 0x9A, 0x66));
-        let config = crate::config::SpellcheckConfig {
+        let config = SpellcheckConfig {
             underline_color: "not-a-colour".to_string(),
-            ..crate::config::SpellcheckConfig::default()
+            ..SpellcheckConfig::default()
         };
         theme.apply_spellcheck_color(&config);
         assert_eq!(theme.spellcheck_underline, Rgb::new(0xD1, 0x9A, 0x66));

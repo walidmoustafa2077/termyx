@@ -2740,6 +2740,22 @@ mod tests {
     }
 
     #[test]
+    fn underlines_use_the_theme_colour() {
+        let mut renderer = default_renderer();
+        renderer.theme.spellcheck_underline = Rgb::new(1, 2, 3);
+        let snapshot = text_snapshot("ab");
+        let spans = vec![crate::spellcheck::Misspelling {
+            row: 0,
+            col: 0,
+            len: 2,
+        }];
+        render_spellcheck(&mut renderer, &snapshot, &spans);
+
+        // A literal in the painter would paint the default and fail here.
+        assert_eq!(underline_pixel(&renderer, 0), Rgb::new(1, 2, 3));
+    }
+
+    #[test]
     fn underlines_the_shifted_row_when_scrolled() {
         let mut renderer = default_renderer();
         let mut snapshot = text_snapshot("ab");
