@@ -273,6 +273,9 @@ impl App {
     fn open_menu(&mut self) {
         // The panel covers the strip, so no tooltip may hang over it.
         self.clear_tooltip();
+        // The dropdown and the find bar each own the pointer; opening one closes
+        // the other so only a single overlay is on screen.
+        self.close_find();
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
@@ -458,10 +461,11 @@ impl App {
 
     /// Opens the find bar and begins a fresh search over the active tab.
     ///
-    /// The rename editor and the tab menu are both closed first, so the find
-    /// bar is the only overlay on screen.
+    /// The rename editor, the tab menu, and the dropdown are all closed first,
+    /// so the find bar is the only overlay on screen.
     fn start_find(&mut self) {
         self.close_tab_menu();
+        self.close_menu();
         self.rename = None;
         self.find = Some(FindState::default());
         if let Some(window) = &self.window {
@@ -1735,6 +1739,8 @@ impl App {
                     let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
                     match bar.hit(x, y) {
                         FindHit::Close => {
+                            self.press_in_chrome = true;
+                            self.mouse_down = false;
                             self.close_find();
                             return false;
                         }
