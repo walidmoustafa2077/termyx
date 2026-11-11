@@ -1,12 +1,24 @@
 [CmdletBinding()]
 param(
-    [string]$ModuleSource = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx'),
-    [string]$ModuleRoot = (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Modules'),
-    [string]$ProfilePath = (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+    [string]$ModuleSource,
+    [string]$ModuleRoot,
+    [string]$ProfilePath,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Windows PowerShell 5.1 does not populate $PSScriptRoot while parameter
+# defaults are bound, so the defaults are resolved here instead.
+if (-not $ModuleSource) {
+    $ModuleSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx'
+}
+if (-not $ModuleRoot) {
+    $ModuleRoot = Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Modules'
+}
+if (-not $ProfilePath) {
+    $ProfilePath = Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'
+}
 
 $importLine = 'if (Get-Module -ListAvailable Termyx) { Import-Module Termyx }'
 $destination = Join-Path $ModuleRoot 'Termyx'

@@ -918,6 +918,41 @@ Describe 'Install script' {
         $after = [System.IO.File]::ReadAllBytes($narrowProfile)
         [System.Convert]::ToBase64String($after) | Should -Be ([System.Convert]::ToBase64String($before))
     }
+
+    It 'resolves its own defaults when no paths are given' {
+        # Windows PowerShell 5.1 leaves $PSScriptRoot empty while parameter
+        # defaults bind, so the installer resolves its defaults inside the
+        # script body. A child process with a sandboxed USERPROFILE proves the
+        # real defaults without touching the real profile.
+        $fakeHome = Join-Path $script:sandbox 'fakehome'
+        New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
+
+        $childScript = Join-Path $script:sandbox 'install-defaults.ps1'
+        ('& ''' + $script:installer + '''') | Set-Content -LiteralPath $childScript -Encoding ASCII
+
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = 'powershell.exe'
+        $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $childScript + '"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables['USERPROFILE'] = $fakeHome
+
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $process.StandardOutput.ReadToEnd() | Out-Null
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+
+        $process.ExitCode | Should -Be 0
+        $stderr | Should -BeNullOrEmpty
+
+        $defaultRoot = Join-Path $fakeHome 'Documents\WindowsPowerShell\Modules\Termyx'
+        (Test-Path -LiteralPath $defaultRoot) | Should -BeTrue
+        @(Get-ChildItem -LiteralPath $defaultRoot -Directory).Count | Should -Be 1
+
+        $defaultProfile = Join-Path $fakeHome 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'
+        (Get-Content -LiteralPath $defaultProfile -Raw).Contains('Import-Module Termyx') | Should -BeTrue
+    }
 }
 
 Describe 'Engine cache recovery' {
