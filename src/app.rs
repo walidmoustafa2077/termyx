@@ -366,30 +366,64 @@ impl App {
 
     /// Performs one of the tab context menu's commands on `target`.
     ///
-    /// Only the color change is wired so far; a later task extends the match,
-    /// so every other command still does nothing and the caller keeps the
-    /// window open.
+    /// `target` is the tab the menu opened over, passed in because the menu is
+    /// already closed by the time this runs. The returned `bool` is whether the
+    /// window should exit, which only the close commands can trigger.
     fn run_tab_command(&mut self, target: SessionId, command: TabCommand) -> bool {
+        let Some(index) = self.tabs.position(target) else {
+            return false;
+        };
         match command {
             TabCommand::ChangeColor(color) => {
-                if let Some(index) = self.tabs.position(target) {
-                    let id = self.tabs[index].id;
-                    if self.tabs.set_color(id, color) {
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                if self.tabs.set_color(target, color) {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
                 false
             }
-            _ => false,
+            TabCommand::Rename => {
+                self.start_rename(target);
+                false
+            }
+            TabCommand::Duplicate => {
+                if let Err(err) = self.duplicate_tab(target) {
+                    tracing::warn!(%err, "could not duplicate tab");
+                }
+                false
+            }
+            // Rows are disabled until panes and multi-window sessions exist.
+            TabCommand::Split | TabCommand::MoveToNewWindow => false,
+            TabCommand::MoveLeft => {
+                if index > 0 {
+                    self.tabs.move_tab(index, index - 1);
+                    self.rebuild_layout();
+                }
+                false
+            }
+            TabCommand::MoveRight => {
+                if index + 1 < self.tabs.len() {
+                    self.tabs.move_tab(index, index + 1);
+                    self.rebuild_layout();
+                }
+                false
+            }
+            TabCommand::ExportText => {
+                self.export_text();
+                false
+            }
+            TabCommand::Find => {
+                self.start_find();
+                false
+            }
+            TabCommand::CloseOtherTabs => self.close_other_tabs(target),
+            TabCommand::CloseTabsToRight => self.close_tabs_to_right(target),
+            TabCommand::CloseTab => self.close_tab(index),
         }
     }
 
     /// Begins editing the title of the tab `id` inline, seeding the editor with
     /// the tab's current title so Enter without edits keeps the name.
-    // The context-menu `Rename` arm that calls this lands in a later task.
-    #[allow(dead_code)]
     fn start_rename(&mut self, id: SessionId) {
         let Some(index) = self.tabs.position(id) else {
             return;
@@ -889,8 +923,6 @@ impl App {
     ///
     /// A page tab has no profile to spawn, so it is left as it is. A failed
     /// spawn leaves the window unchanged, like any other new tab.
-    // The context menu's duplicate row calls this in a later task.
-    #[allow(dead_code)]
     fn duplicate_tab(&mut self, id: SessionId) -> anyhow::Result<()> {
         let Some((profile, color, title, locked)) = duplicate_source(&self.tabs, id) else {
             return Ok(());
@@ -912,8 +944,6 @@ impl App {
     ///
     /// The target stays open, so the set is never emptied; the `false` return
     /// means the window stays open, like [`App::close_tab`]'s non-empty case.
-    // The context menu's close-others row calls this in a later task.
-    #[allow(dead_code)]
     fn close_other_tabs(&mut self, id: SessionId) -> bool {
         while self.tabs.len() > 1 {
             let Some(current) = self.tabs.position(id) else {
@@ -933,8 +963,6 @@ impl App {
     ///
     /// The target stays open even when it is the last tab; the `false` return
     /// means the window stays open.
-    // The context menu's close-right row calls this in a later task.
-    #[allow(dead_code)]
     fn close_tabs_to_right(&mut self, id: SessionId) -> bool {
         let Some(target) = self.tabs.position(id) else {
             return false;
@@ -2294,8 +2322,6 @@ impl App {
 
     /// Saves the active tab's scrollback and viewport to a text file the user
     /// picks. Cancelling the dialog or having no tab leaves the window as is.
-    // The context menu's export row calls this in Task 10.
-    #[allow(dead_code)]
     fn export_text(&mut self) {
         let Some(session) = self.tabs.active() else {
             return;
@@ -4674,5 +4700,85 @@ mod tests {
         let (changed, window) = route_title(&mut tabs, background, "build");
         assert!(!changed, "a repeated label must cost no rebuild or repaint");
         assert!(!window);
+    }
+
+    #[test]
+    fn every_command_has_a_row_and_disabled_states_match_the_edges() {
+        use crate::ui::context_menu::ContextItem;
+        use crate::ui::tab_menu;
+
+        fn flatten<'a>(rows: &'a [ContextItem], out: &mut Vec<&'a ContextItem>) {
+            for row in rows {
+                out.push(row);
+                flatten(&row.children, out);
+            }
+        }
+
+        fn enabled(items: &[&ContextItem], label: &str) -> bool {
+            items
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("no row labelled `{label}` in the tab menu"))
+                .enabled
+        }
+
+        let colors = [Rgb::new(16, 32, 64); 8];
+
+        // The left edge of two tabs: every command is reachable, and only the
+        // rows that move or close leftward — or are placeholder features — are
+        // disabled.
+        let rows = tab_menu::rows(0, 2, true, &colors);
+        let mut items = Vec::new();
+        flatten(&rows, &mut items);
+        let commands: Vec<TabCommand> = items.iter().filter_map(|item| item.command).collect();
+
+        for expected in [
+            TabCommand::ChangeColor(Some(colors[0])),
+            TabCommand::ChangeColor(None),
+            TabCommand::Rename,
+            TabCommand::Duplicate,
+            TabCommand::Split,
+            TabCommand::MoveToNewWindow,
+            TabCommand::MoveLeft,
+            TabCommand::MoveRight,
+            TabCommand::ExportText,
+            TabCommand::Find,
+            TabCommand::CloseOtherTabs,
+            TabCommand::CloseTabsToRight,
+            TabCommand::CloseTab,
+        ] {
+            assert!(
+                commands.contains(&expected),
+                "no row runs {expected:?}; every `TabCommand` needs a row in `ui::tab_menu::rows`"
+            );
+        }
+
+        for label in ["Split tab", "Move tab to new window", "Move left"] {
+            assert!(
+                !enabled(&items, label),
+                "`{label}` must be disabled at index 0 of 2"
+            );
+        }
+        for label in ["Move right", "Close tabs to right", "Close other tabs"] {
+            assert!(
+                enabled(&items, label),
+                "`{label}` must be enabled at index 0 of 2"
+            );
+        }
+
+        // The right edge of two tabs, and a page tab cannot duplicate.
+        let rows = tab_menu::rows(1, 2, false, &colors);
+        let mut items = Vec::new();
+        flatten(&rows, &mut items);
+        for label in ["Move right", "Close tabs to right", "Duplicate tab"] {
+            assert!(
+                !enabled(&items, label),
+                "`{label}` must be disabled at index 1 of 2 with a page tab"
+            );
+        }
+        assert!(
+            enabled(&items, "Move left"),
+            "`Move left` must be enabled at index 1 of 2"
+        );
     }
 }
