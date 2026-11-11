@@ -62,7 +62,7 @@ pub enum PaletteCommand {
 
 pub struct PaletteRow {
     pub label: String,
-    pub shortcut: String,
+    pub shortcut: &'static str,
     pub command: PaletteCommand,
 }
 ```
@@ -86,9 +86,9 @@ column stays empty.
 
 ### Catalog order
 
-Profiles in configured order (with the default profile's row carrying the
-`Ctrl+Shift+T` hint), then tab commands in menu order, then Settings, Find,
-Export text, About. With an empty query this is the displayed order.
+Profiles in configured order (the first five carry their `Ctrl+Shift+1` .. `5`
+hint), then tab commands in menu order, then Settings, Find, Export text, About.
+With an empty query this is the displayed order.
 
 ### Availability
 
@@ -120,7 +120,7 @@ matches everything with score 0.
 
 ### Rendering
 
-`palette_text(config, context, cols, rows)` emits, after `RESET_SCREEN`:
+`Palette::text(config, cols, rows)` emits, after `RESET_SCREEN`:
 
 1. bold `Command palette`
 2. blank
@@ -147,9 +147,11 @@ Empty result set: dim `No matching commands` in place of the rows.
   active tab is the palette itself, in which case the stored target is kept.
 - `palette_target: Option<SessionId>` is captured before the palette tab opens,
   so Enter knows which tab to act on.
-- Enter: read the command, close the palette tab, then dispatch. Closing first
-  restores the origin tab as active, so Next tab, Previous tab, and Find behave
-  as if the palette had never been there.
+- Enter: read the command, close the palette tab, re-select the origin tab
+  explicitly, then dispatch. Closing alone activates the tab to the left of the
+  palette, not the origin, so `focus_palette_target` selects the captured tab
+  before anything runs. Next tab, Previous tab, Find, and Export text therefore
+  behave as if the palette had never been there.
 - Escape closes the palette tab, as pages already do.
 - Typing, Backspace, and Up/Down keep the existing `page_key` paths, now backed
   by `Palette` instead of the old fields.
@@ -163,21 +165,23 @@ Empty result set: dim `No matching commands` in place of the rows.
 | `DuplicateTab` | `run_tab_command(target, TabCommand::Duplicate)` |
 | `MoveTabLeft` / `MoveTabRight` | `run_tab_command(target, TabCommand::MoveLeft / MoveRight)` |
 | `CloseOtherTabs` / `CloseTabsToRight` | `run_tab_command` with the matching variant |
-| `NextTab` / `PreviousTab` | `cycle_tab(1)` / `cycle_tab(-1)` after the close |
+| `NextTab` / `PreviousTab` | `cycle_tab(1)` / `cycle_tab(-1)` after the origin is re-selected |
 | `Settings`, `About` | `open_page(PageKind::Settings / About)` |
 | `Find` | `start_find()` |
 | `ExportText` | `export_text()` |
 
 `run_tab_command` already returns `false` when the target is gone and already
 guards the move edges, so the dispatch layer only needs to log at debug when
-there is no target. The palette never writes config, never sends PTY bytes, and
-never starts a shell except through `Profile`.
+there is no target. The re-selection runs before dispatch so tab-relative
+commands see the origin. The palette never writes config, never sends PTY bytes,
+and never starts a shell except through `Profile`.
 
 ## Page changes
 
 `Page` drops `PageAction`, `PaletteEntry`, and `selected_action`; it gains a
-`palette: Palette` field, `palette_command(config, context)` for Enter, and
-delegates `palette_text` to `palette::Palette`. The app stops mapping through
+`palette: Palette` field, `palette_command(config)` for Enter (reading the
+context stored by `set_palette_context`), and delegates `palette_text` to
+`palette::Palette::text`. The app stops mapping through
 `palette_action(PageAction)`. Leaving the old types in place would fail
 `clippy -D warnings` as dead code.
 
@@ -213,9 +217,11 @@ delegates `palette_text` to `palette::Palette`. The app stops mapping through
 `src/app.rs` tests:
 
 - `Ctrl+Shift+P` is recognised and does not reach the PTY.
-- Dispatch with a target runs the tab command against that tab, not the active
-  palette.
-- Opening the palette twice reuses the tab and recaptures the target.
+
+Dispatch against the captured tab and palette-tab reuse are covered by manual
+verification: `App` needs a live winit `EventLoopProxy`, and this repo's app
+tests never construct one. The dispatch code stays a thin wrapper over
+`run_tab_command`, whose targeting is already unit-tested through `TabSet`.
 
 ## Manual verification
 
