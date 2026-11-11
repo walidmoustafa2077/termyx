@@ -180,10 +180,6 @@ fn corner_coverage(
     hits as f32 / (CORNER_SAMPLES * CORNER_SAMPLES) as f32
 }
 
-/// Placeholder underline colour until Task 4 wires `[spellcheck] underline_color`
-/// through `Theme`.
-const SPELLCHECK_UNDERLINE: Rgb = Rgb::new(0xD1, 0x9A, 0x66);
-
 impl Renderer {
     /// Builds a renderer with a one-pixel surface.
     ///
@@ -1000,7 +996,7 @@ impl Renderer {
                     y,
                     cell_w,
                     thickness,
-                    SPELLCHECK_UNDERLINE,
+                    self.theme.spellcheck_underline,
                 );
             }
         }
@@ -2723,12 +2719,12 @@ mod tests {
 
         assert_eq!(
             underline_pixel(&renderer, 0),
-            SPELLCHECK_UNDERLINE,
+            renderer.theme.spellcheck_underline,
             "the span must paint the bottom of its first cell"
         );
         assert_eq!(
             underline_pixel(&renderer, 1),
-            SPELLCHECK_UNDERLINE,
+            renderer.theme.spellcheck_underline,
             "the span must cover its second cell too"
         );
         // Only the bottom band is painted, not the whole cell.
@@ -2738,7 +2734,7 @@ mod tests {
                 renderer.padding as f32 + 1.0,
                 renderer.grid_top() + renderer.fonts.cell_h as f32 / 2.0,
             ),
-            SPELLCHECK_UNDERLINE,
+            renderer.theme.spellcheck_underline,
             "the middle of the cell must stay undecorated"
         );
     }
@@ -2768,7 +2764,7 @@ mod tests {
         let cell_h = renderer.fonts.cell_h as f32;
         assert_eq!(
             pixel_at(&renderer, x, renderer.grid_top() + 2.0 * cell_h - 1.0),
-            SPELLCHECK_UNDERLINE,
+            renderer.theme.spellcheck_underline,
             "the shifted span must paint the second visible row"
         );
         assert_eq!(
@@ -2814,8 +2810,14 @@ mod tests {
         render_spellcheck(&mut renderer, &snapshot, &spans);
 
         assert_eq!(underline_pixel(&renderer, 0), renderer.theme.background);
-        assert_eq!(underline_pixel(&renderer, 1), SPELLCHECK_UNDERLINE);
-        assert_eq!(underline_pixel(&renderer, 2), SPELLCHECK_UNDERLINE);
+        assert_eq!(
+            underline_pixel(&renderer, 1),
+            renderer.theme.spellcheck_underline
+        );
+        assert_eq!(
+            underline_pixel(&renderer, 2),
+            renderer.theme.spellcheck_underline
+        );
         assert_eq!(underline_pixel(&renderer, 3), renderer.theme.background);
     }
 

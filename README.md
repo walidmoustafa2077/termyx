@@ -87,6 +87,20 @@ then Kawkab Mono. A face is accepted when it covers Arabic and shapes `لا`
 with contextual forms, either as a single lam-alef ligature or as connected
 two-glyph forms. See `assets/fonts/README.md`.
 
+## Spellcheck
+
+```toml
+[spellcheck]
+enabled = true            # false removes the underlines from the grid
+autocorrect = true        # false leaves the child shell's autocorrect env unset
+underline_color = "#d19a66"
+```
+
+The three keys default to the values above. `enabled = false` removes the
+underlines under misspelled words; `autocorrect = false` only clears the
+autocorrect environment handed to the child shell, so spellchecking still runs
+but the shell is not told to autocorrect what is typed.
+
 ## Mouse
 
 - Drag to select text; double-click selects a word and triple-click selects the

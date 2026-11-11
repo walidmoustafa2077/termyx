@@ -664,7 +664,8 @@ impl App {
             scaled_font_size(self.config.font.size, window.scale_factor()),
             self.config.font.line_height,
         )?;
-        let theme = Theme::from_config(&self.config.theme);
+        let mut theme = Theme::from_config(&self.config.theme);
+        theme.apply_spellcheck_color(&self.config.spellcheck);
         let mut renderer = Renderer::new(
             fonts,
             theme,
