@@ -176,9 +176,10 @@ pub struct Terminal {
     input_start: Option<InputStart>,
 }
 
-/// A malformed OSC with no terminator must not swallow output forever: past
-/// this many held-back bytes the sequence is handed to the parser, which caps
-/// its own OSC buffer exactly as it does without the mark scanner.
+/// Past this many held-back bytes the buffer is handed to the parser and our
+/// copy is released, so Termyx's retained bytes stay bounded even when an OSC
+/// never gets its terminator. The parser then owns those bytes, as it does for
+/// any OSC sequence.
 const MAX_PENDING: usize = 4096;
 
 impl Terminal {
@@ -186,6 +187,12 @@ impl Terminal {
     #[cfg(test)]
     pub fn new(cols: usize, rows: usize, scrollback: usize) -> Self {
         Self::new_with_events(cols, rows, scrollback, None)
+    }
+
+    /// Test-only view of the bytes held back for an unterminated OSC.
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     pub fn new_with_events(
@@ -1147,10 +1154,14 @@ mod tests {
     }
 
     #[test]
-    fn a_runaway_osc_does_not_swallow_later_output() {
+    fn a_runaway_osc_keeps_the_pending_buffer_bounded() {
         let mut term = Terminal::new(80, 24, 100);
         term.feed(b"\x1b]133;A");
         term.feed(&vec![b'x'; MAX_PENDING * 2]);
+        let pending = term.pending_len();
+        assert!(pending <= MAX_PENDING, "pending grew to {pending} bytes");
+
+        // Sanity check only: terminating the sequence lets later output through.
         term.feed(b"\x07ok");
         let snapshot = term.snapshot();
         assert_eq!(snapshot.lines[0].cells[0].text, "o");
