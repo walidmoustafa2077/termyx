@@ -240,6 +240,8 @@ else {
 
         $wordList = Join-Path $script:TermyxRoot 'assets\en_US.wordlist.txt'
         [Termyx.Corrector]::Initialize($wordList, $script:TermyxUserWordsPath)
+        $frequencyList = Join-Path $script:TermyxRoot 'assets\en_US.frequency.txt'
+        [Termyx.Corrector]::LoadFrequencyFile($frequencyList)
         Update-TermyxCommandCache
 
         $installHandler = $true

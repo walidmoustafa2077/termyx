@@ -11,6 +11,7 @@ namespace Termyx
 
         private static HashSet<string> _words = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<int, string[]> _wordsByLength = new Dictionary<int, string[]>();
+        private static Dictionary<string, int> _frequency = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, string> _wordCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, string> _commandCanonical = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, string> _commandCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -27,8 +28,46 @@ namespace Termyx
             {
                 _words = words;
                 _wordsByLength = BuildLengthIndex(words);
+                _frequency = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 _wordCache.Clear();
             }
+        }
+
+        public static void LoadFrequencyFile(string path)
+        {
+            Dictionary<string, int> ranks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                int rank = 0;
+                using (StreamReader reader = new StreamReader(path))
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        line = line.Trim();
+                        if (line.Length == 0 || line[0] == '#') continue;
+
+                        int space = line.IndexOf(' ');
+                        string word = space < 0 ? line : line.Substring(0, space);
+                        if (word.Length == 0 || ranks.ContainsKey(word)) continue;
+
+                        ranks[word] = rank;
+                        rank++;
+                    }
+                }
+            }
+
+            lock (Sync)
+            {
+                _frequency = ranks;
+                _wordCache.Clear();
+            }
+        }
+
+        public static int FrequencyCount
+        {
+            get { lock (Sync) { return _frequency.Count; } }
         }
 
         public static bool IsKnownWord(string word)
@@ -66,7 +105,7 @@ namespace Termyx
             Dictionary<int, string[]> index;
             lock (Sync) { index = _wordsByLength; }
 
-            string found = SuggestFromIndex(index, word.ToLowerInvariant(), maxDistance, MaxDistanceTwoLength);
+            string found = SuggestFromIndex(index, word.ToLowerInvariant(), maxDistance, MaxDistanceTwoLength, true);
             lock (Sync) { _wordCache[key] = found == null ? string.Empty : found; }
 
             if (found == null) return null;
@@ -239,7 +278,7 @@ namespace Termyx
             return index;
         }
 
-        private static string SuggestFromIndex(Dictionary<int, string[]> index, string lowerWord, int maxDistance, int distanceTwoMaxLength)
+        private static string SuggestFromIndex(Dictionary<int, string[]> index, string lowerWord, int maxDistance, int distanceTwoMaxLength, bool breakTiesByFrequency)
         {
             if (index.Count == 0) return null;
 
@@ -255,6 +294,7 @@ namespace Termyx
 
             int wordLength = lowerWord.Length;
 
+            List<string> oneEdit = breakTiesByFrequency ? new List<string>() : null;
             int countOne = 0;
             string foundOne = null;
             for (int length = wordLength - 1; length <= wordLength + 1; length++)
@@ -267,14 +307,28 @@ namespace Termyx
                     if (BoundedDistance(lowerWord, candidate, 1, row0, row1, row2) != 1) continue;
 
                     countOne++;
-                    if (countOne > 1) return null;
                     foundOne = candidate;
+                    if (breakTiesByFrequency)
+                    {
+                        oneEdit.Add(candidate);
+                    }
+                    else if (countOne > 1)
+                    {
+                        return null;
+                    }
                 }
             }
 
             if (countOne == 1) return foundOne.ToLowerInvariant();
+            if (countOne > 1)
+            {
+                string bestOne = PickMostFrequent(oneEdit, wordLength);
+                return bestOne == null ? null : bestOne.ToLowerInvariant();
+            }
+
             if (maxDistance < 2 || wordLength > distanceTwoMaxLength) return null;
 
+            List<string> twoEdit = breakTiesByFrequency ? new List<string>() : null;
             int countTwo = 0;
             string foundTwo = null;
             for (int length = wordLength - 2; length <= wordLength + 2; length++)
@@ -287,13 +341,57 @@ namespace Termyx
                     if (BoundedDistance(lowerWord, candidate, 2, row0, row1, row2) != 2) continue;
 
                     countTwo++;
-                    if (countTwo > 1) return null;
                     foundTwo = candidate;
+                    if (breakTiesByFrequency)
+                    {
+                        twoEdit.Add(candidate);
+                    }
+                    else if (countTwo > 1)
+                    {
+                        return null;
+                    }
                 }
             }
 
             if (countTwo == 1) return foundTwo.ToLowerInvariant();
+            if (countTwo > 1)
+            {
+                string bestTwo = PickMostFrequent(twoEdit, wordLength);
+                return bestTwo == null ? null : bestTwo.ToLowerInvariant();
+            }
             return null;
+        }
+
+        private static string PickMostFrequent(List<string> candidates, int tokenLength)
+        {
+            if (candidates == null || candidates.Count == 0) return null;
+
+            // Deleting a letter is the most destructive correction, so a candidate that is
+            // at least as long as the typed word wins before any shorter one is considered.
+            List<string> preferred = new List<string>();
+            foreach (string candidate in candidates)
+            {
+                if (candidate.Length >= tokenLength) preferred.Add(candidate);
+            }
+            if (preferred.Count == 0) preferred = candidates;
+
+            Dictionary<string, int> ranks;
+            lock (Sync) { ranks = _frequency; }
+            if (ranks.Count == 0) return null;
+
+            string best = null;
+            int bestRank = int.MaxValue;
+            foreach (string candidate in preferred)
+            {
+                int rank;
+                if (!ranks.TryGetValue(candidate, out rank)) continue;
+                if (rank < bestRank)
+                {
+                    bestRank = rank;
+                    best = candidate;
+                }
+            }
+            return best;
         }
 
         private static int BoundedDistance(string a, string b, int max, int[] row0, int[] row1, int[] row2)

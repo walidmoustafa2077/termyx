@@ -7,13 +7,15 @@ Press Space after a word and Termyx fixes it in place:
 - cmdlet and alias typos (`Get-ChldItem` -> `Get-ChildItem`)
 - parameter typos (`-Reurse` -> `-Recurse`)
 - misspelled bare arguments (`Write-Host helllo` -> `Write-Host hello`,
-  `cd Documnets` -> `cd Documents`)
+  `cd Documnets` -> `cd Documents`, `Write-Host teh` -> `Write-Host the`)
 
 Quoted strings, comments, paths, URLs, numbers, variables, and hyphenated arguments
 are never touched. A fix is applied only when exactly one dictionary or command
-candidate is closest; a typo with several equally close words (`helo`, `teh`,
-`recieve`) is left alone by design. Every fix is silent and a single `Ctrl+Z`
-undoes it.
+candidate is closest. When several argument words are equally close, the most
+frequent English word wins (`teh` -> `the`, `aer` -> `are`, `recieve` ->
+`receive`), and a candidate that would delete a letter only wins if nothing else
+is close. Commands and parameters stay strict: a tie there is always left alone.
+Every fix is silent and a single `Ctrl+Z` undoes it.
 
 ## Requirements
 
@@ -125,8 +127,8 @@ Run this after installing, in both Windows Terminal and the legacy console host:
    path and the space are inserted unchanged.
 8. Type `Get-ChildItem -Reurse` and press Space. It becomes `-Recurse`.
 9. Type `cd Documnets` and press Space. It becomes `cd Documents `.
-10. Type `Write-Host helo` and press Space. No correction is made: several words
-    are equally close, so the tie is left alone by design.
+10. Type `Write-Host teh` and press Space. It becomes `Write-Host the `: several
+    words are equally close, so the most frequent one wins.
 11. Run `Get-PSReadLineKeyHandler -Bound | Where-Object { $_.Key -eq 'Spacebar' }`.
     The `Spacebar` entry must show `CustomAction`.
 12. Run `Disable-TermyxAutocorrect`, type a typo, press Space. No
@@ -150,6 +152,19 @@ keeps lowercase alphabetic entries, sorts them ordinally, and rewrites the commi
 list. Because `main` is a moving branch, a later rebuild may not reproduce the
 committed asset byte-for-byte, and its word count can change. Users never need the
 network.
+
+`Termyx\assets\en_US.frequency.txt` holds 46,717 lowercase words in descending
+frequency order and decides ties between equally close argument candidates. It is
+generated with:
+
+```powershell
+.\tools\Build-FrequencyList.ps1
+```
+
+The source is the English subtitle frequency list from the `hermitdave/FrequencyWords`
+project (`content/2018/en/en_50k.txt`, CC BY-SA 4.0), filtered to lowercase alphabetic
+words and deduplicated. Frequency only ranks candidates that already exist in the word
+list; it never invents a word.
 
 ## Development
 

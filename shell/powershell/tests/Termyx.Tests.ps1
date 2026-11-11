@@ -649,6 +649,8 @@ Describe 'Committed dictionary behavior' {
 
         $script:committedWordList = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\assets\en_US.wordlist.txt'
         [Termyx.Corrector]::Initialize($script:committedWordList, $null)
+        $script:committedFrequencyList = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\assets\en_US.frequency.txt'
+        [Termyx.Corrector]::LoadFrequencyFile($script:committedFrequencyList)
         [Termyx.Corrector]::SetCommands(@('Get-ChildItem', 'Write-Host', 'Set-Location'))
 
         & (Get-Module Termyx) {
@@ -683,12 +685,13 @@ Describe 'Committed dictionary behavior' {
         [Termyx.Corrector]::WordCount | Should -Be 87928
     }
 
-    It 'leaves a documented tie alone against the committed word list' {
-        $line = 'Write-Host helo'
+    It 'breaks an argument tie with the most frequent candidate' {
+        $line = 'Write-Host teh'
         $r = Invoke-TermyxCommittedDecisionForTest -Line $line -Cursor $line.Length
-        $r.ShouldApply | Should -BeFalse
-        $r.Reason | Should -Be 'NoCandidate'
-        $r.NewLine | Should -Be $line
+        $r.ShouldApply | Should -BeTrue
+        $r.Kind | Should -Be 'Argument'
+        $r.NewLine | Should -Be 'Write-Host the'
+        [Termyx.Corrector]::FrequencyCount | Should -Be 46717
     }
 }
 
@@ -1008,5 +1011,49 @@ Describe 'Engine cache recovery' {
         $stdout | Should -Match 'words=87928'
         $stdout | Should -Match 'error='
         $stderr | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Frequency ranked suggestions' {
+    BeforeEach {
+        $script:freqWords = Join-Path $TestDrive 'freq-words.txt'
+        Set-Content -LiteralPath $script:freqWords -Value @('hello', 'halo', 'hell', 'help', 'the', 'teh', 'are', 'ear', 'era')
+        [Termyx.Corrector]::Initialize($script:freqWords, $null)
+    }
+
+    AfterEach {
+        [Termyx.Corrector]::Initialize($script:freqWords, $null)
+    }
+
+    It 'picks the most frequent candidate when several are one edit away' {
+        $ranks = Join-Path $TestDrive 'freq-ranks.txt'
+        Set-Content -LiteralPath $ranks -Value @('the', 'hello', 'are', 'ear', 'era', 'halo', 'help', 'hell')
+        [Termyx.Corrector]::LoadFrequencyFile($ranks)
+
+        [Termyx.Corrector]::SuggestWord('helo', 1) | Should -Be 'hello'
+    }
+
+    It 'preserves the typed casing when a frequency winner is chosen' {
+        $ranks = Join-Path $TestDrive 'freq-ranks.txt'
+        Set-Content -LiteralPath $ranks -Value @('the', 'hello', 'are', 'ear', 'era', 'halo', 'help', 'hell')
+        [Termyx.Corrector]::LoadFrequencyFile($ranks)
+
+        [Termyx.Corrector]::SuggestWord('Helo', 1) | Should -Be 'Hello'
+    }
+
+    It 'leaves the tie alone when no candidate has a frequency rank' {
+        [Termyx.Corrector]::LoadFrequencyFile('')
+
+        [Termyx.Corrector]::SuggestWord('helo', 1) | Should -BeNullOrEmpty
+        [Termyx.Corrector]::FrequencyCount | Should -Be 0
+    }
+
+    It 'keeps command ties strict even when both candidates are ranked' {
+        [Termyx.Corrector]::SetCommands(@('alpha', 'alphi'))
+        $ranks = Join-Path $TestDrive 'freq-ranks.txt'
+        Set-Content -LiteralPath $ranks -Value @('alpha', 'alphi')
+        [Termyx.Corrector]::LoadFrequencyFile($ranks)
+
+        [Termyx.Corrector]::SuggestCommand('alphx', 1) | Should -BeNullOrEmpty
     }
 }
