@@ -2731,6 +2731,51 @@ mod tests {
             SPELLCHECK_UNDERLINE,
             "the span must cover its second cell too"
         );
+        // Only the bottom band is painted, not the whole cell.
+        assert_ne!(
+            pixel_at(
+                &renderer,
+                renderer.padding as f32 + 1.0,
+                renderer.grid_top() + renderer.fonts.cell_h as f32 / 2.0,
+            ),
+            SPELLCHECK_UNDERLINE,
+            "the middle of the cell must stay undecorated"
+        );
+    }
+
+    #[test]
+    fn underlines_the_shifted_row_when_scrolled() {
+        let mut renderer = default_renderer();
+        let mut snapshot = text_snapshot("ab");
+        let second = RowSnapshot {
+            cells: snapshot.lines[0].cells.clone(),
+            wrapped: false,
+        };
+        snapshot.lines.push(second);
+        snapshot.rows = 2;
+        snapshot.display_offset = 1;
+
+        let spans = vec![crate::spellcheck::Misspelling {
+            row: 0,
+            col: 0,
+            len: 2,
+        }];
+        render_spellcheck(&mut renderer, &snapshot, &spans);
+
+        // The span's line 0 is one row up in history, so it must land on the
+        // second visible row once the offset is added.
+        let x = renderer.padding as f32 + 1.0;
+        let cell_h = renderer.fonts.cell_h as f32;
+        assert_eq!(
+            pixel_at(&renderer, x, renderer.grid_top() + 2.0 * cell_h - 1.0),
+            SPELLCHECK_UNDERLINE,
+            "the shifted span must paint the second visible row"
+        );
+        assert_eq!(
+            pixel_at(&renderer, x, renderer.grid_top() + cell_h - 1.0),
+            renderer.theme.background,
+            "the first visible row must stay clean"
+        );
     }
 
     #[test]

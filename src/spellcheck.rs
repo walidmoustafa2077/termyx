@@ -18,6 +18,14 @@ const FREQUENCY_LIST: &str = include_str!(concat!(
 const MIN_TOKEN_LEN: usize = 3;
 const MAX_DISTANCE_ONE_TOKEN: usize = 6;
 
+/// One misspelled span, positioned on the grid.
+///
+/// `row` is a grid line where `0` is the top of the live screen and negative
+/// values are history, the same coordinate `term::Match` uses. `scan` always
+/// returns `0` because it sees one row; the caller assigns the line. The
+/// renderer adds `snapshot.display_offset` before indexing
+/// `GridSnapshot::lines`. `col` and `len` are logical cell columns within that
+/// line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Misspelling {
     pub row: usize,
