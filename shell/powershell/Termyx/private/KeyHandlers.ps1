@@ -29,6 +29,20 @@ function Get-TermyxSpaceHandler {
     }
 }
 
+function Write-TermyxVerboseLog {
+    param([string]$Line, $Result)
+
+    # Verbose logging is best effort. It must never throw into the key handler:
+    # an exception here would abort before the handler reports that it consumed
+    # the key, and the wrapper would append a second space.
+    try {
+        $entry = [datetime]::Now.ToString('s') + ' ' + $Result.Kind + ' ' + $Result.Reason + ': ' + $Line + ' -> ' + $Result.NewLine
+        Add-Content -LiteralPath $script:TermyxLogPath -Value $entry -Encoding ASCII -ErrorAction Stop
+    }
+    catch {
+    }
+}
+
 function Invoke-TermyxSpaceKeyPress {
     $line = $null
     $cursor = 0
@@ -65,9 +79,10 @@ function Invoke-TermyxSpaceKeyPress {
     }
 
     if ($script:TermyxOptions.VerboseCorrections) {
-        $entry = [datetime]::Now.ToString('s') + ' ' + $result.Kind + ' ' + $result.Reason + ': ' + $line + ' -> ' + $result.NewLine
-        Add-Content -LiteralPath $script:TermyxLogPath -Value $entry -Encoding ASCII
+        Write-TermyxVerboseLog -Line $line -Result $result
     }
 
+    # The return value is decided before any logging concerns: the wrapper uses
+    # it to know whether the keypress was already consumed.
     return $true
 }

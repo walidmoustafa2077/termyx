@@ -67,7 +67,29 @@ function Initialize-TermyxEngine {
         $script:TermyxEngineSource = 'cached'
     }
 
-    Add-Type -Path $dll
+    try {
+        Add-Type -Path $dll
+    }
+    catch {
+        # A cached DLL can be truncated or otherwise invalid while its hash
+        # sidecar still matches the source. Delete the whole cache and
+        # recompile once; a failed recompile is rethrown to the caller.
+        if (Test-Path -LiteralPath $dll) {
+            Remove-Item -LiteralPath $dll -Force
+        }
+        if (Test-Path -LiteralPath $hashFile) {
+            Remove-Item -LiteralPath $hashFile -Force
+        }
+
+        Add-Type -Path $source -OutputAssembly $dll
+        Set-Content -LiteralPath $hashFile -Value $sourceHash -Encoding ASCII
+        $script:TermyxEngineSource = 'compiled'
+
+        # PowerShell caches a failed Add-Type load by path, so loading the
+        # rebuilt file from the same path would fail again. Load its bytes
+        # instead; the type becomes resolvable exactly like a path load.
+        [void][System.Reflection.Assembly]::Load([System.IO.File]::ReadAllBytes($dll))
+    }
 }
 
 function Update-TermyxCommandCache {

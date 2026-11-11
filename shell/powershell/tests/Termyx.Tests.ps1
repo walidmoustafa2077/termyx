@@ -388,7 +388,8 @@ Describe 'Decision function' {
         $script:decisionFixture = Join-Path $env:TEMP ('termyx-decision-' + [guid]::NewGuid().ToString('N') + '.txt')
         @(
             'the', 'receive', 'running', 'cat', 'cot', 'hello', 'world',
-            'testing', 'powershell', 'file', 'path', 'status', 'commit', 'more'
+            'testing', 'powershell', 'file', 'path', 'status', 'commit', 'more',
+            'botnet'
         ) | Set-Content -LiteralPath $script:decisionFixture -Encoding ASCII
 
         $script:exceptionsFixture = Join-Path $env:TEMP ('termyx-exceptions-' + [guid]::NewGuid().ToString('N') + '.txt')
@@ -439,6 +440,29 @@ Describe 'Decision function' {
             Remove-Item -LiteralPath 'function:global:Get-ChildItm' -ErrorAction SilentlyContinue
             [Termyx.Corrector]::SetCommands(@('Get-ChildItem', 'Get-Content', 'Get-Item', 'Write-Host', 'Set-Location'))
         }
+    }
+
+    It 'protects an argument that is a live command' {
+        # The fixture contains "botnet", so dotnet would otherwise be a unique
+        # one-edit fix. The live-command guard must run for Argument tokens too,
+        # not only for Command tokens.
+        function global:dotnet { }
+        try {
+            $r = Invoke-TermyxDecisionForTest -Line 'Write-Host dotnet' -Cursor 17
+            $r.ShouldApply | Should -BeFalse
+            $r.Reason | Should -Be 'Known'
+            $r.NewLine | Should -Be 'Write-Host dotnet'
+        }
+        finally {
+            Remove-Item -LiteralPath 'function:global:dotnet' -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'still corrects a genuine argument typo with the guard active' {
+        $r = Invoke-TermyxDecisionForTest -Line 'Write-Host helllo' -Cursor 17
+        $r.ShouldApply | Should -BeTrue
+        $r.Kind | Should -Be 'Argument'
+        $r.NewLine | Should -Be 'Write-Host hello'
     }
 
     It 'applies a two-edit command fix only for the first token' {
@@ -561,6 +585,39 @@ Describe 'Decision function' {
         $r.Reason | Should -Be 'Exception'
     }
 
+    It 'never emits an error when the exceptions file cannot be read' {
+        $locked = Join-Path $env:TEMP ('termyx-locked-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $locked -Value 'helo' -Encoding ASCII
+        $handle = [System.IO.File]::Open($locked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        try {
+            & (Get-Module Termyx) {
+                param($path)
+                $script:TermyxExceptionsPath = $path
+                $script:TermyxExceptions = $null
+                $script:TermyxExceptionsTime = $null
+            } $locked
+
+            # Redirect the error stream: an unreadable file must contribute no
+            # error output and no exceptions, and the correction still applies.
+            $captured = @(
+                & (Get-Module Termyx) {
+                    Invoke-TermyxCorrection -Line 'Write-Host helllo' -Cursor 17
+                } 2>&1
+            )
+
+            $errors = @($captured | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+            $errors.Count | Should -Be 0
+
+            $result = @($captured | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })[0]
+            $result.ShouldApply | Should -BeTrue
+            $result.NewLine | Should -Be 'Write-Host hello'
+        }
+        finally {
+            $handle.Close()
+            Remove-Item -LiteralPath $locked -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'honors the SkipWords option' {
         & (Get-Module Termyx) {
             $script:TermyxOptions.SkipWords = @('helo')
@@ -582,6 +639,56 @@ Describe 'Decision function' {
         & (Get-Module Termyx) { $script:TermyxOptions.MaxArgumentDistance = 1 }
         $r = Invoke-TermyxDecisionForTest -Line 'Write-Host hlo' -Cursor 14
         $r.ShouldApply | Should -BeFalse
+    }
+}
+
+Describe 'Committed dictionary behavior' {
+    BeforeAll {
+        $script:moduleManifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\Termyx.psd1'
+        Import-Module $script:moduleManifest -Force -ArgumentList @{ InstallHandler = $false }
+
+        $script:committedWordList = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\assets\en_US.wordlist.txt'
+        [Termyx.Corrector]::Initialize($script:committedWordList, $null)
+        [Termyx.Corrector]::SetCommands(@('Get-ChildItem', 'Write-Host', 'Set-Location'))
+
+        & (Get-Module Termyx) {
+            $script:TermyxEnabled = $true
+            $script:TermyxOptions = @{
+                MaxArgumentDistance = 2
+                SkipWords           = @()
+                VerboseCorrections  = $false
+            }
+            $script:TermyxExceptionsPath = Join-Path $env:TEMP 'termyx-missing-exceptions.txt'
+            $script:TermyxExceptions = $null
+            $script:TermyxExceptionsTime = $null
+            $script:TermyxParameterNameCache = @{}
+            $script:TermyxLiveCommandCache = @{}
+        }
+
+        function Invoke-TermyxCommittedDecisionForTest {
+            param([string]$Line, [int]$Cursor)
+            return & (Get-Module Termyx) {
+                param($l, $c)
+                Invoke-TermyxCorrection -Line $l -Cursor $c
+            } $Line $Cursor
+        }
+    }
+
+    It 'applies a documented correction against the committed word list' {
+        $line = 'Write-Host helllo'
+        $r = Invoke-TermyxCommittedDecisionForTest -Line $line -Cursor $line.Length
+        $r.ShouldApply | Should -BeTrue
+        $r.Kind | Should -Be 'Argument'
+        $r.NewLine | Should -Be 'Write-Host hello'
+        [Termyx.Corrector]::WordCount | Should -Be 87928
+    }
+
+    It 'leaves a documented tie alone against the committed word list' {
+        $line = 'Write-Host helo'
+        $r = Invoke-TermyxCommittedDecisionForTest -Line $line -Cursor $line.Length
+        $r.ShouldApply | Should -BeFalse
+        $r.Reason | Should -Be 'NoCandidate'
+        $r.NewLine | Should -Be $line
     }
 }
 
@@ -646,6 +753,40 @@ Describe 'Module commands' {
         $body = $handler.ToString()
         $body | Should -Match 'SelfInsert\(\s*\$key'
         $body | Should -Not -Match 'SelfInsert\(\s*\)'
+    }
+
+    It 'cannot let a verbose log failure change the handler result' {
+        $handlerBody = (& (Get-Module Termyx) { ${function:Invoke-TermyxSpaceKeyPress} }).ToString()
+        $logCall = $handlerBody.IndexOf('Write-TermyxVerboseLog')
+        $returnTrue = $handlerBody.LastIndexOf('return $true')
+
+        # The log call must happen before the unconditional success return, and
+        # the helper itself must swallow write failures.
+        ($logCall -ge 0) | Should -BeTrue
+        ($returnTrue -gt $logCall) | Should -BeTrue
+
+        $logBody = (& (Get-Module Termyx) { ${function:Write-TermyxVerboseLog} }).ToString()
+        $logBody | Should -Match 'Add-Content'
+        $logBody | Should -Match 'try'
+        $logBody | Should -Match 'catch'
+
+        $originalLogPath = & (Get-Module Termyx) { $script:TermyxLogPath }
+        try {
+            & (Get-Module Termyx) { $script:TermyxLogPath = $env:TEMP }
+            {
+                & (Get-Module Termyx) {
+                    Write-TermyxVerboseLog -Line 'x' -Result ([pscustomobject]@{
+                        Kind = 'Argument'; Reason = 'Corrected'; NewLine = 'y'
+                    })
+                }
+            } | Should -Not -Throw
+        }
+        finally {
+            & (Get-Module Termyx) {
+                param($path)
+                $script:TermyxLogPath = $path
+            } $originalLogPath
+        }
     }
 
     It 'disables and re-enables through Set-TermyxOption' {
@@ -736,5 +877,101 @@ Describe 'Install script' {
         ($remaining -contains '# Import-Module Termyx') | Should -BeTrue
         ($remaining -contains 'Import-Module TermyxHelper') | Should -BeTrue
         ($remaining -contains 'if (Get-Module -ListAvailable Termyx) { Import-Module Termyx }') | Should -BeFalse
+    }
+
+    It 'round-trips a UTF-16LE profile with a trailing newline without a blank line' {
+        $nl = [Environment]::NewLine
+        $importLine = 'if (Get-Module -ListAvailable Termyx) { Import-Module Termyx }'
+        $wideProfile = Join-Path $script:sandbox 'wide-profile.ps1'
+        $wide = New-Object System.Text.UnicodeEncoding -ArgumentList $false, $true
+        [System.IO.File]::WriteAllText($wideProfile, ('# wide profile' + $nl), $wide)
+        $before = [System.IO.File]::ReadAllBytes($wideProfile)
+
+        & $script:installer -ModuleSource $script:moduleSource -ModuleRoot $script:moduleRoot -ProfilePath $wideProfile
+
+        $installedText = [System.IO.File]::ReadAllText($wideProfile, $wide)
+        $installedText | Should -Be ('# wide profile' + $nl + $importLine + $nl)
+
+        & $script:installer -ModuleSource $script:moduleSource -ModuleRoot $script:moduleRoot -ProfilePath $wideProfile -Uninstall
+
+        $after = [System.IO.File]::ReadAllBytes($wideProfile)
+        [System.Convert]::ToBase64String($after) | Should -Be ([System.Convert]::ToBase64String($before))
+        $after[0] | Should -Be 0xFF
+        $after[1] | Should -Be 0xFE
+    }
+
+    It 'round-trips an ASCII profile without a trailing newline' {
+        $nl = [Environment]::NewLine
+        $importLine = 'if (Get-Module -ListAvailable Termyx) { Import-Module Termyx }'
+        $narrowProfile = Join-Path $script:sandbox 'narrow-profile.ps1'
+        $beforeText = '# no trailing newline'
+        [System.IO.File]::WriteAllBytes($narrowProfile, [System.Text.Encoding]::ASCII.GetBytes($beforeText))
+        $before = [System.IO.File]::ReadAllBytes($narrowProfile)
+
+        & $script:installer -ModuleSource $script:moduleSource -ModuleRoot $script:moduleRoot -ProfilePath $narrowProfile
+
+        $installedText = [System.IO.File]::ReadAllText($narrowProfile, [System.Text.Encoding]::ASCII)
+        $installedText | Should -Be ($beforeText + $nl + $importLine)
+
+        & $script:installer -ModuleSource $script:moduleSource -ModuleRoot $script:moduleRoot -ProfilePath $narrowProfile -Uninstall
+
+        $after = [System.IO.File]::ReadAllBytes($narrowProfile)
+        [System.Convert]::ToBase64String($after) | Should -Be ([System.Convert]::ToBase64String($before))
+    }
+}
+
+Describe 'Engine cache recovery' {
+    BeforeAll {
+        $script:sandbox = Join-Path $env:TEMP ('termyx-cache-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $script:sandbox | Out-Null
+
+        $script:moduleSource = Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx'
+        $script:moduleManifest = Join-Path $script:moduleSource 'Termyx.psd1'
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'deletes and recompiles a corrupt cached DLL whose hash still matches' {
+        # The cache directory is chosen from LOCALAPPDATA at import time, so a
+        # child process with a sandboxed LOCALAPPDATA gives a clean cache
+        # without touching the user's real one.
+        $cacheDir = Join-Path $script:sandbox 'Termyx'
+        New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+        $source = Join-Path $script:moduleSource 'lib\Corrector.cs'
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        Set-Content -LiteralPath (Join-Path $cacheDir 'Corrector.sha256') -Value $sourceHash -Encoding ASCII
+        [System.IO.File]::WriteAllText((Join-Path $cacheDir 'Corrector.dll'), 'not a real DLL')
+
+        $childScript = Join-Path $script:sandbox 'child.ps1'
+        $childLines = @(
+            ('Import-Module ''' + $script:moduleManifest + ''' -Force -ArgumentList @{ InstallHandler = $false }')
+            '$s = Get-TermyxStatus'
+            '"source=$($s.EngineSource)"'
+            '"words=$($s.WordCount)"'
+            '"error=$($s.InitError)"'
+        )
+        $childLines | Set-Content -LiteralPath $childScript -Encoding ASCII
+
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = 'powershell.exe'
+        $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $childScript + '"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables['LOCALAPPDATA'] = $script:sandbox
+
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+
+        $process.ExitCode | Should -Be 0
+        $stdout | Should -Match 'source=compiled'
+        $stdout | Should -Match 'words=87928'
+        $stdout | Should -Match 'error='
+        $stderr | Should -BeNullOrEmpty
     }
 }

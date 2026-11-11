@@ -6,10 +6,14 @@ Press Space after a word and Termyx fixes it in place:
 
 - cmdlet and alias typos (`Get-ChldItem` -> `Get-ChildItem`)
 - parameter typos (`-Reurse` -> `-Recurse`)
-- misspelled bare arguments (`helo` -> `hello`)
+- misspelled bare arguments (`Write-Host helllo` -> `Write-Host hello`,
+  `cd Documnets` -> `cd Documents`)
 
 Quoted strings, comments, paths, URLs, numbers, variables, and hyphenated arguments
-are never touched. Every fix is silent and a single `Ctrl+Z` undoes it.
+are never touched. A fix is applied only when exactly one dictionary or command
+candidate is closest; a typo with several equally close words (`helo`, `teh`,
+`recieve`) is left alone by design. Every fix is silent and a single `Ctrl+Z`
+undoes it.
 
 ## Requirements
 
@@ -51,16 +55,29 @@ To remove it:
 | `Update-TermyxCommandCache` | Refresh the command and alias snapshot |
 | `Set-TermyxOption -Enabled:$false` | Turn correction off without unloading |
 
+`Disable-TermyxAutocorrect` rebinds Space to PSReadLine's default
+`SelfInsert`. PSReadLine 2.0 exposes no way to read the binding that was active
+before Termyx was enabled, so a pre-existing custom Space binding is not
+restored.
+
 ## Configuration
 
-- `$env:TERMYX_AUTOCORRECT = '0'` disables the module before it loads.
+- `$env:TERMYX_AUTOCORRECT = '0'` disables the module before it loads. The
+  module still imports, but `Get-TermyxStatus` reports an `InitError`, and
+  `Enable-TermyxAutocorrect` throws until a new console starts without the
+  variable.
 - `%LOCALAPPDATA%\Termyx\exceptions.txt` holds words that are never corrected,
-  one per line. Lines starting with `#` are ignored.
+  one per line. Lines starting with `#` are ignored. An unreadable file is treated as
+  empty and never writes an error to the console.
 - `%LOCALAPPDATA%\Termyx\user-words.txt` holds words added with
   `Add-TermyxWord`.
 - `Set-TermyxOption -MaxArgumentDistance 1` disables two-edit word fixes.
+- `Set-TermyxOption -SkipWords @('kubectl', 'nginx')` adds words that are never
+  corrected for the rest of the session. They are merged with the exceptions file.
 - `Set-TermyxOption -VerboseCorrections $true` writes each fix to
-  `%LOCALAPPDATA%\Termyx\corrections.log`, never to the console.
+  `%LOCALAPPDATA%\Termyx\corrections.log`, never to the console. The log stores
+  the full input and corrected command lines, so it can contain sensitive text. It is
+  append-only and unbounded; no rotation is performed.
 
 ## Recovery
 
@@ -80,6 +97,14 @@ could not be installed), run `Import-Module Termyx -Force` to retry. The
 error state is cleared only by a fresh import, so `-Force` is the way back
 without quitting the console.
 
+The compiled engine cache lives at
+`%LOCALAPPDATA%\Termyx\Corrector.dll`, with its source hash in
+`Corrector.sha256`. If the DLL is truncated or otherwise corrupt, the module
+deletes both files and recompiles them automatically on the next import.
+`Import-Module Termyx -Force` does not help for this case: while the
+`Termyx.Corrector` type is already loaded, a forced import takes the
+loaded-type path and never re-reads the DLL. Start a new console instead.
+
 The Space handler never writes to the console, so a failure can only skip a
 correction; plain Space always still works.
 
@@ -95,30 +120,36 @@ Run this after installing, in both Windows Terminal and the legacy console host:
    reads `Write-Host `.
 5. Type `git commit -m "helo wrld"` and press Space inside the quotes. No
    correction is made; the word and the space are inserted unchanged.
-6. Type `Write-Host helo` and press Space. It becomes `Write-Host hello `.
+6. Type `Write-Host helllo` and press Space. It becomes `Write-Host hello `.
 7. Type `Write-Host C:\temp\foo` and press Space. No correction is made; the
    path and the space are inserted unchanged.
 8. Type `Get-ChildItem -Reurse` and press Space. It becomes `-Recurse`.
-9. Run `Get-PSReadLineKeyHandler -Bound | Where-Object { $_.Key -eq 'Spacebar' }`.
-   The `Spacebar` entry must show `CustomAction`.
-10. Run `Disable-TermyxAutocorrect`, type a typo, press Space. No
+9. Type `cd Documnets` and press Space. It becomes `cd Documents `.
+10. Type `Write-Host helo` and press Space. No correction is made: several words
+    are equally close, so the tie is left alone by design.
+11. Run `Get-PSReadLineKeyHandler -Bound | Where-Object { $_.Key -eq 'Spacebar' }`.
+    The `Spacebar` entry must show `CustomAction`.
+12. Run `Disable-TermyxAutocorrect`, type a typo, press Space. No
     correction is made; the typo and the space are inserted unchanged. Run the
     handler query again; `Spacebar` must show `SelfInsert`.
-11. Run `Enable-TermyxAutocorrect`. Corrections work again.
+13. Run `Enable-TermyxAutocorrect`. Corrections work again.
 
 ## Dictionary
 
-`Termyx\assets\en_US.wordlist.txt` is a sorted, pre-expanded en-US word list.
-It is generated from the Hunspell en dictionary published by the
-`wooorm/dictionaries` project with:
+`Termyx\assets\en_US.wordlist.txt` is a sorted, pre-expanded en-US word list
+containing 87,928 words. It is generated from the Hunspell en dictionary published by
+the `wooorm/dictionaries` project with:
 
 ```powershell
 .\tools\Build-WordList.ps1
 ```
 
-The build downloads the `.dic` and `.aff` files into `tools\.cache\` (git-ignored),
-applies the affix rules, keeps lowercase alphabetic entries, sorts them ordinally,
-and rewrites the committed list. Users never need the network.
+The build downloads the `.dic` and `.aff` files from the `main` branch of
+`wooorm/dictionaries` into `tools\.cache\` (git-ignored), applies the affix rules,
+keeps lowercase alphabetic entries, sorts them ordinally, and rewrites the committed
+list. Because `main` is a moving branch, a later rebuild may not reproduce the
+committed asset byte-for-byte, and its word count can change. Users never need the
+network.
 
 ## Development
 

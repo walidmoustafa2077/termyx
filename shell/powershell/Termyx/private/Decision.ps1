@@ -24,11 +24,18 @@ function Get-TermyxExceptions {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([StringComparer]::OrdinalIgnoreCase)
 
     if ($script:TermyxExceptionsPath -and (Test-Path -LiteralPath $script:TermyxExceptionsPath)) {
-        foreach ($line in @(Get-Content -LiteralPath $script:TermyxExceptionsPath)) {
-            $entry = $line.Trim()
-            if ($entry.Length -gt 0 -and -not $entry.StartsWith('#')) {
-                [void]$set.Add($entry)
+        # A locked or unreadable file raises a non-terminating error that PS 5.1
+        # does not route through try/catch. Silence it at the source, and keep the
+        # try/catch as a second guard so the handler can never write to the console.
+        try {
+            foreach ($line in @(Get-Content -LiteralPath $script:TermyxExceptionsPath -ErrorAction SilentlyContinue)) {
+                $entry = $line.Trim()
+                if ($entry.Length -gt 0 -and -not $entry.StartsWith('#')) {
+                    [void]$set.Add($entry)
+                }
             }
+        }
+        catch {
         }
     }
 
@@ -148,30 +155,6 @@ function Invoke-TermyxCorrection {
             $result.Reason = 'Known'
             return $result
         }
-        if ($fix) {
-            if ($null -eq $script:TermyxLiveCommandCache) {
-                $script:TermyxLiveCommandCache = @{}
-            }
-
-            $liveKey = $token.ToLowerInvariant()
-            if (-not $script:TermyxLiveCommandCache.ContainsKey($liveKey)) {
-                $isLiveCommand = $false
-                try {
-                    if (Get-Command -Name $token -ErrorAction SilentlyContinue) {
-                        $isLiveCommand = $true
-                    }
-                }
-                catch {
-                    $isLiveCommand = $false
-                }
-                $script:TermyxLiveCommandCache[$liveKey] = $isLiveCommand
-            }
-
-            if ($script:TermyxLiveCommandCache[$liveKey]) {
-                $result.Reason = 'Known'
-                return $result
-            }
-        }
     }
     elseif ($kindInfo.Kind -eq 'Parameter') {
         if (-not $kindInfo.Command) {
@@ -223,6 +206,36 @@ function Invoke-TermyxCorrection {
             $maxDistance = [Math]::Min(2, $script:TermyxOptions.MaxArgumentDistance)
         }
         $fix = [Termyx.Corrector]::SuggestWord($token, $maxDistance)
+    }
+
+    # A token that already resolves to a real command, alias, or function is
+    # never rewritten. This applies to every kind, including arguments such as
+    # "Start-Process dotnet", where the command snapshot does not contain
+    # external applications. The guard only ever skips; it never supplies a fix,
+    # so a parameter token can never be replaced by a command name.
+    if ($fix) {
+        if ($null -eq $script:TermyxLiveCommandCache) {
+            $script:TermyxLiveCommandCache = @{}
+        }
+
+        $liveKey = $token.ToLowerInvariant()
+        if (-not $script:TermyxLiveCommandCache.ContainsKey($liveKey)) {
+            $isLiveCommand = $false
+            try {
+                if (Get-Command -Name $token -ErrorAction SilentlyContinue) {
+                    $isLiveCommand = $true
+                }
+            }
+            catch {
+                $isLiveCommand = $false
+            }
+            $script:TermyxLiveCommandCache[$liveKey] = $isLiveCommand
+        }
+
+        if ($script:TermyxLiveCommandCache[$liveKey]) {
+            $result.Reason = 'Known'
+            return $result
+        }
     }
 
     if ([string]::IsNullOrEmpty($fix) -or $fix -eq $token) {

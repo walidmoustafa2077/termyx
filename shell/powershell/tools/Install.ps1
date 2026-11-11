@@ -77,12 +77,48 @@ function Remove-TermyxProfileImportLine {
 
     $wide = Get-TermyxProfileWideEncoding -Path $Path
     if ($null -ne $wide) {
-        $lines = [System.IO.File]::ReadAllLines($Path, $wide)
-        $remaining = @($lines | Where-Object { -not (Test-TermyxImportLine -Text $_) })
-        if ($remaining.Count -eq $lines.Count) {
+        # Work on the decoded text so a wide profile keeps its exact BOM,
+        # line endings and content outside the removed line.
+        $text = [System.IO.File]::ReadAllText($Path, $wide)
+        $builder = New-Object System.Text.StringBuilder
+        $removed = $false
+        $targetAtEof = $false
+        $start = 0
+        for ($i = 0; $i -le $text.Length; $i++) {
+            if ($i -eq $text.Length -or $text[$i] -eq "`n") {
+                $contentEnd = $i
+                if ($contentEnd -gt $start -and $text[$contentEnd - 1] -eq "`r") { $contentEnd-- }
+
+                $line = $text.Substring($start, $contentEnd - $start)
+                if (Test-TermyxImportLine -Text $line) {
+                    $removed = $true
+                    if ($i -eq $text.Length) { $targetAtEof = $true }
+                }
+                else {
+                    $stop = $i
+                    if ($i -lt $text.Length) { $stop = $i + 1 }
+                    [void]$builder.Append($text.Substring($start, $stop - $start))
+                }
+                $start = $i + 1
+            }
+        }
+
+        if (-not $removed) {
             return $false
         }
-        [System.IO.File]::WriteAllLines($Path, [string[]]$remaining, $wide)
+
+        $result = $builder.ToString()
+        if ($targetAtEof) {
+            # Install injected this separator because the profile had no
+            # trailing newline; remove it to restore the original bytes.
+            if ($result.EndsWith("`r`n")) {
+                $result = $result.Substring(0, $result.Length - 2)
+            }
+            elseif ($result.EndsWith("`n")) {
+                $result = $result.Substring(0, $result.Length - 1)
+            }
+        }
+        [System.IO.File]::WriteAllText($Path, $result, $wide)
         return $true
     }
 
@@ -91,6 +127,7 @@ function Remove-TermyxProfileImportLine {
     $bytes = [System.IO.File]::ReadAllBytes($Path)
     $keep = New-Object System.Collections.Generic.List[byte]
     $removed = $false
+    $targetAtEof = $false
     $start = 0
     for ($i = 0; $i -le $bytes.Length; $i++) {
         if ($i -eq $bytes.Length -or $bytes[$i] -eq 10) {
@@ -104,6 +141,7 @@ function Remove-TermyxProfileImportLine {
                 if (Test-TermyxImportLine -Text $line) {
                     $isTarget = $true
                     $removed = $true
+                    if ($i -eq $bytes.Length) { $targetAtEof = $true }
                 }
             }
 
@@ -117,6 +155,16 @@ function Remove-TermyxProfileImportLine {
     }
 
     if ($removed) {
+        if ($targetAtEof -and $keep.Count -gt 0) {
+            # Install injected this separator because the profile had no
+            # trailing newline; remove it to restore the original bytes.
+            if ($keep.Count -ge 2 -and $keep[$keep.Count - 1] -eq 10 -and $keep[$keep.Count - 2] -eq 13) {
+                $keep.RemoveRange($keep.Count - 2, 2)
+            }
+            elseif ($keep[$keep.Count - 1] -eq 10) {
+                $keep.RemoveAt($keep.Count - 1)
+            }
+        }
         [System.IO.File]::WriteAllBytes($Path, $keep.ToArray())
     }
 
@@ -161,24 +209,37 @@ if (-not (Test-TermyxProfileImportLine -Path $ProfilePath)) {
     if (Test-Path -LiteralPath $ProfilePath) {
         $existingLength = (Get-Item -LiteralPath $ProfilePath).Length
         if ($existingLength -gt 0) {
-            $handle = [System.IO.File]::OpenRead($ProfilePath)
-            try {
-                $handle.Seek(-1, [System.IO.SeekOrigin]::End) | Out-Null
-                $endsWithNewline = ($handle.ReadByte() -eq 10)
+            if ($null -ne $wide) {
+                # For a UTF-16 profile the last byte is a 0x00 padding byte,
+                # so decide from the decoded text instead.
+                $existingText = [System.IO.File]::ReadAllText($ProfilePath, $wide)
+                $endsWithNewline = $existingText.EndsWith("`n")
             }
-            finally {
-                $handle.Close()
+            else {
+                $handle = [System.IO.File]::OpenRead($ProfilePath)
+                try {
+                    $handle.Seek(-1, [System.IO.SeekOrigin]::End) | Out-Null
+                    $endsWithNewline = ($handle.ReadByte() -eq 10)
+                }
+                finally {
+                    $handle.Close()
+                }
             }
         }
     }
 
-    # Start on a fresh line only when the existing profile does not already end
-    # with one, so uninstalling this line restores the profile byte for byte.
+    # An absent or empty profile gets a well-formed line. A non-empty
+    # profile that already ends with a newline gets the line plus a
+    # terminator, with no extra separator. A non-empty profile without a
+    # trailing newline gets exactly one separator before the line and no
+    # terminator after it, so uninstall can remove both without state.
     $prefix = ''
+    $terminator = [Environment]::NewLine
     if ($existingLength -gt 0 -and -not $endsWithNewline) {
         $prefix = [Environment]::NewLine
+        $terminator = ''
     }
-    $text = $prefix + $importLine + [Environment]::NewLine
+    $text = $prefix + $importLine + $terminator
 
     $stream = [System.IO.File]::Open($ProfilePath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
     try {

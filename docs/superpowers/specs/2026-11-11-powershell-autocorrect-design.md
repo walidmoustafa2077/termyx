@@ -231,8 +231,10 @@ namespace Termyx {
   "corrected".
 - Parameter candidates are resolved per owning command from `(Get-Command $cmd).Parameters.Keys`
   and cached by command name.
-- A `Command` token that already resolves via `Get-Command -Name` short-circuits before
-  suggestion.
+- A token that already resolves via `Get-Command -Name` is never rewritten,
+  regardless of its classification. This also protects external commands in
+  argument position, such as `Start-Process dotnet`, which the command snapshot
+  does not contain.
 
 ## 10. PSReadLine integration
 
