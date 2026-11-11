@@ -2133,6 +2133,33 @@ impl App {
         let bytes = input::paste(&text, bracketed);
         self.write_input(&bytes);
     }
+
+    /// Saves the active tab's scrollback and viewport to a text file the user
+    /// picks. Cancelling the dialog or having no tab leaves the window as is.
+    // The context menu's export row calls this in Task 10.
+    #[allow(dead_code)]
+    fn export_text(&mut self) {
+        let Some(session) = self.tabs.active() else {
+            return;
+        };
+        let text = session.terminal.all_text();
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export text")
+            .set_file_name("termyx.txt")
+            .add_filter("Text", &["txt"])
+            .save_file()
+        else {
+            return;
+        };
+        if let Err(err) = std::fs::write(&path, text) {
+            tracing::warn!(%err, "could not export terminal text");
+            rfd::MessageDialog::new()
+                .set_title("Export failed")
+                .set_description(err.to_string())
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+        }
+    }
 }
 
 /// Number of profiles that own a numbered `Ctrl+Shift+<digit>` shortcut.

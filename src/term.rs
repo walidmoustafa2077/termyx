@@ -369,6 +369,32 @@ impl Terminal {
         }
     }
 
+    /// Collects the scrollback and the viewport as plain text, one row per
+    /// line. Trailing blanks inside a row and the unused rows below the cursor
+    /// are trimmed, and the result keeps a single final newline.
+    pub fn all_text(&self) -> String {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let rows = self.size.rows as i32;
+        let mut out = String::new();
+        for line in -history..rows {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for cell in row[..].iter() {
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+            }
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out
+    }
+
     /// Number of screen rows up to and including the last row with written content,
     /// and the cursor's screen row.
     fn content_extent(&self) -> (usize, usize) {
@@ -770,6 +796,29 @@ mod tests {
     #[test]
     fn unrelated_terminal_events_are_not_bridged() {
         assert!(user_event_for(1, alacritty_terminal::event::Event::Bell).is_none());
+    }
+
+    #[test]
+    fn all_text_includes_scrollback_and_trimmed_rows() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        terminal.feed(b"first\r\nsecond   \r\n");
+        let text = terminal.all_text();
+        assert!(text.contains("first\nsecond"));
+        // An ordinary buffer keeps one final newline while the unused
+        // viewport rows collapse.
+        assert_eq!(text, "first\nsecond\n");
+    }
+
+    #[test]
+    fn all_text_keeps_rows_above_the_viewport() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        for index in 0..6 {
+            terminal.feed(format!("line{index}\r\n").as_bytes());
+        }
+        assert!(terminal.history_size() > 0);
+        let text = terminal.all_text();
+        assert!(text.starts_with("line0\nline1\n"), "got {text:?}");
+        assert!(text.ends_with("line5\n"), "got {text:?}");
     }
 
     #[test]
