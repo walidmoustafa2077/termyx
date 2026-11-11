@@ -292,8 +292,6 @@ impl TabSet {
     /// whether an index actually changed.
     ///
     /// [`titles`]: TabSet::titles
-    // The context menu's move commands call this in a later task.
-    #[allow(dead_code)]
     pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
         let len = self.sessions.len();
         if from >= len || to >= len || from == to {
@@ -374,8 +372,6 @@ impl TabSet {
 
     /// Sets the tab color `id` carries, returning whether it actually changed
     /// so a repeat choice costs no repaint.
-    // Wired to the context-menu swatches in a later task.
-    #[allow(dead_code)]
     pub fn set_color(&mut self, id: SessionId, color: Option<crate::theme::Rgb>) -> bool {
         let Some(session) = self.session_mut(id) else {
             return false;

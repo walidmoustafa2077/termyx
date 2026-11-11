@@ -273,9 +273,11 @@ impl App {
     fn open_menu(&mut self) {
         // The panel covers the strip, so no tooltip may hang over it.
         self.clear_tooltip();
-        // The dropdown and the find bar each own the pointer; opening one closes
-        // the other so only a single overlay is on screen.
+        // The dropdown, the find bar, and the rename editor each own the
+        // pointer; opening one closes the others so only a single overlay is on
+        // screen.
         self.close_find();
+        self.rename = None;
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
@@ -319,6 +321,7 @@ impl App {
         self.close_menu();
         self.clear_tooltip();
         self.close_find();
+        self.rename = None;
         if index >= self.tabs.len() {
             return;
         }
@@ -4714,6 +4717,34 @@ mod tests {
             }
         }
 
+        // Exhaustive over every `TabCommand` variant, with no `_` arm. Adding a
+        // variant to the enum makes this module fail to compile until the guard
+        // is updated, so a new command cannot silently ship without a row.
+        fn assert_known(command: TabCommand) {
+            match command {
+                TabCommand::ChangeColor(_) => {}
+                TabCommand::Rename => {}
+                TabCommand::Duplicate => {}
+                TabCommand::Split => {}
+                TabCommand::MoveToNewWindow => {}
+                TabCommand::MoveLeft => {}
+                TabCommand::MoveRight => {}
+                TabCommand::ExportText => {}
+                TabCommand::Find => {}
+                TabCommand::CloseOtherTabs => {}
+                TabCommand::CloseTabsToRight => {}
+                TabCommand::CloseTab => {}
+            }
+        }
+
+        fn command_of(items: &[&ContextItem], label: &str) -> Option<TabCommand> {
+            items
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("no row labelled `{label}` in the tab menu"))
+                .command
+        }
+
         fn enabled(items: &[&ContextItem], label: &str) -> bool {
             items
                 .iter()
@@ -4722,37 +4753,73 @@ mod tests {
                 .enabled
         }
 
-        let colors = [Rgb::new(16, 32, 64); 8];
+        let colors: [Rgb; 8] = [
+            Rgb::new(16, 32, 64),
+            Rgb::new(200, 100, 0),
+            Rgb::new(0, 128, 128),
+            Rgb::new(255, 0, 0),
+            Rgb::new(0, 255, 0),
+            Rgb::new(0, 0, 255),
+            Rgb::new(128, 0, 128),
+            Rgb::new(255, 255, 255),
+        ];
 
-        // The left edge of two tabs: every command is reachable, and only the
-        // rows that move or close leftward — or are placeholder features — are
-        // disabled.
         let rows = tab_menu::rows(0, 2, true, &colors);
         let mut items = Vec::new();
         flatten(&rows, &mut items);
-        let commands: Vec<TabCommand> = items.iter().filter_map(|item| item.command).collect();
 
-        for expected in [
-            TabCommand::ChangeColor(Some(colors[0])),
-            TabCommand::ChangeColor(None),
-            TabCommand::Rename,
-            TabCommand::Duplicate,
-            TabCommand::Split,
-            TabCommand::MoveToNewWindow,
-            TabCommand::MoveLeft,
-            TabCommand::MoveRight,
-            TabCommand::ExportText,
-            TabCommand::Find,
-            TabCommand::CloseOtherTabs,
-            TabCommand::CloseTabsToRight,
-            TabCommand::CloseTab,
-        ] {
-            assert!(
-                commands.contains(&expected),
-                "no row runs {expected:?}; every `TabCommand` needs a row in `ui::tab_menu::rows`"
-            );
+        // Every row runs a command the app knows how to dispatch.
+        for item in &items {
+            if let Some(command) = item.command {
+                assert_known(command);
+            }
         }
 
+        // The command each label carries: swapping two rows' commands fails
+        // here, and a new variant with no row fails to compile above.
+        assert_eq!(
+            command_of(&items, "Default"),
+            Some(TabCommand::ChangeColor(None))
+        );
+        for color in &colors {
+            let label = format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b);
+            assert_eq!(
+                command_of(&items, &label),
+                Some(TabCommand::ChangeColor(Some(*color))),
+                "swatch `{label}` must carry its own color"
+            );
+        }
+        assert_eq!(command_of(&items, "Rename tab"), Some(TabCommand::Rename));
+        assert_eq!(
+            command_of(&items, "Duplicate tab"),
+            Some(TabCommand::Duplicate)
+        );
+        assert_eq!(command_of(&items, "Split tab"), Some(TabCommand::Split));
+        assert_eq!(
+            command_of(&items, "Move tab to new window"),
+            Some(TabCommand::MoveToNewWindow)
+        );
+        assert_eq!(
+            command_of(&items, "Move right"),
+            Some(TabCommand::MoveRight)
+        );
+        assert_eq!(command_of(&items, "Move left"), Some(TabCommand::MoveLeft));
+        assert_eq!(
+            command_of(&items, "Export text"),
+            Some(TabCommand::ExportText)
+        );
+        assert_eq!(command_of(&items, "Find"), Some(TabCommand::Find));
+        assert_eq!(
+            command_of(&items, "Close other tabs"),
+            Some(TabCommand::CloseOtherTabs)
+        );
+        assert_eq!(
+            command_of(&items, "Close tabs to right"),
+            Some(TabCommand::CloseTabsToRight)
+        );
+        assert_eq!(command_of(&items, "Close tab"), Some(TabCommand::CloseTab));
+
+        // Disabled contract for the left edge of two tabs.
         for label in ["Split tab", "Move tab to new window", "Move left"] {
             assert!(
                 !enabled(&items, label),
@@ -4766,19 +4833,28 @@ mod tests {
             );
         }
 
-        // The right edge of two tabs, and a page tab cannot duplicate.
-        let rows = tab_menu::rows(1, 2, false, &colors);
+        // The right edge of two tabs.
+        let rows = tab_menu::rows(1, 2, true, &colors);
         let mut items = Vec::new();
         flatten(&rows, &mut items);
-        for label in ["Move right", "Close tabs to right", "Duplicate tab"] {
+        for label in ["Move right", "Close tabs to right"] {
             assert!(
                 !enabled(&items, label),
-                "`{label}` must be disabled at index 1 of 2 with a page tab"
+                "`{label}` must be disabled at index 1 of 2"
             );
         }
         assert!(
             enabled(&items, "Move left"),
             "`Move left` must be enabled at index 1 of 2"
+        );
+
+        // A page tab cannot duplicate, independently of its position.
+        let rows = tab_menu::rows(1, 2, false, &colors);
+        let mut items = Vec::new();
+        flatten(&rows, &mut items);
+        assert!(
+            !enabled(&items, "Duplicate tab"),
+            "`Duplicate tab` must be disabled for a page tab"
         );
     }
 }
