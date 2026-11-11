@@ -102,6 +102,18 @@ pub struct Theme {
     /// A row's right-aligned key hint, measured `#CFCFCF`: dimmer than the
     /// label so the eye follows the names first.
     pub menu_shortcut: Rgb,
+    /// Ink of a context-menu row that cannot act, measured `#8A8A8A`: dimmer
+    /// than the resting label so the name still reads but takes the hint.
+    pub menu_disabled: Rgb,
+    /// The band behind a `Find` match, measured `#484822`. The find painter
+    /// reads it in a later task.
+    #[allow(dead_code)]
+    pub find_match: Rgb,
+    /// The band behind the `Find` match under the caret, measured `#807022`:
+    /// a step brighter than [`Theme::find_match`]. The find painter reads it
+    /// in a later task.
+    #[allow(dead_code)]
+    pub find_current: Rgb,
     /// Tooltip panel. Shares the flyout's recessed value so the two floating
     /// surfaces read as one family.
     pub tooltip_background: Rgb,
@@ -160,6 +172,9 @@ impl Theme {
             menu_hover: Rgb::new(61, 61, 61),
             menu_separator: Rgb::new(61, 61, 61),
             menu_shortcut: Rgb::new(207, 207, 207),
+            menu_disabled: Rgb::new(138, 138, 138),
+            find_match: Rgb::new(72, 72, 34),
+            find_current: Rgb::new(128, 112, 34),
             tooltip_background: Rgb::new(44, 44, 44),
             tooltip_border: Rgb::new(61, 61, 61),
         }
@@ -176,6 +191,22 @@ impl Theme {
             Rgb::new(0, 0, 0)
         } else {
             Rgb::new(255, 255, 255)
+        }
+    }
+
+    /// The ink that stays readable on `background`: the grid's foreground on
+    /// a dark fill and the grid's own background on a light one, so a colored
+    /// tab's title never drowns in the color it shows. Colored tabs read this
+    /// in a later task.
+    #[allow(dead_code)]
+    pub fn ink_on(&self, background: Rgb) -> Rgb {
+        let luminance = 0.299 * f32::from(background.r)
+            + 0.587 * f32::from(background.g)
+            + 0.114 * f32::from(background.b);
+        if luminance > 140.0 {
+            self.background
+        } else {
+            self.foreground
         }
     }
 
@@ -301,6 +332,55 @@ mod tests {
         assert!(
             theme.menu_shortcut.r < theme.tab_title.r,
             "the key hint must not compete with the label"
+        );
+    }
+
+    #[test]
+    fn the_context_menu_and_find_tokens_pin_their_measured_values() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        assert_eq!(
+            theme.menu_disabled,
+            Rgb::new(138, 138, 138),
+            "a row that cannot act dims to #8A8A8A, below the resting label"
+        );
+        assert!(
+            theme.menu_disabled.r < theme.foreground.r,
+            "the disabled ink must read dimmer than the enabled label's"
+        );
+        assert_eq!(
+            theme.find_match,
+            Rgb::new(72, 72, 34),
+            "a find match bands #484822 behind the text"
+        );
+        assert_eq!(
+            theme.find_current,
+            Rgb::new(128, 112, 34),
+            "the current match bands #807022, a step brighter"
+        );
+    }
+
+    #[test]
+    fn ink_on_flips_with_the_background_luma() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        assert_eq!(
+            theme.ink_on(Rgb::new(0, 0, 0)),
+            theme.foreground,
+            "ink on a dark fill is the grid's light foreground"
+        );
+        assert_eq!(
+            theme.ink_on(Rgb::new(255, 255, 255)),
+            theme.background,
+            "ink on a light fill flips to the grid's own background"
+        );
+        assert_eq!(
+            theme.ink_on(Rgb::new(150, 150, 150)),
+            theme.background,
+            "a fill past the luma threshold counts as light"
+        );
+        assert_eq!(
+            theme.ink_on(Rgb::new(130, 130, 130)),
+            theme.foreground,
+            "a fill under the luma threshold counts as dark"
         );
     }
 }

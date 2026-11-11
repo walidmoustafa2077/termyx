@@ -1,6 +1,7 @@
 //! Grid rasterization to the window surface.
 
 mod atlas;
+mod context_menu;
 mod glyph_cache;
 mod menu;
 mod tooltip;
