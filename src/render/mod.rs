@@ -2566,6 +2566,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         }
     }
@@ -2668,6 +2669,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         }
     }
@@ -2696,6 +2698,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: offset,
+            input_start: None,
             history,
         }
     }
@@ -3135,6 +3138,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let maps: Vec<VisualMap> = (0..2).map(|_| VisualMap::identity(3)).collect();
@@ -3757,6 +3761,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let maps = vec![VisualMap::identity(cols); rows];

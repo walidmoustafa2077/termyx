@@ -379,6 +379,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         }
     }
@@ -451,6 +452,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         }
     }
@@ -583,6 +585,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let maps = identity_maps(2, 5);
@@ -611,6 +614,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let maps = identity_maps(2, 5);
@@ -639,6 +643,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let maps = vec![VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
@@ -675,6 +680,7 @@ mod tests {
                 blinking: false,
             },
             display_offset: 0,
+            input_start: None,
             history: 0,
         };
         let mut line = snapshot.lines[0].clone();

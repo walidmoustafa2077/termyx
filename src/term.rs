@@ -73,6 +73,15 @@ pub struct CursorState {
     pub blinking: bool,
 }
 
+/// Where the shell's editable input line starts, as reported by an OSC 133 `B`
+/// mark. `row` is a grid line (`0` is the viewport's top row, negative values
+/// reach into scrollback) and `col` is the cursor column at the mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputStart {
+    pub row: i32,
+    pub col: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalPos {
     pub row: usize,
@@ -98,6 +107,8 @@ pub struct GridSnapshot {
     pub rows: usize,
     pub lines: Vec<RowSnapshot>,
     pub cursor: CursorState,
+    /// The shell's input start from the last OSC 133 mark, if one is pending.
+    pub input_start: Option<InputStart>,
     pub display_offset: usize,
     /// Scrollback rows the scrollbar can map to; leading blank rows are
     /// excluded so the thumb reaches the top where scrolling stops.
@@ -159,7 +170,16 @@ pub struct Terminal {
     processor: Processor,
     size: TermSize,
     scrollback: usize,
+    /// Bytes held back because they end inside an OSC sequence whose terminator
+    /// has not arrived; OSC marks are only visible once the sequence is whole.
+    pending: Vec<u8>,
+    input_start: Option<InputStart>,
 }
+
+/// A malformed OSC with no terminator must not swallow output forever: past
+/// this many held-back bytes the sequence is handed to the parser, which caps
+/// its own OSC buffer exactly as it does without the mark scanner.
+const MAX_PENDING: usize = 4096;
 
 impl Terminal {
     /// Test-only constructor: no event bridge, no window to notify.
@@ -196,6 +216,8 @@ impl Terminal {
             processor: Processor::new(),
             size,
             scrollback,
+            pending: Vec::new(),
+            input_start: None,
         }
     }
 
@@ -212,9 +234,60 @@ impl Terminal {
     /// scroll and drops the selection.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         let before = self.term.grid().total_lines();
-        self.processor.advance(&mut self.term, bytes);
+        self.pending.extend_from_slice(bytes);
+        let mut consumed = 0usize;
+
+        while consumed < self.pending.len() {
+            let Some(scan) = find_osc(&self.pending[consumed..]) else {
+                self.processor
+                    .advance(&mut self.term, &self.pending[consumed..]);
+                consumed = self.pending.len();
+                break;
+            };
+            let start = consumed + scan.offset;
+            if scan.offset > 0 {
+                self.processor
+                    .advance(&mut self.term, &self.pending[consumed..start]);
+            }
+            let Some(len) = scan.len else {
+                // The tail is an OSC without its terminator yet, or a lone ESC
+                // that may still open one. Keep it until the rest arrives.
+                consumed = start;
+                break;
+            };
+
+            let mark = osc_mark(&self.pending[start..start + len]);
+            // Forward the sequence unchanged; the parser ignores OSC 133.
+            self.processor
+                .advance(&mut self.term, &self.pending[start..start + len]);
+            self.apply_mark(mark);
+            consumed = start + len;
+        }
+
+        self.pending.drain(..consumed);
+
+        if self.pending.len() > MAX_PENDING {
+            let rest = std::mem::take(&mut self.pending);
+            self.processor.advance(&mut self.term, &rest);
+        }
+
         let after = self.term.grid().total_lines();
         after != before || before >= self.size.total_lines
+    }
+
+    /// Records an OSC 133 mark that has just been forwarded to the parser.
+    fn apply_mark(&mut self, mark: Option<PromptMark>) {
+        match mark {
+            Some(PromptMark::PromptStart) => self.input_start = None,
+            Some(PromptMark::InputStart) => {
+                let point = self.term.grid().cursor.point;
+                self.input_start = Some(InputStart {
+                    row: point.line.0,
+                    col: point.column.0,
+                });
+            }
+            None => {}
+        }
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -379,6 +452,7 @@ impl Terminal {
             cursor,
             display_offset: content.display_offset,
             history: self.scrollable_history(),
+            input_start: self.input_start,
         }
     }
 
@@ -483,6 +557,86 @@ impl Terminal {
 
         (used_rows, content.cursor.point.line.0.max(0) as usize)
     }
+}
+
+/// The OSC 133 marks the prompt wrapper emits around the editable input line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptMark {
+    /// `ESC ] 133 ; A BEL` - a new prompt: the previous input is gone.
+    PromptStart,
+    /// `ESC ] 133 ; B BEL` - editable input starts at the current cursor.
+    InputStart,
+}
+
+/// Decodes a complete OSC sequence, ignoring every code but the prompt marks
+/// this terminal tracks. The terminator is either BEL or ST (`ESC \`).
+fn osc_mark(sequence: &[u8]) -> Option<PromptMark> {
+    let end = if sequence.ends_with(&[0x07]) {
+        sequence.len().saturating_sub(1)
+    } else if sequence.ends_with(b"\x1b\\") {
+        sequence.len().saturating_sub(2)
+    } else {
+        return None;
+    };
+    match sequence.get(2..end)? {
+        b"133;A" => Some(PromptMark::PromptStart),
+        b"133;B" => Some(PromptMark::InputStart),
+        _ => None,
+    }
+}
+
+/// Where the next OSC sequence sits inside `bytes`.
+struct OscScan {
+    /// Bytes before the sequence.
+    offset: usize,
+    /// Length of the whole sequence including both delimiters, or `None` when
+    /// the sequence has not been terminated yet.
+    len: Option<usize>,
+}
+
+/// Finds the next OSC sequence, stopping at the first unterminated one so its
+/// bytes can be held back. A trailing lone `ESC` also reports as unterminated:
+/// the next chunk may complete it into an OSC.
+fn find_osc(bytes: &[u8]) -> Option<OscScan> {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            index += 1;
+            continue;
+        }
+        if index + 1 == bytes.len() {
+            return Some(OscScan {
+                offset: index,
+                len: None,
+            });
+        }
+        if bytes[index + 1] != b']' {
+            index += 1;
+            continue;
+        }
+
+        let mut cursor = index + 2;
+        while cursor < bytes.len() {
+            if bytes[cursor] == 0x07 {
+                return Some(OscScan {
+                    offset: index,
+                    len: Some(cursor + 1 - index),
+                });
+            }
+            if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
+                return Some(OscScan {
+                    offset: index,
+                    len: Some(cursor + 2 - index),
+                });
+            }
+            cursor += 1;
+        }
+        return Some(OscScan {
+            offset: index,
+            len: None,
+        });
+    }
+    None
 }
 
 fn map_cursor_shape(shape: AnsiCursorShape) -> CursorShape {
@@ -930,6 +1084,85 @@ mod tests {
         terminal.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\nk");
         assert!(terminal.history_size() > 0);
         assert_eq!(terminal.snapshot().history, terminal.history_size());
+    }
+
+    #[test]
+    fn tracks_osc_133_marks() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS> ");
+        term.feed(b"\x1b]133;B\x07teh");
+        let snapshot = term.snapshot();
+        let start = snapshot.input_start.expect("mark recorded");
+        assert_eq!(start.col, 4);
+        assert_eq!(snapshot.cursor.logical, 7);
+    }
+
+    #[test]
+    fn clears_the_mark_on_a_new_prompt() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;B\x07abc");
+        term.feed(b"\r\n\x1b]133;A\x07PS> ");
+        assert!(term.snapshot().input_start.is_none());
+    }
+
+    #[test]
+    fn survives_a_split_escape() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133");
+        term.feed(b";B\x07teh");
+        assert!(term.snapshot().input_start.is_some());
+        assert_eq!(term.snapshot().cursor.logical, 3);
+    }
+
+    #[test]
+    fn records_the_mark_with_an_st_terminator() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x1b\\PS> ");
+        term.feed(b"\x1b]133;B\x1b\\teh");
+        let snapshot = term.snapshot();
+        let start = snapshot.input_start.expect("mark recorded");
+        assert_eq!(start.col, 4);
+        assert_eq!(snapshot.cursor.logical, 7);
+    }
+
+    #[test]
+    fn keeps_a_split_mark_after_preceding_text() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"PS> \x1b]133;");
+        assert!(term.snapshot().input_start.is_none());
+        term.feed(b"B\x07teh");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.input_start.expect("mark recorded").col, 4);
+        assert_eq!(snapshot.cursor.logical, 7);
+    }
+
+    #[test]
+    fn keeps_a_mark_split_between_esc_and_the_bracket() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"PS> \x1b");
+        term.feed(b"]133;B\x07teh");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.input_start.expect("mark recorded").col, 4);
+        assert_eq!(snapshot.cursor.logical, 7);
+    }
+
+    #[test]
+    fn a_runaway_osc_does_not_swallow_later_output() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A");
+        term.feed(&vec![b'x'; MAX_PENDING * 2]);
+        term.feed(b"\x07ok");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.lines[0].cells[0].text, "o");
+        assert_eq!(snapshot.cursor.logical, 2);
+    }
+
+    #[test]
+    fn passes_other_osc_sequences_through() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]0;title\x07hello");
+        assert_eq!(term.snapshot().cursor.logical, 5);
+        assert!(term.snapshot().input_start.is_none());
     }
 
     #[test]
