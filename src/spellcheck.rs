@@ -17,7 +17,6 @@ const FREQUENCY_LIST: &str = include_str!(concat!(
 ));
 
 const MIN_TOKEN_LEN: usize = 3;
-const MAX_DISTANCE_ONE_TOKEN: usize = 6;
 
 /// One misspelled span, positioned on the grid.
 ///
@@ -285,56 +284,55 @@ fn is_candidate(word: &str) -> bool {
     true
 }
 
+/// How far from a dictionary word a token may be and still count as a typo.
+///
+/// Short words get a tight budget so that `cat` never offers `dog`; long words
+/// need room, because `proffistional` is three edits from `professional` and a
+/// fixed limit of one left the menu with nothing to offer.
+fn max_distance(len: usize) -> usize {
+    match len {
+        0..=3 => 1,
+        4..=8 => 2,
+        9..=13 => 3,
+        _ => 4,
+    }
+}
+
 pub fn suggestions(token: &str, limit: usize) -> Vec<String> {
     let lower = token.to_ascii_lowercase();
     if limit == 0 || lower.len() < 2 {
         return Vec::new();
     }
 
+    // One pass at the token's own budget: the previous version looked for a
+    // one-edit match first and only fell back to two edits for short tokens,
+    // so a long misspelling offered no suggestions at all.
+    let max = max_distance(lower.len());
+
     let guard = data().read().expect("spellcheck lock");
-    let mut one_edit: Vec<&String> = guard
+    let mut ranked: Vec<(usize, usize, &String)> = guard
         .words
         .iter()
-        .filter(|word| {
-            word.len().saturating_sub(lower.len()) <= 1
-                && lower.len().saturating_sub(word.len()) <= 1
-        })
-        .filter(|word| distance(&lower, word, 1) == 1)
-        .collect();
-
-    let candidates: Vec<&String> = if one_edit.is_empty() && lower.len() <= MAX_DISTANCE_ONE_TOKEN {
-        guard
-            .words
-            .iter()
-            .filter(|word| {
-                word.len().saturating_sub(lower.len()) <= 2
-                    && lower.len().saturating_sub(word.len()) <= 2
-            })
-            .filter(|word| distance(&lower, word, 2) == 2)
-            .collect()
-    } else {
-        std::mem::take(&mut one_edit)
-    };
-
-    // The most common word wins: an edit that lands on a frequent word is the
-    // likelier intent than one that lands on a rare word of the same distance,
-    // whether the candidate is shorter or not. Words absent from the frequency
-    // list sort last but remain usable when they are the only candidate.
-    let mut ranked: Vec<(usize, &String)> = candidates
-        .into_iter()
-        .map(|word| {
-            (
-                guard.rank.get(word).copied().unwrap_or(usize::MAX / 2),
-                word,
-            )
+        .filter(|word| word.len().abs_diff(lower.len()) <= max)
+        .filter_map(|word| {
+            let edits = distance(&lower, word, max);
+            if edits > max {
+                return None;
+            }
+            let rank = guard.rank.get(word).copied().unwrap_or(usize::MAX / 2);
+            Some((edits, rank, word))
         })
         .collect();
 
-    ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    // Closest first, then the most common: an edit that lands on a frequent
+    // word is the likelier intent, whether the candidate is shorter or not.
+    // Words absent from the frequency list sort last but remain usable when
+    // they are the only candidate.
+    ranked.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
     ranked
         .into_iter()
         .take(limit)
-        .map(|(_, word)| word.clone())
+        .map(|(_, _, word)| word.clone())
         .collect()
 }
 
@@ -579,6 +577,27 @@ mod tests {
             suggestions("recieve", 5).first().map(String::as_str),
             Some("receive")
         );
+    }
+
+    #[test]
+    fn reaches_the_word_behind_a_long_misspelling() {
+        // Three edits away. The old search stopped at one edit unless the
+        // token was short, so both of these listed nothing to replace.
+        assert_eq!(suggestions("qunataties", 1), vec!["quantities".to_string()]);
+        assert_eq!(
+            suggestions("proffistional", 1),
+            vec!["professional".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_tight_budget_keeps_short_words_honest() {
+        // Four letters may be two edits away, three letters only one: `cat`
+        // must never start offering unrelated short words.
+        assert_eq!(max_distance(3), 1);
+        assert_eq!(max_distance(6), 2);
+        assert_eq!(max_distance(10), 3);
+        assert_eq!(max_distance(20), 4);
     }
 
     #[test]
