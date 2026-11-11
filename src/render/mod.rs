@@ -6,6 +6,7 @@ mod find_bar;
 mod glyph_cache;
 mod menu;
 mod rename;
+mod spellcheck_menu;
 mod tooltip;
 mod ui_text;
 
