@@ -14,7 +14,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::config::{BidiConfig, Config};
+use crate::config::{BidiConfig, Config, FontConfig};
 use crate::event::UserEvent;
 use crate::find::FindState;
 use crate::fonts::{FontSet, UI_SIZE_PX};
@@ -26,6 +26,7 @@ use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
+use crate::settings::{ClickAction, CommitOutcome, EnterAction, EscapeAction, SettingsState};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
 use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
@@ -86,6 +87,11 @@ struct TabMenuState {
 
 pub struct App {
     config: Config,
+    /// The last configuration written to disk. Esc and Revert restore it.
+    saved_config: Config,
+    /// The font metrics the renderer was last built from, so a colour or
+    /// padding change never reloads a font that did not change.
+    applied_font: FontConfig,
     /// The file the Settings tab shows and polls, resolved once at startup so
     /// a `--config` override and the default path behave the same.
     config_path: PathBuf,
@@ -156,8 +162,12 @@ pub struct App {
 impl App {
     pub fn new(config: Config, config_path: PathBuf, proxy: EventLoopProxy<UserEvent>) -> Self {
         let settings_stamp = page::settings_stamp(&config_path);
+        let saved_config = config.clone();
+        let applied_font = config.font.clone();
         Self {
             config,
+            saved_config,
+            applied_font,
             config_path,
             settings_stamp,
             proxy,
@@ -806,6 +816,7 @@ impl App {
         if self.resize_grid(size.width, size.height) {
             // Reflow invalidates logical selection positions.
             self.selection = None;
+            self.refill_pages();
         }
         // Both panels were measured at the old scale, so their anchors and row
         // metrics no longer match the rebuilt strip. Dismiss them rather than
@@ -1398,17 +1409,20 @@ impl App {
         false
     }
 
-    /// Routes a key to the active page when it is the command palette.
+    /// Routes a key to the active page.
     ///
     /// `None` means the page does not claim the key, so the normal shortcut and
-    /// grid paths still run. Modified keys are never claimed: copy, paste, and
-    /// tab cycling stay available while the palette is open.
+    /// grid paths still run. Settings claims its navigation and editing keys,
+    /// and `Ctrl+S` at any time. Modified keys otherwise stay available: copy,
+    /// paste, and tab cycling keep working while a page is open.
     fn page_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
-            return None;
-        }
         let index = self.tabs.active_index()?;
-        if self.tabs[index].page.as_ref().map(Page::kind) != Some(PageKind::CommandPalette) {
+        match self.tabs[index].page.as_ref().map(Page::kind) {
+            Some(PageKind::Settings) => return self.settings_page_key(index, event),
+            Some(PageKind::CommandPalette) => {}
+            _ => return None,
+        }
+        if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
             return None;
         }
         let id = self.tabs[index].id;
@@ -1461,6 +1475,313 @@ impl App {
             window.request_redraw();
         }
         Some(false)
+    }
+
+    /// Routes a key to the active Settings tab. Returns `Some(false)` for every
+    /// key the page consumes, including a click-free key that changed nothing.
+    fn settings_page_key(&mut self, index: usize, event: &KeyEvent) -> Option<bool> {
+        let id = self.tabs[index].id;
+        if self.modifiers.control_key() {
+            if !self.modifiers.alt_key()
+                && !self.modifiers.super_key()
+                && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("s"))
+            {
+                self.save_settings(id);
+                return Some(false);
+            }
+            return None;
+        }
+        if self.modifiers.alt_key() || self.modifiers.super_key() {
+            return None;
+        }
+        let rows = self.rows;
+        let editing = self.tabs[index]
+            .page
+            .as_ref()
+            .and_then(Page::settings)
+            .is_some_and(SettingsState::editing);
+        if editing {
+            enum EditOutcome {
+                Redraw,
+                Committed,
+            }
+            let outcome = {
+                let config = &mut self.config;
+                let Some(settings) = self.tabs[index].page.as_mut().and_then(Page::settings_mut)
+                else {
+                    return Some(false);
+                };
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        settings.cancel_edit();
+                        EditOutcome::Redraw
+                    }
+                    Key::Named(NamedKey::Enter) if !event.repeat => {
+                        settings.commit_edit(config);
+                        EditOutcome::Committed
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        settings.edit_backspace();
+                        EditOutcome::Redraw
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        settings.edit_char(' ');
+                        EditOutcome::Redraw
+                    }
+                    Key::Character(text) => {
+                        for character in text.chars() {
+                            settings.edit_char(character);
+                        }
+                        EditOutcome::Redraw
+                    }
+                    _ => return Some(false),
+                }
+            };
+            if let EditOutcome::Committed = outcome {
+                self.apply_settings(id);
+            }
+            self.refresh_page(id);
+            return Some(false);
+        }
+
+        enum KeyOutcome {
+            Redraw,
+            Changed,
+            Save,
+            Revert,
+            Close,
+            Ignore,
+        }
+        let outcome = {
+            let config = &mut self.config;
+            let Some(settings) = self.tabs[index].page.as_mut().and_then(Page::settings_mut) else {
+                return Some(false);
+            };
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => match settings.escape() {
+                    EscapeAction::Stay => KeyOutcome::Redraw,
+                    EscapeAction::Revert => KeyOutcome::Revert,
+                    EscapeAction::Close => KeyOutcome::Close,
+                },
+                Key::Named(NamedKey::ArrowUp) => {
+                    settings.move_selection(-1, rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    settings.move_selection(1, rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::PageUp) => {
+                    settings.page(-1, rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    settings.page(1, rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::Home) => {
+                    settings.home(rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::End) => {
+                    settings.end(rows);
+                    KeyOutcome::Redraw
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    if settings.adjust(-1, config) {
+                        KeyOutcome::Changed
+                    } else {
+                        KeyOutcome::Redraw
+                    }
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    if settings.adjust(1, config) {
+                        KeyOutcome::Changed
+                    } else {
+                        KeyOutcome::Redraw
+                    }
+                }
+                Key::Named(NamedKey::Enter) if !event.repeat => match settings.enter(config) {
+                    EnterAction::Stay => KeyOutcome::Redraw,
+                    EnterAction::Changed => KeyOutcome::Changed,
+                    EnterAction::Save => KeyOutcome::Save,
+                    EnterAction::Revert => KeyOutcome::Revert,
+                },
+                // Typing without an open editor does not edit a row; it is
+                // still consumed so no page keystroke reaches a shell.
+                Key::Character(_) => KeyOutcome::Ignore,
+                _ => KeyOutcome::Ignore,
+            }
+        };
+        match outcome {
+            KeyOutcome::Redraw => self.refresh_page(id),
+            KeyOutcome::Changed => {
+                self.apply_settings(id);
+                self.refresh_page(id);
+            }
+            KeyOutcome::Save => self.save_settings(id),
+            KeyOutcome::Revert => self.revert_settings(id),
+            KeyOutcome::Close => return Some(self.close_tab(index)),
+            KeyOutcome::Ignore => {}
+        }
+        Some(false)
+    }
+
+    /// Repaints a page after its model changed the visible rows or status.
+    fn refresh_page(&mut self, id: SessionId) {
+        self.refill_page(id);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Applies the live configuration to the renderer and the current grid.
+    ///
+    /// Fonts are rebuilt only when a metric changed; a failed load restores the
+    /// previous font fields and reports the error in the page's status line.
+    /// Theme, padding, bidi, selection flags, and the dynamic title are read
+    /// from the config on the next frame, so only the title needs a direct
+    /// call.
+    fn apply_settings(&mut self, id: SessionId) {
+        let scale = self.scale_factor();
+        if self.config.font != self.applied_font {
+            let fonts = FontSet::load(
+                &self.config.font.family,
+                &self.config.font.arabic_family,
+                scaled_font_size(self.config.font.size, scale),
+                self.config.font.line_height,
+            );
+            match fonts {
+                Ok(fonts) => {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.set_fonts(fonts);
+                    }
+                    self.applied_font = self.config.font.clone();
+                }
+                Err(err) => {
+                    self.config.font = self.applied_font.clone();
+                    if let Some(settings) = self
+                        .tabs
+                        .session_mut(id)
+                        .and_then(|session| session.page.as_mut())
+                        .and_then(Page::settings_mut)
+                    {
+                        settings.set_error(format!("Could not load font: {err}"));
+                    }
+                    tracing::error!(
+                        %err,
+                        "could not load the configured font; keeping the old set"
+                    );
+                }
+            }
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_theme(Theme::from_config(&self.config.theme));
+            renderer.set_padding(scaled_padding(self.config.window.padding, scale));
+        }
+        if let Some(size) = self.window.as_ref().map(|window| window.inner_size()) {
+            if self.resize_grid(size.width, size.height) {
+                // Reflow invalidates logical selection positions.
+                self.selection = None;
+                self.refill_pages();
+            }
+        }
+        let title = self
+            .tabs
+            .active()
+            .and_then(|session| session.title.clone())
+            .unwrap_or_default();
+        self.apply_title(&title);
+        if !self.config.window.dynamic_title {
+            if let Some(window) = &self.window {
+                window.set_title(FALLBACK_TITLE);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Saves the Settings state and the live config. A pending inline edit is
+    /// committed first so `Ctrl+S` never silently drops it; an invalid value
+    /// leaves the editor open and reports why.
+    fn save_settings(&mut self, id: SessionId) {
+        let mut changed = false;
+        let mut invalid = false;
+        {
+            let config = &mut self.config;
+            let Some(settings) = self
+                .tabs
+                .session_mut(id)
+                .and_then(|session| session.page.as_mut())
+                .and_then(Page::settings_mut)
+            else {
+                return;
+            };
+            if settings.editing() {
+                match settings.commit_edit(config) {
+                    CommitOutcome::Changed => changed = true,
+                    CommitOutcome::Invalid => invalid = true,
+                    CommitOutcome::Unchanged => {}
+                }
+            }
+        }
+        if invalid {
+            self.refresh_page(id);
+            return;
+        }
+        if changed {
+            self.apply_settings(id);
+        }
+        match self.config.save(&self.config_path) {
+            Ok(()) => {
+                self.saved_config = self.config.clone();
+                self.settings_stamp = page::settings_stamp(&self.config_path);
+                if let Some(settings) = self
+                    .tabs
+                    .session_mut(id)
+                    .and_then(|session| session.page.as_mut())
+                    .and_then(Page::settings_mut)
+                {
+                    settings.mark_saved();
+                }
+            }
+            Err(err) => {
+                if let Some(settings) = self
+                    .tabs
+                    .session_mut(id)
+                    .and_then(|session| session.page.as_mut())
+                    .and_then(Page::settings_mut)
+                {
+                    settings.set_error(format!("Save failed: {err}"));
+                }
+            }
+        }
+        self.refresh_page(id);
+    }
+
+    /// Restores the last saved config and reapplies it. Revert is a no-op while
+    /// the page is clean and has no editor open.
+    fn revert_settings(&mut self, id: SessionId) {
+        let has_changes = self
+            .tabs
+            .session_mut(id)
+            .and_then(|session| session.page.as_mut())
+            .and_then(Page::settings_mut)
+            .is_some_and(|settings| settings.is_dirty() || settings.editing());
+        if let Some(settings) = self
+            .tabs
+            .session_mut(id)
+            .and_then(|session| session.page.as_mut())
+            .and_then(Page::settings_mut)
+        {
+            settings.mark_clean();
+        }
+        if has_changes {
+            self.config = self.saved_config.clone();
+            self.apply_settings(id);
+        }
+        self.refresh_page(id);
     }
 
     /// Runs a tab shortcut. Returns whether the last tab is gone, which leaves
@@ -1545,12 +1866,27 @@ impl App {
         let Some(session) = self.tabs.session_mut(id) else {
             return;
         };
-        let Some(page) = session.page.as_ref() else {
+        let Some(page) = session.page.as_mut() else {
             return;
         };
-        let text = page.text(&self.config, &self.config_path);
+        page.ensure_visible(self.rows);
+        let text = page.text(&self.config, &self.config_path, self.cols, self.rows);
         session.terminal.feed(text.as_bytes());
         self.selection = None;
+    }
+
+    /// Rebuilds every page after the grid reflowed. A page's content is
+    /// generated from the grid size, so it keeps the old width until refilled.
+    fn refill_pages(&mut self) {
+        let ids: Vec<SessionId> = self
+            .tabs
+            .iter_mut()
+            .filter(|session| session.page.is_some())
+            .map(|session| session.id)
+            .collect();
+        for id in ids {
+            self.refill_page(id);
+        }
     }
 
     /// Shows the tab `delta` places from the active one, wrapping at both ends.
@@ -1944,6 +2280,13 @@ impl App {
             }
         }
 
+        // The Settings grid owns every press and release that reaches it:
+        // clicks select, adjust, or run a row, and never start a terminal
+        // selection, paste, or PTY report.
+        if let Some(index) = self.active_settings_index() {
+            return self.settings_mouse(index, state, button);
+        }
+
         if state == ElementState::Pressed {
             // Any press outside the band owns the next release, even if an
             // earlier band press never saw its own.
@@ -2110,6 +2453,76 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        false
+    }
+
+    /// The active tab's Settings slot index, if it is a Settings page.
+    fn active_settings_index(&self) -> Option<usize> {
+        let index = self.tabs.active_index()?;
+        (self.tabs[index].page.as_ref().map(Page::kind) == Some(PageKind::Settings))
+            .then_some(index)
+    }
+
+    /// A pointer position in the grid's logical cells. Settings rows are laid
+    /// out in logical order, so an RTL base direction has to be undone through
+    /// the same `VisualMap` the painter uses.
+    fn settings_cell_at(&self) -> Option<(usize, usize)> {
+        let renderer = self.renderer.as_ref()?;
+        let (row, visual) = cell_at(
+            self.cursor_pos.0,
+            self.cursor_pos.1,
+            GridGeometry::of(renderer),
+            self.cols,
+            self.rows,
+        );
+        let snapshot = self.tabs.active()?.terminal.snapshot();
+        let line = snapshot.lines.get(row)?;
+        Some((
+            row,
+            logical_pos_at(row, visual, line, &self.config.bidi).col,
+        ))
+    }
+
+    /// Routes a press or release to a Settings tab. The page consumes both, so
+    /// no button can fall through to selection or the clipboard.
+    fn settings_mouse(&mut self, index: usize, state: ElementState, button: MouseButton) -> bool {
+        self.release_forwarded_button();
+        self.mouse_down = false;
+        self.click_count = 0;
+        self.last_click = None;
+        self.press_in_chrome = true;
+        let actionable = state == ElementState::Pressed && button == MouseButton::Left;
+        if !actionable {
+            return false;
+        }
+        self.selection = None;
+        let Some((row, col)) = self.settings_cell_at() else {
+            return false;
+        };
+        let id = self.tabs[index].id;
+        let action = self.tabs[index]
+            .page
+            .as_mut()
+            .and_then(Page::settings_mut)
+            .and_then(|settings| settings.click(row, col, self.cols, self.rows));
+        match action {
+            Some(ClickAction::Adjust(delta)) => {
+                let changed = self.tabs[index]
+                    .page
+                    .as_mut()
+                    .and_then(Page::settings_mut)
+                    .is_some_and(|settings| settings.adjust(delta, &mut self.config));
+                if changed {
+                    self.apply_settings(id);
+                }
+                self.refresh_page(id);
+            }
+            Some(ClickAction::Save) => self.save_settings(id),
+            Some(ClickAction::Revert) => self.revert_settings(id),
+            Some(ClickAction::Select) | None => self.refresh_page(id),
+        }
+        // A right or middle press on the page is consumed without pasting; only
+        // the left button's hit above changes anything.
         false
     }
 
@@ -2969,6 +3382,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.resize_grid(size.width, size.height) {
                     // Reflow invalidates logical selection positions.
                     self.selection = None;
+                    self.refill_pages();
                 }
                 self.rebuild_layout();
                 if let Some(window) = &self.window {

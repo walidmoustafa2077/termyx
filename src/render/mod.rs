@@ -1110,6 +1110,13 @@ impl Renderer {
         self.cache = GlyphCache::new();
     }
 
+    /// Swaps in a palette built from the live configuration. The next frame
+    /// fills the pixmap with the new background and resolves every colour
+    /// through the new theme.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     /// Font data for a glyph-cache face id.
     pub(crate) fn fonts_face(&self, id: u8) -> (&ab_glyph::FontVec, u32) {
         self.fonts.font_for_id(id)

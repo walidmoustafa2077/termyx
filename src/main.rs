@@ -16,6 +16,7 @@ mod render;
 mod scrollbar;
 mod selection;
 mod session;
+mod settings;
 mod shape;
 mod term;
 mod theme;

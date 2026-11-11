@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::config::Config;
+use crate::settings::SettingsState;
 
 /// Escape sequence that hides the cursor, clears the grid and the scrollback,
 /// and homes the cursor.
@@ -57,6 +58,9 @@ pub struct Page {
     kind: PageKind,
     query: String,
     selected: usize,
+    /// The Settings tab's selection, viewport, inline edit, and status. The
+    /// other page kinds leave it untouched.
+    settings: SettingsState,
 }
 
 impl Page {
@@ -65,6 +69,7 @@ impl Page {
             kind,
             query: String::new(),
             selected: 0,
+            settings: SettingsState::new(),
         }
     }
 
@@ -127,13 +132,44 @@ impl Page {
             .map(|entry| entry.action)
     }
 
-    /// The full screen contents for this page.
-    pub fn text(&self, config: &Config, config_path: &Path) -> String {
+    /// The Settings model, when this is a Settings tab.
+    pub fn settings(&self) -> Option<&SettingsState> {
+        (self.kind == PageKind::Settings).then_some(&self.settings)
+    }
+
+    /// The Settings model for an open Settings tab.
+    pub fn settings_mut(&mut self) -> Option<&mut SettingsState> {
+        (self.kind == PageKind::Settings).then_some(&mut self.settings)
+    }
+
+    /// Keeps the Settings selection inside a body of `rows` grid rows. Other
+    /// page kinds have no selection to reveal.
+    pub fn ensure_visible(&mut self, rows: usize) {
+        if self.kind == PageKind::Settings {
+            self.settings.ensure_visible(rows);
+        }
+    }
+
+    /// The full screen contents for this page. The grid dimensions are needed
+    /// only by Settings, whose viewport is exactly the visible body rows.
+    pub fn text(&self, config: &Config, config_path: &Path, cols: usize, rows: usize) -> String {
         match self.kind {
-            PageKind::Settings => settings_text(config_path),
+            PageKind::Settings => self.settings_text(config, config_path, cols, rows),
             PageKind::CommandPalette => self.palette_text(config),
             PageKind::About => about_page_text(),
         }
+    }
+
+    fn settings_text(
+        &self,
+        config: &Config,
+        config_path: &Path,
+        cols: usize,
+        rows: usize,
+    ) -> String {
+        let mut out = String::from(RESET_SCREEN);
+        out.push_str(&self.settings.render(config, config_path, cols, rows));
+        out
     }
 
     fn palette_text(&self, config: &Config) -> String {
@@ -173,28 +209,6 @@ pub fn about_text() -> String {
     )
 }
 
-fn settings_text(path: &Path) -> String {
-    let mut out = String::with_capacity(2048);
-    out.push_str(RESET_SCREEN);
-    out.push_str("\x1b[1mSettings\x1b[0m\r\n\r\n");
-    let _ = write!(
-        out,
-        "\x1b[2mConfig file\x1b[0m\r\n{}\r\n\r\n",
-        path.display()
-    );
-    match fs::read_to_string(path) {
-        Ok(body) => out.push_str(&terminal_text(&body)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            out.push_str("\x1b[2mNo config file yet; defaults are in effect.\x1b[0m\r\n");
-        }
-        Err(error) => {
-            let _ = write!(out, "\x1b[2mCould not read the file: {error}\x1b[0m\r\n");
-        }
-    }
-    out.push_str("\r\n\x1b[2mSaved changes appear here automatically.\x1b[0m\r\n");
-    out
-}
-
 fn about_page_text() -> String {
     let mut out = String::with_capacity(512);
     out.push_str(RESET_SCREEN);
@@ -211,11 +225,6 @@ fn about_page_text() -> String {
         std::env::consts::ARCH
     );
     out
-}
-
-/// Terminal rows need `CRLF`; config files are written with plain newlines.
-fn terminal_text(raw: &str) -> String {
-    raw.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 #[cfg(test)]
@@ -279,26 +288,31 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_page_shows_its_path_and_the_file_contents() {
-        let path =
-            std::env::temp_dir().join(format!("termyx-page-test-{}.toml", std::process::id()));
-        fs::write(&path, "font.size = 15\n").expect("write the test config");
-        let text = settings_text(&path);
-        let _ = fs::remove_file(&path);
-        assert!(text.contains(&path.display().to_string()));
-        assert!(text.contains("font.size = 15\r\n"));
+    fn the_settings_page_fills_exactly_the_terminal_grid() {
+        let text = Page::new(PageKind::Settings).text(&config(), Path::new("config.toml"), 80, 24);
+        assert_eq!(
+            text.split("\r\n").count(),
+            24,
+            "the viewport must produce one line per grid row"
+        );
+        assert!(text.contains("Settings"));
+        assert!(text.contains("Appearance"));
+        assert!(text.contains("Ctrl+S"));
     }
 
     #[test]
-    fn a_missing_settings_file_says_defaults_are_in_effect() {
-        let path = std::env::temp_dir().join("termyx-page-missing.toml");
-        let text = settings_text(&path);
-        assert!(text.contains("defaults are in effect"));
+    fn a_settings_tab_owns_an_editable_model() {
+        let mut page = Page::new(PageKind::Settings);
+        assert!(page.settings().is_some());
+        let state = page.settings_mut().expect("a settings model");
+        assert_eq!(state.selected(), 0);
+        assert!(!state.editing());
+        assert!(Page::new(PageKind::About).settings().is_none());
     }
 
     #[test]
     fn the_about_page_names_the_app_and_its_version() {
-        let text = Page::new(PageKind::About).text(&config(), Path::new("unused"));
+        let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 80, 24);
         assert!(text.contains("Termyx"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
     }
@@ -319,7 +333,7 @@ mod tests {
         );
 
         let page = Page::new(PageKind::About);
-        terminal.feed(page.text(&config(), Path::new("unused")).as_bytes());
+        terminal.feed(page.text(&config(), Path::new("unused"), 40, 10).as_bytes());
         assert_eq!(
             terminal.history_size(),
             0,
