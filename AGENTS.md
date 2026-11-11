@@ -58,7 +58,8 @@ If a request conflicts with them, ask before drifting.
 In: one window, one shell session, bidi/RTL rendering with Arabic shaping and
 run-level continuous layout, Arial as the default Arabic face (bundled Kawkab
 Mono is opt-in), scrollback with a draggable scrollbar, resize, word/line/block
-selection, copy-on-select, right-click paste, application mouse reporting (DEC
+selection, copy-on-select, right- and middle-click paste, middle-click tab
+close, application mouse reporting (DEC
 modes 1000/1002/1003/1005/1006 with Shift+drag local selection), extended keys
 (Shift+Tab, F1–F12, modified navigation), cursor shape/visibility, focus
 reporting, window title (OSC 0/2, `dynamic_title` opt-in), OSC 52 copy, and

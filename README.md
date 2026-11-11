@@ -93,6 +93,8 @@ two-glyph forms. See `assets/fonts/README.md`.
   line.
 - Right-click or middle-click the grid pastes the clipboard.
 - While an application reports the mouse, hold **Shift** to select locally.
+- Middle-click a tab, active or not, closes it; the tab's `✕` does the same on
+  a left click.
 
 ## Tabs
 

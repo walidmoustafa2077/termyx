@@ -1283,14 +1283,7 @@ impl App {
                 self.cursor_pos,
             );
             self.last_strip_click = chain;
-            strip = strip_press(
-                press,
-                button == MouseButton::Left,
-                in_strip,
-                self.menu.is_some(),
-                double,
-                action,
-            );
+            strip = strip_press(press, button, in_strip, self.menu.is_some(), double, action);
         }
         let Some(input_button) = map_mouse_button(button) else {
             return false;
@@ -1930,20 +1923,23 @@ enum StripPress {
     /// A miss on empty band, second press: toggle maximise.
     ToggleMaximize,
     /// A painted control: run its action. A non-left press in the band gets
-    /// [`StripAction::Ignore`], which consumes it without running anything.
+    /// [`StripAction::Ignore`] (or a close for a middle press on a tab body),
+    /// which consumes it without running a left-button action.
     Act(StripAction),
 }
 
 /// Decides what one press inside the strip band means.
 ///
-/// `action` is the painted target under the pointer, `in_strip` says whether
-/// the point is inside the band at all, and `menu_open` gives the dropdown
-/// priority over everything painted below it. Only a left press on the empty
-/// band can drag or double-click; every other in-band press is chrome's but
-/// carries no action, so it is consumed rather than reaching the terminal.
+/// `action` is the painted target under the pointer, `button` is the button
+/// that landed, `in_strip` says whether the point is inside the band at all,
+/// and `menu_open` gives the dropdown priority over everything painted below
+/// it. A left press on the empty band can drag or double-click, and a left
+/// press on a painted target runs its action. A middle press on a tab body
+/// closes that tab. Every other press belongs to chrome but carries no action,
+/// so it is consumed rather than reaching the terminal.
 fn strip_press(
     press: ChromePress,
-    left: bool,
+    button: MouseButton,
     in_strip: bool,
     menu_open: bool,
     double: bool,
@@ -1952,8 +1948,16 @@ fn strip_press(
     if !in_strip || menu_open {
         return StripPress::Ignore;
     }
-    if !left {
-        return StripPress::Act(StripAction::Ignore);
+    if button != MouseButton::Left {
+        // A middle press on a tab body closes that tab, the browser-style
+        // gesture. A middle press on any other target - the close box, `+`,
+        // `⌄`, a caption control, or the empty band - is still chrome's but
+        // has no action. So is every right press. None may drag the window or
+        // reach the grid.
+        return StripPress::Act(match (button, action) {
+            (MouseButton::Middle, Some(StripAction::Select(index))) => StripAction::Close(index),
+            _ => StripAction::Ignore,
+        });
     }
     if press == ChromePress::Drag {
         return if double {
@@ -3261,14 +3265,28 @@ mod tests {
     fn strip_press_selects_one_action_for_every_press() {
         // Every branch the event loop can take is decided here: an empty-band
         // left press drags, its second press toggles, each painted control runs
-        // its action, any other button is consumed without one, and a press
+        // its action, a right press is consumed without one, and a press
         // outside the band falls through to the grid.
         assert_eq!(
-            strip_press(ChromePress::Drag, true, true, false, false, None),
+            strip_press(
+                ChromePress::Drag,
+                MouseButton::Left,
+                true,
+                false,
+                false,
+                None
+            ),
             StripPress::Drag
         );
         assert_eq!(
-            strip_press(ChromePress::Drag, true, true, false, true, None),
+            strip_press(
+                ChromePress::Drag,
+                MouseButton::Left,
+                true,
+                false,
+                true,
+                None
+            ),
             StripPress::ToggleMaximize
         );
 
@@ -3284,7 +3302,14 @@ mod tests {
         ];
         for action in controls {
             assert_eq!(
-                strip_press(ChromePress::Tab, true, true, false, false, Some(action)),
+                strip_press(
+                    ChromePress::Tab,
+                    MouseButton::Left,
+                    true,
+                    false,
+                    false,
+                    Some(action)
+                ),
                 StripPress::Act(action),
                 "a painted control must run {action:?}"
             );
@@ -3293,13 +3318,20 @@ mod tests {
         // A press outside the strip is the grid's, whichever button and double
         // click state it carries.
         assert_eq!(
-            strip_press(ChromePress::Drag, true, false, false, true, None),
+            strip_press(
+                ChromePress::Drag,
+                MouseButton::Left,
+                false,
+                false,
+                true,
+                None
+            ),
             StripPress::Ignore
         );
         assert_eq!(
             strip_press(
                 ChromePress::Tab,
-                false,
+                MouseButton::Middle,
                 false,
                 false,
                 false,
@@ -3308,20 +3340,20 @@ mod tests {
             StripPress::Ignore
         );
 
-        // A right or middle press on a painted control is chrome's but must not
-        // run the left-button action.
+        // A right press on a painted control is chrome's but must not run the
+        // left-button action.
         for press in [ChromePress::Drag, ChromePress::Tab] {
             assert_eq!(
                 strip_press(
                     press,
-                    false,
+                    MouseButton::Right,
                     true,
                     false,
                     false,
                     Some(StripAction::ToggleMaximize)
                 ),
                 StripPress::Act(StripAction::Ignore),
-                "a non-left press must be consumed without a control action"
+                "a right press must be consumed without a control action"
             );
         }
 
@@ -3329,7 +3361,7 @@ mod tests {
         assert_eq!(
             strip_press(
                 ChromePress::Tab,
-                true,
+                MouseButton::Left,
                 true,
                 true,
                 false,
@@ -3337,6 +3369,40 @@ mod tests {
             ),
             StripPress::Ignore
         );
+    }
+
+    #[test]
+    fn a_middle_press_on_a_tab_body_closes_it() {
+        assert_eq!(
+            strip_press(
+                ChromePress::Tab,
+                MouseButton::Middle,
+                true,
+                false,
+                false,
+                Some(StripAction::Select(2))
+            ),
+            StripPress::Act(StripAction::Close(2))
+        );
+    }
+
+    #[test]
+    fn a_middle_press_off_a_tab_body_is_consumed_without_an_action() {
+        for (press, action) in [
+            (ChromePress::Drag, None),
+            (ChromePress::Tab, Some(StripAction::Close(2))),
+            (ChromePress::Tab, Some(StripAction::NewTab)),
+            (ChromePress::Tab, Some(StripAction::OpenMenu)),
+            (ChromePress::Tab, Some(StripAction::MinimizeWindow)),
+            (ChromePress::Tab, Some(StripAction::ToggleMaximize)),
+            (ChromePress::Tab, Some(StripAction::CloseWindow)),
+        ] {
+            assert_eq!(
+                strip_press(press, MouseButton::Middle, true, false, false, action),
+                StripPress::Act(StripAction::Ignore),
+                "{press:?} with {action:?} must not run a left-button action"
+            );
+        }
     }
 
     #[test]
