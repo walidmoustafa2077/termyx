@@ -1628,7 +1628,20 @@ impl App {
     }
 
     /// Repaints a page after its model changed the visible rows or status.
+    ///
+    /// The unsaved marker is derived from the live config here rather than
+    /// latched on the first edit, so adjusting a value back to the saved one
+    /// clears it again and `Esc`/`Revert` become no-ops as documented.
     fn refresh_page(&mut self, id: SessionId) {
+        let dirty = self.config != self.saved_config;
+        if let Some(settings) = self
+            .tabs
+            .session_mut(id)
+            .and_then(|session| session.page.as_mut())
+            .and_then(Page::settings_mut)
+        {
+            settings.set_dirty(dirty);
+        }
         self.refill_page(id);
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1642,8 +1655,12 @@ impl App {
     /// Theme, padding, bidi, selection flags, and the dynamic title are read
     /// from the config on the next frame, so only the title needs a direct
     /// call.
-    fn apply_settings(&mut self, id: SessionId) {
+    ///
+    /// Returns `false` when a font edit was rejected, so the save path can keep
+    /// the error status instead of reporting the old font as saved.
+    fn apply_settings(&mut self, id: SessionId) -> bool {
         let scale = self.scale_factor();
+        let mut applied = true;
         if self.config.font != self.applied_font {
             let fonts = FontSet::load(
                 &self.config.font.family,
@@ -1659,6 +1676,7 @@ impl App {
                     self.applied_font = self.config.font.clone();
                 }
                 Err(err) => {
+                    applied = false;
                     self.config.font = self.applied_font.clone();
                     if let Some(settings) = self
                         .tabs
@@ -1700,6 +1718,7 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        applied
     }
 
     /// Saves the Settings state and the live config. A pending inline edit is
@@ -1730,8 +1749,12 @@ impl App {
             self.refresh_page(id);
             return;
         }
-        if changed {
-            self.apply_settings(id);
+        if changed && !self.apply_settings(id) {
+            // A rejected font edit restored the old font and put its error in
+            // the status line. Writing the old font under `Saved` would hide
+            // the failure, so the save is abandoned until the edit is fixed.
+            self.refresh_page(id);
+            return;
         }
         match self.config.save(&self.config_path) {
             Ok(()) => {
@@ -2463,10 +2486,15 @@ impl App {
             .then_some(index)
     }
 
-    /// A pointer position in the grid's logical cells. Settings rows are laid
-    /// out in logical order, so an RTL base direction has to be undone through
-    /// the same `VisualMap` the painter uses.
-    fn settings_cell_at(&self) -> Option<(usize, usize)> {
+    /// A pointer position resolved for the Settings model: the logical grid
+    /// row, the logical cell under the pointer, and whether that cell is in
+    /// the visual left half of a row's value zone.
+    ///
+    /// Settings rows are laid out in logical order, so an RTL base direction
+    /// has to be undone through the same `VisualMap` the painter uses. The
+    /// half is decided on the visual axis because the row is right-anchored
+    /// there: logical columns do not run left to right.
+    fn settings_hit_point(&self) -> Option<(usize, usize, bool)> {
         let renderer = self.renderer.as_ref()?;
         let (row, visual) = cell_at(
             self.cursor_pos.0,
@@ -2477,10 +2505,11 @@ impl App {
         );
         let snapshot = self.tabs.active()?.terminal.snapshot();
         let line = snapshot.lines.get(row)?;
-        Some((
-            row,
-            logical_pos_at(row, visual, line, &self.config.bidi).col,
-        ))
+        let map = VisualMap::for_row(line, &self.config.bidi);
+        let col = map.logical_at(visual);
+        let value_visual = map.visual_of(crate::settings::VALUE_COL);
+        let left_half = visual < crate::settings::value_midpoint(value_visual, self.cols);
+        Some((row, col, left_half))
     }
 
     /// Routes a press or release to a Settings tab. The page consumes both, so
@@ -2496,7 +2525,7 @@ impl App {
             return false;
         }
         self.selection = None;
-        let Some((row, col)) = self.settings_cell_at() else {
+        let Some((row, col, left_half)) = self.settings_hit_point() else {
             return false;
         };
         let id = self.tabs[index].id;
@@ -2504,7 +2533,7 @@ impl App {
             .page
             .as_mut()
             .and_then(Page::settings_mut)
-            .and_then(|settings| settings.click(row, col, self.cols, self.rows));
+            .and_then(|settings| settings.click(row, col, left_half, self.rows));
         match action {
             Some(ClickAction::Adjust(delta)) => {
                 let changed = self.tabs[index]

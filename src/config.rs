@@ -46,7 +46,7 @@ impl ProfileConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     pub font: FontConfig,
@@ -100,7 +100,7 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BidiConfig {
     pub enabled: bool,
@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for BaseDirection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct WindowConfig {
     pub width: u32,
@@ -161,7 +161,7 @@ impl Default for WindowConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ScrollbackConfig {
     pub lines: usize,
@@ -173,7 +173,7 @@ impl Default for ScrollbackConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SelectionConfig {
     pub trim_trailing: bool,
@@ -189,7 +189,7 @@ impl Default for SelectionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ThemeConfig {
     pub background: String,

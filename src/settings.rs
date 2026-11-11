@@ -43,7 +43,7 @@ pub enum ClickAction {
 
 /// Column where a row's value or control begins. Clicking left of it selects
 /// the row without changing its value.
-const VALUE_COL: usize = 22;
+pub const VALUE_COL: usize = 22;
 
 /// Inner width of a row label, after the two-space indent.
 const LABEL_WIDTH: usize = 20;
@@ -416,7 +416,7 @@ impl SettingsState {
     }
 
     pub fn page(&mut self, delta: isize, rows: usize) {
-        let step = Self::body_rows(rows).saturating_sub(1).max(1) as isize;
+        let step = Self::body_rows(rows).max(1) as isize;
         self.move_selection(delta.signum() * step, rows);
     }
 
@@ -583,6 +583,17 @@ impl SettingsState {
         self.error = None;
     }
 
+    /// Recomputes the unsaved marker from the live config. The model cannot
+    /// see the last saved config, so the app calls this after every change;
+    /// a value that returns to the saved one clears the marker again. The
+    /// error line is kept so a rejected edit stays visible.
+    pub fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+        if dirty {
+            self.saved = false;
+        }
+    }
+
     pub fn mark_clean(&mut self) {
         self.dirty = false;
         self.saved = false;
@@ -595,17 +606,26 @@ impl SettingsState {
         self.saved = false;
     }
 
-    /// Resolves a click at a logical grid row and column. Returns `None` for a
-    /// section heading or a point outside the rows; the app still consumes the
-    /// click in either case.
+    /// Resolves a click at a logical grid row and column. `left_half` is
+    /// whether the pointer is in the visual left half of the value zone; the
+    /// app resolves it through `VisualMap` because an RTL row is right-
+    /// anchored and the logical columns do not run left to right.
+    ///
+    /// Returns `None` for a section heading, a point outside the rows, or a
+    /// click on another row while an inline edit is open. Ignoring those keeps
+    /// the highlight, the editor, and the row `Enter` commits on the same row;
+    /// the app still consumes the click in every case.
     pub fn click(
         &mut self,
         screen_row: usize,
         col: usize,
-        cols: usize,
+        left_half: bool,
         rows: usize,
     ) -> Option<ClickAction> {
-        let (row, action) = self.hit(screen_row, col, cols, rows)?;
+        let (row, action) = self.hit(screen_row, col, left_half, rows)?;
+        if self.edit.as_ref().is_some_and(|edit| edit.row != row) {
+            return None;
+        }
         self.selected = row;
         Some(action)
     }
@@ -614,7 +634,7 @@ impl SettingsState {
         &self,
         screen_row: usize,
         col: usize,
-        cols: usize,
+        left_half: bool,
         rows: usize,
     ) -> Option<(usize, ClickAction)> {
         let body = Self::body_rows(rows);
@@ -639,8 +659,7 @@ impl SettingsState {
         if col < VALUE_COL || kind.is_text() {
             return Some((row, ClickAction::Select));
         }
-        let middle = VALUE_COL + cols.saturating_sub(VALUE_COL) / 2;
-        Some((row, ClickAction::Adjust(if col < middle { -1 } else { 1 })))
+        Some((row, ClickAction::Adjust(if left_half { -1 } else { 1 })))
     }
 
     /// Keeps the selected row inside the visible body when the grid shrinks.
@@ -682,7 +701,7 @@ impl SettingsState {
         }
         lines.push(self.status_line(cols));
         lines.push(styled(
-            "Up/Down move  Left/Right adjust  Enter edit/run  Esc revert/close  Ctrl+S save",
+            "↑↓ PageUp/PageDown Home/End  ←→ adjust  Enter edit  Esc revert  Ctrl+S save",
             "\x1b[2m",
             cols,
         ));
@@ -769,6 +788,14 @@ impl SettingsState {
         }
         self.scroll = self.clamped_scroll(body);
     }
+}
+
+/// Visual column that divides a row's value zone into halves. `value_visual`
+/// is the visual position of [`VALUE_COL`]: under an RTL base direction the
+/// whole line is right-anchored, so the zone starts further right and the
+/// midpoint moves with it.
+pub fn value_midpoint(value_visual: usize, cols: usize) -> usize {
+    value_visual + cols.saturating_sub(value_visual) / 2
 }
 
 fn human_scrollback(lines: usize) -> String {
@@ -920,8 +947,28 @@ mod tests {
 
     fn select(state: &mut SettingsState, config: &Config, rows: usize, label: &str) {
         let row = row_of(state, config, rows, label);
-        let action = state.click(row, 2, 80, rows);
+        let action = state.click(row, 2, false, rows);
         assert!(matches!(action, Some(ClickAction::Select)));
+    }
+
+    fn latin_row(text: &str, cols: usize) -> crate::term::RowSnapshot {
+        let mut cells: Vec<crate::term::Cell> = text
+            .chars()
+            .map(|character| crate::term::Cell {
+                text: character.to_string(),
+                width: 1,
+                style: crate::term::Style::default(),
+            })
+            .collect();
+        cells.resize_with(cols, || crate::term::Cell {
+            text: " ".to_string(),
+            width: 1,
+            style: crate::term::Style::default(),
+        });
+        crate::term::RowSnapshot {
+            cells,
+            wrapped: false,
+        }
     }
 
     fn clear_edit(state: &mut SettingsState) {
@@ -956,7 +1003,7 @@ mod tests {
     fn page_keys_move_by_a_viewport_and_home_end_jump() {
         let mut state = SettingsState::new();
         state.page(1, 10);
-        assert!(state.selected() > 0);
+        assert_eq!(state.selected(), SettingsState::body_rows(10));
         let after_page = state.selected();
         state.page(-1, 10);
         assert!(state.selected() < after_page);
@@ -1154,6 +1201,17 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_documents_every_key() {
+        let config = config();
+        let state = SettingsState::new();
+        let text = state.render(&config, path(), 80, 24);
+        let footer = text.split("\r\n").last().unwrap_or_default();
+        for key in ["PageUp/PageDown", "Home/End", "Enter", "Esc", "Ctrl+S"] {
+            assert!(footer.contains(key), "footer {footer:?} omits {key}");
+        }
+    }
+
+    #[test]
     fn wide_characters_truncate_by_display_cells_not_characters() {
         let mut config = config();
         config.font.family = "字体字体字体字体字体字体".into();
@@ -1229,29 +1287,121 @@ mod tests {
 
         let size_row = row_of(&state, &config, 40, "Font size");
         assert_eq!(
-            state.click(size_row, 70, 80, 40),
+            state.click(size_row, 70, false, 40),
             Some(ClickAction::Adjust(1))
         );
         assert_eq!(state.selected(), 1);
         assert_eq!(
-            state.click(size_row, 24, 80, 40),
+            state.click(size_row, 24, true, 40),
             Some(ClickAction::Adjust(-1))
         );
 
         let family_row = row_of(&state, &config, 40, "Font family");
         assert_eq!(
-            state.click(family_row, 40, 80, 40),
+            state.click(family_row, 40, true, 40),
             Some(ClickAction::Select)
         );
         assert_eq!(state.selected(), 0);
 
         let save_row = row_of(&state, &config, 40, "Save");
-        assert_eq!(state.click(save_row, 2, 80, 40), Some(ClickAction::Save));
+        assert_eq!(state.click(save_row, 2, false, 40), Some(ClickAction::Save));
         let revert_row = row_of(&state, &config, 40, "Revert");
         assert_eq!(
-            state.click(revert_row, 2, 80, 40),
+            state.click(revert_row, 2, false, 40),
             Some(ClickAction::Revert)
         );
+    }
+
+    #[test]
+    fn an_rtl_row_decides_the_half_in_visual_space() {
+        let cols = 40;
+        // The settings text is Latin and the row is right-anchored under an
+        // RTL base direction, so logical cell 22 sits far to the right.
+        let text = format!("  {:<LABEL_WIDTH$}◀ 16 ▶", "Font size");
+        let line = latin_row(&text, cols);
+        let map = crate::visual::VisualMap::from_bidi(&line, BaseDirection::Rtl);
+        let value_visual = map.visual_of(VALUE_COL);
+        let middle = value_midpoint(value_visual, cols);
+        assert!(value_visual > VALUE_COL, "the line is not right-anchored");
+
+        // The visual left edge of the value zone decrements.
+        let col = map.logical_at(value_visual);
+        assert_eq!(col, VALUE_COL);
+        let mut state = SettingsState::new();
+        assert_eq!(
+            state.click(3, col, value_visual < middle, cols),
+            Some(ClickAction::Adjust(-1))
+        );
+
+        // A click in the visual right half increments, even though its
+        // logical column is left of the logical midpoint that the old rule
+        // compared against.
+        let visual = (middle..cols)
+            .find(|visual| map.logical_at(*visual) >= VALUE_COL)
+            .expect("a value cell in the visual right half");
+        let col = map.logical_at(visual);
+        assert!(col < VALUE_COL + (cols - VALUE_COL) / 2);
+        assert_eq!(
+            state.click(3, col, visual < middle, cols),
+            Some(ClickAction::Adjust(1))
+        );
+    }
+
+    #[test]
+    fn clicking_another_row_while_editing_is_ignored() {
+        let mut config = config();
+        let mut state = SettingsState::new();
+        select(&mut state, &config, 40, "Font family");
+        state.enter(&mut config);
+        assert!(state.editing());
+
+        let size_row = row_of(&state, &config, 40, "Font size");
+        assert_eq!(state.click(size_row, 2, false, 40), None);
+        assert_eq!(state.selected(), 0);
+        assert!(state.editing());
+
+        // Actions are ignored too: the open editor must be committed or
+        // cancelled before another row can act.
+        let save_row = row_of(&state, &config, 40, "Save");
+        assert_eq!(state.click(save_row, 2, false, 40), None);
+        assert_eq!(state.selected(), 0);
+
+        // The edited row still accepts a click and can commit.
+        let family_row = row_of(&state, &config, 40, "Font family");
+        assert_eq!(
+            state.click(family_row, 2, false, 40),
+            Some(ClickAction::Select)
+        );
+        assert_eq!(state.commit_edit(&mut config), CommitOutcome::Unchanged);
+        assert!(!state.editing());
+        assert_eq!(config.font.family, "Cascadia Mono");
+    }
+
+    #[test]
+    fn hit_testing_maps_screen_rows_through_a_scrolled_viewport() {
+        let mut state = SettingsState::new();
+        state.end(10);
+        assert_eq!(state.scroll(), 29);
+
+        // The first visible body row is Scrollback, the seventh is Revert.
+        assert_eq!(state.click(1, 2, false, 10), Some(ClickAction::Select));
+        assert_eq!(state.selected(), 26);
+        assert_eq!(state.click(7, 2, false, 10), Some(ClickAction::Revert));
+        assert_eq!(state.selected(), 31);
+    }
+
+    #[test]
+    fn clearing_dirty_without_saving_drops_the_unsaved_marker() {
+        let mut config = config();
+        let mut state = SettingsState::new();
+        select(&mut state, &config, 40, "Font size");
+        state.adjust(1, &mut config);
+        assert!(state.is_dirty());
+        state.set_dirty(false);
+        assert!(!state.is_dirty());
+        assert!(!state
+            .render(&config, path(), 80, 24)
+            .contains("Unsaved changes"));
     }
 
     #[test]
@@ -1259,9 +1409,9 @@ mod tests {
         let config = config();
         let mut state = SettingsState::new();
         let theme_row = row_of(&state, &config, 40, "Theme");
-        assert_eq!(state.click(theme_row, 2, 80, 40), None);
+        assert_eq!(state.click(theme_row, 2, false, 40), None);
         let status_row = 40 - 2;
-        assert_eq!(state.click(status_row, 2, 80, 40), None);
+        assert_eq!(state.click(status_row, 2, false, 40), None);
         assert_eq!(state.selected(), 0);
     }
 }
