@@ -36,7 +36,7 @@ pub const SPELLCHECK_HOVER_RADIUS: f32 = 4.0;
 pub const SPELLCHECK_TEXT_PX: f32 = 12.0;
 
 /// Default excuse kept when a caller disables replacement without saying why.
-pub const SPELLCHECK_NOT_LAST_WORD: &str = "the cursor must be at the end of the last word";
+pub const SPELLCHECK_CURSOR_INSIDE_WORD: &str = "move the cursor past the word to replace it";
 
 /// One row of the menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +80,7 @@ pub struct SpellcheckMenu {
     /// Suggestions first, then the two actions; never empty.
     pub items: Vec<MenuItem>,
     /// Whether replacement is possible. Gates [`MenuItem::Suggest`] only: the
-    /// two actions stay live even when the cursor has moved off the token.
+    /// two actions stay live even when the cursor still sits inside the token.
     pub enabled: bool,
     /// Why replacement is unavailable.
     ///
@@ -114,7 +114,7 @@ impl SpellcheckMenu {
         let disabled_reason = if can_replace {
             disabled_reason
         } else {
-            Some(disabled_reason.unwrap_or(SPELLCHECK_NOT_LAST_WORD))
+            Some(disabled_reason.unwrap_or(SPELLCHECK_CURSOR_INSIDE_WORD))
         };
         Self {
             row,
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn a_missing_reason_falls_back_to_the_cursor_hint() {
         let menu = SpellcheckMenu::new(0, 0, 3, "teh".to_string(), vec![], false, None);
-        assert_eq!(menu.disabled_reason, Some(SPELLCHECK_NOT_LAST_WORD));
+        assert_eq!(menu.disabled_reason, Some(SPELLCHECK_CURSOR_INSIDE_WORD));
     }
 
     #[test]

@@ -2025,6 +2025,26 @@ impl App {
         }
     }
 
+    /// Walks the shell caret to a cell the user clicked on the input line.
+    ///
+    /// The shell owns its caret and exposes no way to address it, so a click is
+    /// turned into the arrow keys every prompt understands. Only the live input
+    /// row is addressable: a click on output above, on the prompt text itself,
+    /// or on a scrolled-back viewport sends no bytes at all.
+    fn move_shell_caret(&mut self, position: LogicalPos) {
+        let Some(snapshot) = self
+            .tabs
+            .active()
+            .map(|session| session.terminal.snapshot())
+        else {
+            return;
+        };
+        let Some(bytes) = caret_move(&snapshot, position) else {
+            return;
+        };
+        self.write_input(&bytes);
+    }
+
     /// Drops the open suggestion menu without acting on it.
     ///
     /// Any change to the grid, the tab set, or the window invalidates the menu:
@@ -2092,7 +2112,7 @@ impl App {
                     return;
                 };
                 let cells = snapshot.row_cells(menu.row);
-                let Some(token) = revalidate_span(
+                let Some((token, tail)) = revalidate_span(
                     &menu.token,
                     menu.row,
                     menu.col,
@@ -2103,7 +2123,7 @@ impl App {
                 ) else {
                     return;
                 };
-                let bytes = replacement_bytes(&token, menu.len, &word);
+                let bytes = replacement_bytes(&token, menu.len, &word, tail);
                 self.write_input(&bytes);
             }
             SpellcheckItem::AddToDictionary => {
@@ -2708,6 +2728,20 @@ impl App {
                 return false;
             } else {
                 self.mouse_down = false;
+                // A click that neither dragged nor landed in the chrome aims the
+                // shell caret at the cell under the pointer. Checking the drag
+                // first is what lets one gesture do both: hold to select, tap to
+                // place the caret.
+                if button == MouseButton::Left && !from_chrome && self.click_count == 1 {
+                    let caret = self
+                        .selection
+                        .as_ref()
+                        .filter(|selection| selection.anchor == selection.focus)
+                        .map(|selection| selection.focus);
+                    if let Some(position) = caret {
+                        self.move_shell_caret(position);
+                    }
+                }
                 if button == MouseButton::Left && self.config.selection.copy_on_select {
                     if let Some(selection) = &self.selection {
                         let collapsed = selection.anchor == selection.focus;
@@ -4092,6 +4126,79 @@ fn compute_spellcheck_spans(
     spans
 }
 
+/// The arrow keys that walk the shell caret from one column to another.
+///
+/// `ESC [ D` and `ESC [ C` are the plain cursor-left/right keys, which every
+/// line editor that paints its own prompt already understands. No protocol is
+/// involved, so a click needs nothing from the shell beyond a cursor.
+fn caret_bytes(from_col: usize, to_col: usize) -> Vec<u8> {
+    let left = from_col.saturating_sub(to_col);
+    let right = to_col.saturating_sub(from_col);
+    let mut bytes = Vec::with_capacity(3 * (left + right));
+    for _ in 0..left {
+        bytes.extend_from_slice(b"\x1b[D");
+    }
+    for _ in 0..right {
+        bytes.extend_from_slice(b"\x1b[C");
+    }
+    bytes
+}
+
+/// The bytes that move the shell caret to `click`, or `None` when the click is
+/// not a caret move.
+///
+/// Only the row holding both the cursor and the input mark is addressable: arrow
+/// keys cannot cross a wrapped line reliably, so a click anywhere else is
+/// ignored rather than guessed at. A click before the prompt text is ignored
+/// too, and a click past the last typed cell clamps to that cell so a tap in
+/// empty space right of the line does not overshoot.
+///
+/// The walk is refused when any cell between the two columns is not a single
+/// character one column wide: arrow keys count characters, so a wide or
+/// combining cell would leave the caret between the two ends.
+fn caret_move(snapshot: &GridSnapshot, click: LogicalPos) -> Option<Vec<u8>> {
+    if snapshot.display_offset != 0 {
+        return None;
+    }
+    let start = snapshot.input_start?;
+    if start.row < 0 {
+        return None;
+    }
+    let row = snapshot.cursor.row;
+    if start.row as usize != row || click.row != row {
+        return None;
+    }
+    let start_col = start.col.min(snapshot.cols);
+    if click.col < start_col {
+        return None;
+    }
+    let cells = snapshot.row_cells(row);
+    // `text == " "` is a blank cell; an empty string is the second half of a
+    // wide glyph, which still counts as text.
+    let end = cells
+        .iter()
+        .rposition(|cell| cell.text != " ")
+        .map_or(start_col, |index| index + 1);
+    let target = click.col.min(end);
+    let cursor_col = snapshot.cursor.logical.min(snapshot.cols);
+    if target == cursor_col {
+        return None;
+    }
+    let (low, high) = if target < cursor_col {
+        (target, cursor_col)
+    } else {
+        (cursor_col, target)
+    };
+    let walked = cells.get(low..high)?;
+    if walked
+        .iter()
+        .any(|cell| cell.width != 1 || cell.text.chars().count() != 1)
+    {
+        return None;
+    }
+    Some(caret_bytes(cursor_col, target))
+}
+
 /// The visual column a token starts at on a row.
 ///
 /// The underline paints through [`VisualMap::visual_of`], so the panel must map
@@ -4182,9 +4289,11 @@ fn grid_viewport_rect(
 /// Builds the menu for the span containing cell `(row, col)`, or `None` when
 /// the pointer is between words or outside the input line.
 ///
-/// Replacement is offered only for the last span with the cursor at its end:
-/// `scan` stops at the cursor, so any earlier token would be followed by text
-/// the backspaces would not delete.
+/// Replacement is offered for every span that ends at or before the cursor:
+/// [`replacement_bytes`] walks the cursor left over whatever follows the word,
+/// edits it, and walks back, so a token in the middle of the line is editable
+/// too. Only a cursor that still sits inside the word leaves the suggestions
+/// dimmed, because there is no safe place to start the edit from.
 fn spellcheck_menu_for(
     spans: &[Misspelling],
     row: usize,
@@ -4196,7 +4305,10 @@ fn spellcheck_menu_for(
         .iter()
         .position(|span| span.row == row && col >= span.col && col < span.col + span.len)?;
     let span = spans[index];
-    let can_replace = index + 1 == spans.len() && span.col + span.len == cursor_col;
+    let can_replace = span
+        .col
+        .checked_add(span.len)
+        .is_some_and(|end| end <= cursor_col);
     let token: String = cells
         .get(span.col..span.col + span.len)?
         .iter()
@@ -4216,11 +4328,16 @@ fn spellcheck_menu_for(
 
 /// Re-derives the token a menu was opened on from the live grid.
 ///
-/// Returns the current text only when the grid still satisfies every rule the
-/// menu relied on: the input line is still at `row`, the span still starts at
-/// `col`, still has `len` cells, still spells `token`, and still ends at the
-/// cursor. Any mismatch means a click would delete the wrong text, so the
-/// caller sends nothing.
+/// Returns the current text and the number of cells between the token and the
+/// cursor when the grid still satisfies every rule the menu relied on: the
+/// input line is still at `row`, the span still starts at `col`, still has
+/// `len` cells, still spells `token`, and the cursor is still at or past its
+/// end. Any mismatch means a click would delete the wrong text, so the caller
+/// sends nothing.
+///
+/// The tail count is what [`replacement_bytes`] walks back over: a word that
+/// is not the last one on the line is edited by stepping to its end first and
+/// returning to the cursor afterwards.
 fn revalidate_span(
     token: &str,
     row: usize,
@@ -4229,16 +4346,18 @@ fn revalidate_span(
     cells: &[Cell],
     cursor_row: usize,
     cursor_col: usize,
-) -> Option<String> {
-    if row != cursor_row || col.checked_add(len)? != cursor_col {
+) -> Option<(String, usize)> {
+    if row != cursor_row {
         return None;
     }
+    let end = col.checked_add(len)?;
+    let tail = cursor_col.checked_sub(end)?;
     let live: String = cells
-        .get(col..col + len)?
+        .get(col..end)?
         .iter()
         .map(|cell| cell.text.as_str())
         .collect();
-    (live == token).then_some(live)
+    (live == token).then_some((live, tail))
 }
 
 /// The bytes that replace `token` with `replacement` in the shell's line
@@ -4247,8 +4366,19 @@ fn revalidate_span(
 /// `len` is the token's cell count, not its byte length: a cell may carry
 /// combining marks, so the two disagree. A token that starts with a capital
 /// keeps one, so replacing `Teh` with `the` writes `The`, not `the`.
-fn replacement_bytes(token: &str, len: usize, replacement: &str) -> Vec<u8> {
-    let mut bytes = vec![0x7f; len];
+///
+/// `tail` is how many cells sit between the token and the cursor. A token
+/// that is not the last one is edited in place: the cursor walks left over
+/// the tail, backspaces the token, types the replacement, then walks right
+/// again, which leaves the cursor exactly where the user had it. Arrow keys
+/// are line-editor primitives every shell with a prompt mark understands, so
+/// no shell-specific binding is needed.
+fn replacement_bytes(token: &str, len: usize, replacement: &str, tail: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(3 * tail + len + replacement.len());
+    for _ in 0..tail {
+        bytes.extend_from_slice(b"\x1b[D");
+    }
+    bytes.resize(bytes.len() + len, 0x7f);
     let mut word = replacement.to_string();
     if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         let mut chars = word.chars();
@@ -4257,6 +4387,9 @@ fn replacement_bytes(token: &str, len: usize, replacement: &str) -> Vec<u8> {
         }
     }
     bytes.extend_from_slice(word.as_bytes());
+    for _ in 0..tail {
+        bytes.extend_from_slice(b"\x1b[C");
+    }
     bytes
 }
 
@@ -5925,6 +6058,75 @@ mod tests {
     }
 
     #[test]
+    fn caret_bytes_walks_both_directions() {
+        assert_eq!(caret_bytes(10, 7).as_slice(), b"\x1b[D\x1b[D\x1b[D");
+        assert_eq!(caret_bytes(7, 10).as_slice(), b"\x1b[C\x1b[C\x1b[C");
+        assert!(caret_bytes(9, 9).is_empty());
+    }
+
+    #[test]
+    fn caret_move_walks_the_shell_caret_to_the_click() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS C:\\Users\\mrlok> \x1b]133;B\x07echo teh wrng");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.cursor.logical, 32);
+        assert_eq!(
+            caret_move(&snapshot, LogicalPos { row: 0, col: 20 }),
+            Some(b"\x1b[D".repeat(12).to_vec())
+        );
+    }
+
+    #[test]
+    fn caret_move_walks_right_when_the_caret_is_before_the_click() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS C:\\Users\\mrlok> \x1b]133;B\x07echo teh wrng\x1b[5D");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.cursor.logical, 27);
+        assert_eq!(
+            caret_move(&snapshot, LogicalPos { row: 0, col: 30 }),
+            Some(b"\x1b[C".repeat(3).to_vec())
+        );
+    }
+
+    #[test]
+    fn caret_move_ignores_the_prompt_and_other_rows() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"out\r\n\x1b]133;A\x07PS> \x1b]133;B\x07echo teh");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.cursor.row, 1);
+        assert!(caret_move(&snapshot, LogicalPos { row: 0, col: 6 }).is_none());
+        assert!(caret_move(&snapshot, LogicalPos { row: 1, col: 2 }).is_none());
+    }
+
+    #[test]
+    fn caret_move_clamps_past_the_end_of_the_line() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS C:\\Users\\mrlok> \x1b]133;B\x07echo teh wrng\x1b[5D");
+        let snapshot = term.snapshot();
+        assert_eq!(
+            caret_move(&snapshot, LogicalPos { row: 0, col: 70 }),
+            Some(b"\x1b[C".repeat(5).to_vec())
+        );
+    }
+
+    #[test]
+    fn caret_move_refuses_wide_cells() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo \xe4\xbd\xa0\xe5\xa5\xbd");
+        let snapshot = term.snapshot();
+        assert_eq!(snapshot.cursor.logical, 13);
+        assert!(caret_move(&snapshot, LogicalPos { row: 0, col: 5 }).is_none());
+    }
+
+    #[test]
+    fn caret_move_needs_the_prompt_mark() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.feed(b"echo teh");
+        let snapshot = term.snapshot();
+        assert!(caret_move(&snapshot, LogicalPos { row: 0, col: 2 }).is_none());
+    }
+
+    #[test]
     fn hit_finds_the_word_under_the_pointer() {
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
         let spans = compute_spellcheck_spans(&snapshot, true, false);
@@ -5951,15 +6153,15 @@ mod tests {
     }
 
     #[test]
-    fn replacement_allowed_only_for_the_last_word() {
+    fn replacement_is_offered_for_every_word_before_the_cursor() {
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
         let spans = compute_spellcheck_spans(&snapshot, true, false);
         let cells = snapshot.row_cells(0);
         let first = spellcheck_menu_for(&spans, 0, spans[0].col, &cells, snapshot.cursor.logical)
             .expect("the first span still opens a menu");
         assert!(
-            !first.enabled,
-            "a word before the cursor cannot be replaced"
+            first.enabled,
+            "a word with text after it is editable by walking the cursor back"
         );
 
         let last = spellcheck_menu_for(&spans, 0, spans[1].col, &cells, snapshot.cursor.logical)
@@ -5971,33 +6173,41 @@ mod tests {
     }
 
     #[test]
-    fn replacement_requires_the_cursor_at_the_end() {
+    fn replacement_is_disabled_while_the_cursor_is_inside_the_word() {
         let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem wrng"], Some((0, 4)));
         let spans = compute_spellcheck_spans(&snapshot, true, false);
         let cells = snapshot.row_cells(0);
         let span = spans[0];
-        let menu = spellcheck_menu_for(&spans, 0, span.col, &cells, span.col + span.len + 1)
+        let menu = spellcheck_menu_for(&spans, 0, span.col, &cells, span.col + 1)
             .expect("the span opens a menu");
         assert!(!menu.enabled);
         assert_eq!(
             menu.disabled_reason,
-            Some(crate::ui::spellcheck_menu::SPELLCHECK_NOT_LAST_WORD)
+            Some(crate::ui::spellcheck_menu::SPELLCHECK_CURSOR_INSIDE_WORD)
         );
     }
 
     #[test]
     fn replacement_deletes_exactly_the_token() {
-        assert_eq!(replacement_bytes("teh", 3, "the"), b"\x7f\x7f\x7fthe");
+        assert_eq!(replacement_bytes("teh", 3, "the", 0), b"\x7f\x7f\x7fthe");
+    }
+
+    #[test]
+    fn replacement_walks_back_over_the_tail_and_returns() {
+        assert_eq!(
+            replacement_bytes("wht", 3, "what", 4),
+            b"\x1b[D\x1b[D\x1b[D\x1b[D\x7f\x7f\x7fwhat\x1b[C\x1b[C\x1b[C\x1b[C"
+        );
     }
 
     #[test]
     fn replacement_preserves_a_leading_capital() {
-        assert_eq!(replacement_bytes("Teh", 3, "the"), b"\x7f\x7f\x7fThe");
+        assert_eq!(replacement_bytes("Teh", 3, "the", 0), b"\x7f\x7f\x7fThe");
     }
 
     #[test]
     fn replacement_keeps_lowercase_for_lowercase_tokens() {
-        assert_eq!(replacement_bytes("teh", 3, "tea"), b"\x7f\x7f\x7ftea");
+        assert_eq!(replacement_bytes("teh", 3, "tea", 0), b"\x7f\x7f\x7ftea");
     }
 
     #[test]
@@ -6005,7 +6215,10 @@ mod tests {
         // A cell may carry a combining mark: four cells, six bytes.
         let token = "g\u{301}ate";
         assert_eq!(token.len(), 6);
-        assert_eq!(replacement_bytes(token, 4, "gate"), b"\x7f\x7f\x7f\x7fgate");
+        assert_eq!(
+            replacement_bytes(token, 4, "gate", 0),
+            b"\x7f\x7f\x7f\x7fgate"
+        );
     }
 
     #[test]
@@ -6108,7 +6321,20 @@ mod tests {
         let span = spans[0];
         assert_eq!(
             revalidate_span("teh", 0, span.col, span.len, &cells, 0, span.col + span.len),
-            Some("teh".to_string())
+            Some(("teh".to_string(), 0))
+        );
+    }
+
+    #[test]
+    fn click_revalidation_counts_the_cells_after_the_word() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
+        let cells = snapshot.row_cells(0);
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        let span = spans[0];
+        let cursor = snapshot.cursor.logical;
+        assert_eq!(
+            revalidate_span("teh", 0, span.col, span.len, &cells, 0, cursor),
+            Some(("teh".to_string(), cursor - (span.col + span.len)))
         );
     }
 
@@ -6120,17 +6346,9 @@ mod tests {
         let span = spans[0];
 
         assert_eq!(
-            revalidate_span(
-                "teh",
-                0,
-                span.col,
-                span.len,
-                &cells,
-                0,
-                span.col + span.len + 1
-            ),
+            revalidate_span("teh", 0, span.col, span.len, &cells, 0, span.col),
             None,
-            "the cursor moved off the end of the token"
+            "the cursor sits inside the word"
         );
         assert_eq!(
             revalidate_span("tea", 0, span.col, span.len, &cells, 0, span.col + span.len),
