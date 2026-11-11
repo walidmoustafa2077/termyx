@@ -1394,6 +1394,12 @@ impl App {
             self.start_find();
             return false;
         }
+        // Ctrl+Shift+P opens the command palette. Checked before the tab
+        // shortcuts so it is never sent to the shell.
+        if is_command_palette_shortcut(&event.logical_key, self.modifiers) {
+            self.open_command_palette();
+            return false;
+        }
         // The tab context menu is a layer over the grid: Escape dismisses it,
         // and any other key dismisses the layer and falls through to the
         // terminal or a shortcut.
@@ -1493,7 +1499,8 @@ impl App {
     /// paste, and tab cycling keep working while a page is open.
     fn page_key(&mut self, event: &KeyEvent) -> Option<bool> {
         let index = self.tabs.active_index()?;
-        match self.tabs[index].page.as_ref().map(Page::kind) {
+        let kind = self.tabs[index].page.as_ref().map(Page::kind);
+        match kind {
             Some(PageKind::Settings) => return self.settings_page_key(index, event),
             Some(PageKind::CommandPalette) => {}
             _ => return None,
@@ -1503,7 +1510,16 @@ impl App {
         }
         let id = self.tabs[index].id;
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => return Some(self.close_tab(index)),
+            Key::Named(NamedKey::Escape) => {
+                let exit = self.close_tab(index);
+                if kind == Some(PageKind::CommandPalette) {
+                    // `TabSet::remove` activates the left neighbour, so a
+                    // palette opened from a middle tab would land on the wrong
+                    // one without reselecting the captured target.
+                    self.focus_palette_target();
+                }
+                return Some(exit);
+            }
             Key::Named(NamedKey::Backspace) => {
                 if let Some(page) = self.tabs[index].page.as_mut() {
                     page.backspace();
@@ -1962,8 +1978,37 @@ impl App {
     }
 
     /// Opens the command palette, capturing the tab it acts on first.
+    ///
+    /// Reopening while the palette is already up keeps the target captured on
+    /// the first open instead of capturing the palette tab itself.
     fn open_command_palette(&mut self) {
-        self.palette_target = self.tabs.active().map(|session| session.id);
+        let target = match self.tabs.active_index() {
+            Some(index) if Some(index) == self.palette_tab_index() => self.palette_target,
+            _ => self.tabs.active().map(|session| session.id),
+        };
+        if let Some(index) = self.palette_tab_index() {
+            let id = self.tabs[index].id;
+            if let Some(page) = self.tabs[index].page.as_mut() {
+                page.reset_palette();
+            }
+            self.palette_target = target;
+            self.close_find();
+            self.dismiss_spellcheck_menu();
+            if self.tabs.active_index() != Some(index) {
+                self.release_forwarded_button();
+                self.tabs.select(index);
+                self.selection = None;
+                self.rebuild_layout();
+            }
+            // The target is set before the refill, so the context it reads is
+            // the right one on this first pass.
+            self.refill_page(id);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        self.palette_target = target;
         self.open_page(PageKind::CommandPalette);
     }
 
@@ -3205,8 +3250,9 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
             item
         })
         .collect();
-    // Neither row has a key binding, so neither may name one: an empty hint is
-    // truthful, a dead shortcut is not.
+    // Settings and About have no key binding, so their hint stays empty: a
+    // dead shortcut would be a lie. The palette really does open on
+    // Ctrl+Shift+P.
     items.push(MenuItem::fixed(
         MenuAction::Settings,
         "Settings",
@@ -3216,7 +3262,7 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
     items.push(MenuItem::fixed(
         MenuAction::CommandPalette,
         "Command palette",
-        "",
+        "Ctrl+Shift+P",
         crate::fonts::GLYPH_COMMAND_PALETTE,
     ));
     items.push(MenuItem::fixed(
@@ -3476,6 +3522,16 @@ enum TabAction {
 /// of `on_key`: the copy and paste shortcuts first, then the terminal.
 fn tab_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> Option<TabAction> {
     shortcut_for(&event.logical_key, event.physical_key, modifiers)
+}
+
+/// `Ctrl+Shift+P`, free of the tab shortcut table because the palette is not a
+/// tab command. Windows reports `P` when Shift is held; other platforms `p`.
+fn is_command_palette_shortcut(logical: &Key, modifiers: ModifiersState) -> bool {
+    modifiers.control_key()
+        && modifiers.shift_key()
+        && !modifiers.alt_key()
+        && !modifiers.super_key()
+        && matches!(logical, Key::Character(text) if text.eq_ignore_ascii_case("p"))
 }
 
 /// The shortcut table itself.
@@ -5398,7 +5454,11 @@ mod tests {
                 items[7].label.as_str(),
                 items[7].shortcut.as_str()
             ),
-            (MenuAction::CommandPalette, "Command palette", "")
+            (
+                MenuAction::CommandPalette,
+                "Command palette",
+                "Ctrl+Shift+P"
+            )
         );
         assert_eq!(
             (
@@ -5511,6 +5571,31 @@ mod tests {
             ),
             Some(TabAction::CloseTab)
         );
+    }
+
+    #[test]
+    fn ctrl_shift_p_is_the_palette_shortcut() {
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(is_command_palette_shortcut(
+            &Key::Character("P".into()),
+            ctrl_shift
+        ));
+        assert!(is_command_palette_shortcut(
+            &Key::Character("p".into()),
+            ctrl_shift
+        ));
+        assert!(!is_command_palette_shortcut(
+            &Key::Character("P".into()),
+            ModifiersState::CONTROL
+        ));
+        assert!(!is_command_palette_shortcut(
+            &Key::Character("P".into()),
+            ModifiersState::SHIFT
+        ));
+        assert!(!is_command_palette_shortcut(
+            &Key::Character("p".into()),
+            ctrl_shift | ModifiersState::ALT
+        ));
     }
 
     #[test]

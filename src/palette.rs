@@ -120,8 +120,7 @@ impl Palette {
         self.selected = 0;
     }
 
-    // Task 2 reuses an open palette tab; until then the page is always fresh.
-    #[allow(dead_code)]
+    // Reopening an existing palette tab must not keep the old query.
     pub fn reset(&mut self) {
         self.query.clear();
         self.selected = 0;

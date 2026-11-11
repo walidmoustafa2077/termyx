@@ -74,8 +74,7 @@ impl Page {
         self.palette.set_context(context);
     }
 
-    // Task 2 reuses an open palette tab, which must not keep its old query.
-    #[allow(dead_code)]
+    // Reopening an existing palette tab must not keep the old query.
     pub fn reset_palette(&mut self) {
         self.palette.reset();
     }
