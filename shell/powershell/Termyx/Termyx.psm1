@@ -155,6 +155,26 @@ function Disable-TermyxAutocorrect {
     }
 }
 
+function OnRemove {
+    # Called when the module leaves the session. PowerShell deletes the
+    # module-bound wrapper function during removal, so the user's prompt has to
+    # be put back before that cleanup runs.
+    try {
+        Disable-TermyxPrompt
+    }
+    catch {
+    }
+}
+
+# Windows PowerShell 5.1 does not auto-bind a function that is merely named
+# OnRemove; the handler has to be registered on the module object. A failure
+# here must not take the import down with it.
+try {
+    $ExecutionContext.SessionState.Module.OnRemove = { OnRemove }
+}
+catch {
+}
+
 function Get-TermyxStatus {
     [CmdletBinding()]
     param()

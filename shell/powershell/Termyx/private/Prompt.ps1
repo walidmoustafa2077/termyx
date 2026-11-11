@@ -43,8 +43,15 @@ function Get-TermyxPromptText {
             $text = $null
         }
 
+        # A prompt that only writes to the host, such as
+        # "function prompt { Write-Host -NoNewline 'X> ' }", returns no text
+        # because it already rendered its own. Synthesising the stock prompt
+        # here would print a second prompt on every line, so the wrapped text
+        # is empty. That is correct: A clears the recorded input start and B
+        # sets it at the current cursor, so the two marks back to back record
+        # exactly where typing begins.
         if ($null -eq $text) {
-            $text = Get-TermyxDefaultPromptText
+            $text = ''
         }
     }
     else {
@@ -55,19 +62,38 @@ function Get-TermyxPromptText {
     return (Get-TermyxPromptWithMarks)
 }
 
+function Test-TermyxPromptInstalled {
+    if (-not (Test-Path Function:\global:prompt)) {
+        return $false
+    }
+
+    $current = $function:global:prompt
+    if ($null -eq $current) {
+        return $false
+    }
+
+    return $current.ToString().Contains('TERMYX_PROMPT_WRAPPER')
+}
+
 function Enable-TermyxPrompt {
-    if ($script:TermyxPromptInstalled) {
+    # Trust the cached flag only while the wrapper really is the active prompt.
+    # A prompt replaced after enabling must be wrapped, not ignored.
+    if ($script:TermyxPromptInstalled -and (Test-TermyxPromptInstalled)) {
         return
     }
+
+    $script:TermyxPromptInstalled = $false
+    $script:TermyxInstalledPrompt = $null
 
     $existing = $null
     if (Test-Path Function:\global:prompt) {
         $existing = $function:global:prompt
     }
 
-    # A forced re-import resets the module state while an earlier installer may
-    # still be bound. Saving that wrapper as the "original" would leave the two
-    # wrappers calling each other forever, so treat our own wrapper as absent.
+    # Belt and braces for a hand-copied wrapper. PowerShell removes the
+    # module-bound prompt function when the module is removed, and OnRemove
+    # restores the user prompt first, so a forced re-import cannot recurse
+    # through this branch; it only matters for a wrapper copied by hand.
     if ($null -ne $existing -and $existing.ToString().Contains('TERMYX_PROMPT_WRAPPER')) {
         $existing = $null
     }
@@ -91,15 +117,14 @@ function Enable-TermyxPrompt {
         }
         finally {
             # The prompt runs between the caller's commands, so it must hand
-            # LASTEXITCODE back exactly as it found it.
-            if ($null -ne $savedExitCode) {
-                $global:LASTEXITCODE = $savedExitCode
-            }
+            # LASTEXITCODE back exactly as it found it, including when it was
+            # never set and therefore was $null.
+            $global:LASTEXITCODE = $savedExitCode
         }
     }
 
+    Set-Item -Path Function:\global:prompt -Value $installed -ErrorAction Stop
     $script:TermyxInstalledPrompt = [scriptblock]$installed
-    Set-Item -Path Function:\global:prompt -Value $installed
     $script:TermyxPromptInstalled = $true
 }
 
@@ -108,24 +133,17 @@ function Disable-TermyxPrompt {
         return
     }
 
-    $current = $null
-    if (Test-Path Function:\global:prompt) {
-        $current = $function:global:prompt
-    }
-
-    $isOurs = $false
-    if ($null -ne $current -and $null -ne $script:TermyxInstalledPrompt) {
-        $isOurs = ($current.ToString() -eq $script:TermyxInstalledPrompt.ToString())
-    }
-
     # Only touch the prompt when the installed wrapper is still the active one;
     # a prompt the user created after enabling is theirs to keep.
-    if ($isOurs) {
+    if (Test-TermyxPromptInstalled) {
         if ($null -ne $script:TermyxOriginalPrompt) {
-            Set-Item -Path Function:\global:prompt -Value $script:TermyxOriginalPrompt
+            Set-Item -Path Function:\global:prompt -Value $script:TermyxOriginalPrompt -ErrorAction SilentlyContinue
         }
         elseif (Test-Path Function:\global:prompt) {
-            Remove-Item -Path Function:prompt -Force
+            # The unscoped Function:prompt path is required here. In Windows
+            # PowerShell 5.1, Remove-Item Function:\global:prompt silently
+            # does nothing, while Test-Path and Set-Item accept the prefix.
+            Remove-Item -Path Function:prompt -Force -ErrorAction SilentlyContinue
         }
     }
 

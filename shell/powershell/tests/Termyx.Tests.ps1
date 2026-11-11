@@ -1165,4 +1165,330 @@ Describe 'Spellcheck integration' {
             }
         }
     }
+
+    It 'does not synthesise stock text when the user prompt only writes to the host' {
+        $env:TERMYX = '1'
+        $module = Get-Module Termyx
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            & $module { $script:TermyxOriginalPrompt = { Write-Host -NoNewline 'X> ' } }
+
+            $text = & $module { Get-TermyxPromptText }
+
+            $esc = [char]27
+            $bel = [char]7
+            ($text.Contains('PS ')) | Should -BeFalse
+            ($text.StartsWith($esc + ']133;A' + $bel)) | Should -BeTrue
+            ($text.EndsWith($esc + ']133;B' + $bel)) | Should -BeTrue
+            ($text.Contains($esc + ']133;A' + $bel + $esc + ']133;B' + $bel)) | Should -BeTrue
+        }
+        finally {
+            Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'uses the stock prompt when no prompt function exists' {
+        $env:TERMYX = '1'
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            if ($hadPrompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                $script:TermyxPromptInstalled = $false
+                $script:TermyxOriginalPrompt = $null
+            }
+            & $module { Enable-TermyxPrompt }
+
+            $text = & $function:prompt
+
+            $esc = [char]27
+            $bel = [char]7
+            ($text.Contains($esc + ']133;A' + $bel + 'PS ')) | Should -BeTrue
+            ($text.EndsWith($esc + ']133;B' + $bel)) | Should -BeTrue
+        }
+        finally {
+            Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'emits the marks from the installed global prompt' {
+        $env:TERMYX = '1'
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            Set-Item -Path Function:\global:prompt -Value { 'wired> ' }
+            & $module {
+                $script:TermyxPromptInstalled = $false
+                $script:TermyxOriginalPrompt = $null
+            }
+            & $module { Enable-TermyxPrompt }
+
+            $text = & $function:prompt
+
+            $esc = [char]27
+            $bel = [char]7
+            ($text.Contains($esc + ']133;A' + $bel + 'wired> ' + $esc + ']133;B' + $bel)) | Should -BeTrue
+        }
+        finally {
+            Remove-Item Env:TERMYX -ErrorAction SilentlyContinue
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'installs the prompt through enable and restores it through disable' {
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            Set-Item -Path Function:\global:prompt -Value { 'wired> ' }
+
+            Enable-TermyxAutocorrect
+
+            (($function:prompt).ToString().Contains('TERMYX_PROMPT_WRAPPER')) | Should -BeTrue
+            (& $function:prompt) | Should -Be 'wired> '
+
+            Disable-TermyxAutocorrect
+
+            (($function:prompt).ToString().Contains('TERMYX_PROMPT_WRAPPER')) | Should -BeFalse
+            (& $function:prompt) | Should -Be 'wired> '
+        }
+        finally {
+            Disable-TermyxAutocorrect
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'wraps a prompt that replaced the wrapper after enabling' {
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            & $module {
+                $script:TermyxPromptInstalled = $false
+                $script:TermyxOriginalPrompt = $null
+            }
+            Set-Item -Path Function:\global:prompt -Value { 'first> ' }
+            & $module { Enable-TermyxPrompt }
+            (& $function:prompt) | Should -Be 'first> '
+
+            Set-Item -Path Function:\global:prompt -Value { 'second> ' }
+            & $module { Enable-TermyxPrompt }
+
+            ((Get-Command prompt).ScriptBlock.ToString().Contains('TERMYX_PROMPT_WRAPPER')) | Should -BeTrue
+            (& $function:prompt) | Should -Be 'second> '
+        }
+        finally {
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'keeps autocorrect enabled when the prompt cannot be installed' {
+        $module = Get-Module Termyx
+        $hadPrompt = Test-Path Function:\global:prompt
+        $previous = $null
+        if ($hadPrompt) { $previous = $function:prompt }
+        $savedOriginal = $null
+        $savedText = $null
+        try {
+            $savedOriginal = & $module { $script:TermyxOriginalPrompt }
+            $savedText = & $module { $script:TermyxPromptText }
+            & $module {
+                $script:TermyxPromptInstalled = $false
+                $script:TermyxOriginalPrompt = $null
+                $script:TermyxInstalledPrompt = $null
+            }
+            Set-Item -Path Function:\global:prompt -Value { 'locked> ' }
+            (Get-Item Function:\prompt).Options = [System.Management.Automation.ScopedItemOptions]::ReadOnly
+
+            Enable-TermyxAutocorrect
+
+            (Get-TermyxStatus).Enabled | Should -BeTrue
+            (& $module { $script:TermyxPromptInstalled }) | Should -BeFalse
+        }
+        finally {
+            Disable-TermyxAutocorrect
+            if (Test-Path Function:\prompt) {
+                (Get-Item Function:\prompt).Options = [System.Management.Automation.ScopedItemOptions]::None
+            }
+            & $module { Disable-TermyxPrompt }
+            if ($hadPrompt) {
+                Set-Item -Path Function:\global:prompt -Value $previous
+            }
+            elseif (Test-Path Function:\global:prompt) {
+                Remove-Item -Path Function:prompt -Force
+            }
+            & $module {
+                param($original, $promptText)
+                $script:TermyxOriginalPrompt = $original
+                $script:TermyxPromptText = $promptText
+            } $savedOriginal $savedText
+        }
+    }
+
+    It 'skips the shared file when its timestamp has not changed' {
+        $path = Join-Path $TestDrive 'stamp-words.txt'
+        Set-Content -LiteralPath $path -Value 'zqxjs' -Encoding ASCII
+        $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+
+        $module = Get-Module Termyx
+        $savedPath = $null
+        $savedStamp = $null
+        try {
+            $savedPath = & $module { $script:TermyxUserWordsPath }
+            $savedStamp = & $module { $script:TermyxUserWordsStamp }
+            & $module { param($p) $script:TermyxUserWordsPath = $p; $script:TermyxUserWordsStamp = $null } $path
+
+            & $module { Update-TermyxUserWords }
+            ([Termyx.Corrector]::IsKnownWord('zqxjs')) | Should -BeTrue
+
+            # Same content on disk, but the stamp is put back to the value the
+            # module already saw: the reload must be skipped.
+            Set-Content -LiteralPath $path -Value 'zqxjt' -Encoding ASCII
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = $stamp
+            & $module { Update-TermyxUserWords }
+
+            ([Termyx.Corrector]::IsKnownWord('zqxjt')) | Should -BeFalse
+        }
+        finally {
+            & $module {
+                param($p, $s)
+                $script:TermyxUserWordsPath = $p
+                $script:TermyxUserWordsStamp = $s
+            } $savedPath $savedStamp
+        }
+    }
+
+    It 'does not throw when the shared file cannot be read' {
+        $path = Join-Path $TestDrive 'locked-words.txt'
+        Set-Content -LiteralPath $path -Value 'zqxju' -Encoding ASCII
+
+        $module = Get-Module Termyx
+        $handle = $null
+        $savedPath = $null
+        $savedStamp = $null
+        try {
+            $savedPath = & $module { $script:TermyxUserWordsPath }
+            $savedStamp = & $module { $script:TermyxUserWordsStamp }
+            & $module { param($p) $script:TermyxUserWordsPath = $p; $script:TermyxUserWordsStamp = $null } $path
+
+            $handle = [System.IO.File]::Open(
+                $path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::None)
+
+            { & $module { Update-TermyxUserWords } } | Should -Not -Throw
+            ([Termyx.Corrector]::IsKnownWord('zqxju')) | Should -BeFalse
+        }
+        finally {
+            if ($null -ne $handle) { $handle.Dispose() }
+            & $module {
+                param($p, $s)
+                $script:TermyxUserWordsPath = $p
+                $script:TermyxUserWordsStamp = $s
+            } $savedPath $savedStamp
+        }
+    }
+
+    It 'restores a user prompt when the module is removed' {
+        $childScript = Join-Path $TestDrive 'prompt-remove.ps1'
+        $childLines = @(
+            'function global:prompt { ''CUSTOM> '' }'
+            ('Import-Module ''' + $script:moduleManifest + ''' -ArgumentList @{ InstallHandler = $false }')
+            '$module = Get-Module Termyx'
+            '& $module { Enable-TermyxPrompt }'
+            'if (($function:prompt).ToString().Contains(''TERMYX_PROMPT_WRAPPER'')) { ''wrapped=True'' } else { ''wrapped=False'' }'
+            '''rendered='' + (& $function:prompt)'
+            'Remove-Module Termyx -Force'
+            'if (Test-Path Function:\prompt) { ''exists=True'' } else { ''exists=False'' }'
+            '''restored='' + (& $function:prompt)'
+        )
+        $childLines | Set-Content -LiteralPath $childScript -Encoding ASCII
+
+        $output = @(& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childScript)
+        $exitCode = $LASTEXITCODE
+        $joined = $output -join "`n"
+
+        $exitCode | Should -Be 0
+        ($joined.Contains('wrapped=True')) | Should -BeTrue
+        ($joined.Contains('exists=True')) | Should -BeTrue
+        ($joined.Contains('restored=CUSTOM> ')) | Should -BeTrue
+    }
 }
