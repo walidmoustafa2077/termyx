@@ -26,7 +26,7 @@ use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
 use crate::term::{LogicalPos, RowSnapshot, Terminal};
-use crate::theme::Theme;
+use crate::theme::{Rgb, Theme};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
@@ -616,6 +616,68 @@ impl App {
             window.request_redraw();
         }
         self.tabs.is_empty()
+    }
+
+    /// Opens a second shell with the metadata of the tab `id` and shows it.
+    ///
+    /// A page tab has no profile to spawn, so it is left as it is. A failed
+    /// spawn leaves the window unchanged, like any other new tab.
+    // The context menu's duplicate row calls this in a later task.
+    #[allow(dead_code)]
+    fn duplicate_tab(&mut self, id: SessionId) -> anyhow::Result<()> {
+        let Some((profile, color, title, locked)) = duplicate_source(&self.tabs, id) else {
+            return Ok(());
+        };
+        let new_id = self.new_tab(profile)?;
+        if let Some(session) = self.tabs.session_mut(new_id) {
+            session.color = color;
+            session.title = title;
+            session.title_locked = locked;
+        }
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Closes every tab but `id` and shows `id`.
+    ///
+    /// The target stays open, so the set is never emptied; the `false` return
+    /// means the window stays open, like [`App::close_tab`]'s non-empty case.
+    // The context menu's close-others row calls this in a later task.
+    #[allow(dead_code)]
+    fn close_other_tabs(&mut self, id: SessionId) -> bool {
+        while self.tabs.len() > 1 {
+            let Some(current) = self.tabs.position(id) else {
+                break;
+            };
+            let victim = if current == 0 { 1 } else { 0 };
+            self.close_tab(victim);
+        }
+        if let Some(index) = self.tabs.position(id) {
+            self.tabs.select(index);
+            self.rebuild_layout();
+        }
+        false
+    }
+
+    /// Closes every tab to the right of `id` and shows `id`.
+    ///
+    /// The target stays open even when it is the last tab; the `false` return
+    /// means the window stays open.
+    // The context menu's close-right row calls this in a later task.
+    #[allow(dead_code)]
+    fn close_tabs_to_right(&mut self, id: SessionId) -> bool {
+        let Some(target) = self.tabs.position(id) else {
+            return false;
+        };
+        while self.tabs.len() > target + 1 {
+            self.close_tab(self.tabs.len() - 1);
+        }
+        self.tabs.select(target);
+        self.rebuild_layout();
+        false
     }
 
     /// Re-derives the strip hover from the pointer and the current layout.
@@ -2537,6 +2599,26 @@ fn route_title(tabs: &mut TabSet, session: SessionId, title: &str) -> (bool, boo
     (label_changed, retitle)
 }
 
+/// What a duplicate of `id` must copy: the profile to spawn, plus the color,
+/// title, and title lock the new session starts with.
+///
+/// A page tab has no profile and therefore no child to spawn, so it has no
+/// duplicate source. Keeping the decision here makes it testable without a
+/// window or a real shell.
+fn duplicate_source(
+    tabs: &TabSet,
+    id: SessionId,
+) -> Option<(usize, Option<Rgb>, Option<String>, bool)> {
+    let index = tabs.position(id)?;
+    let session = &tabs[index];
+    Some((
+        session.profile?,
+        session.color,
+        session.title.clone(),
+        session.title_locked,
+    ))
+}
+
 /// The OS window title for the tab on screen.
 ///
 /// `dynamic_title` is the config opt-in: when it is off the window keeps
@@ -3841,6 +3923,45 @@ mod tests {
         let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
+    }
+
+    #[test]
+    fn a_page_tab_has_no_source_to_duplicate() {
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(Session::page_tab(
+            id,
+            Terminal::new(80, 24, 100),
+            Page::new(PageKind::About),
+        ));
+        assert_eq!(
+            duplicate_source(&tabs, id),
+            None,
+            "a page has no profile to spawn again"
+        );
+    }
+
+    #[test]
+    fn a_shell_tab_carries_its_profile_and_metadata() {
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        assert_eq!(
+            duplicate_source(&tabs, id),
+            None,
+            "a shell session knows no profile until the app records one"
+        );
+
+        let session = tabs.session_mut(id).expect("the pushed session");
+        session.profile = Some(2);
+        let color = Rgb::new(1, 2, 3);
+        assert!(tabs.set_color(id, Some(color)));
+        assert!(tabs.rename(id, "Build"));
+
+        assert_eq!(
+            duplicate_source(&tabs, id),
+            Some((2, Some(color), Some("Build".to_string()), true))
+        );
     }
 
     /// The text of a session's first grid row, without the trailing blanks the

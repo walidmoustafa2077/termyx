@@ -138,9 +138,6 @@ pub struct Session {
     /// A user rename wins over later OSC titles until the rename is cleared.
     pub title_locked: bool,
     /// The tab color chosen from the context menu.
-    // No reader until the color picker lands; the field is part of this
-    // task's interface so the picker only has to store it.
-    #[allow(dead_code)]
     pub color: Option<crate::theme::Rgb>,
     /// Index into `profiles(&config)` for a shell tab; `None` for a page tab.
     pub profile: Option<usize>,
@@ -273,9 +270,47 @@ impl TabSet {
         self.sessions.iter_mut().find(|session| session.id == id)
     }
 
+    /// The session `id` names, if it is still open.
+    // Wired to the context-menu color row in a later task; the tests pin the
+    // lookup now.
+    #[allow(dead_code)]
+    pub fn session(&self, id: SessionId) -> Option<&Session> {
+        self.sessions.iter().find(|session| session.id == id)
+    }
+
     /// The slot index of the session `id` carries, if it is still open.
     pub fn position(&self, id: SessionId) -> Option<usize> {
         self.sessions.iter().position(|session| session.id == id)
+    }
+
+    /// Moves the tab at `from` so it sits at `to`, keeping the same session
+    /// active.
+    ///
+    /// The session and its slot id move together because [`titles`] and the
+    /// strip layout read the two vectors in parallel; reordering one alone
+    /// would label every tab in between with the neighbour's title. Returns
+    /// whether an index actually changed.
+    ///
+    /// [`titles`]: TabSet::titles
+    // The context menu's move commands call this in a later task.
+    #[allow(dead_code)]
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        let len = self.sessions.len();
+        if from >= len || to >= len || from == to {
+            return false;
+        }
+        let active_id = self
+            .slots
+            .active_index()
+            .map(|index| self.sessions[index].id);
+        let session = self.sessions.remove(from);
+        let id = self.slots.ids.remove(from);
+        self.sessions.insert(to, session);
+        self.slots.ids.insert(to, id);
+        if let Some(active_id) = active_id {
+            self.slots.active = self.slots.ids.iter().position(|id| *id == active_id);
+        }
+        true
     }
 
     /// Sets the title the session `id` shows, clearing it when `title` is
@@ -327,6 +362,29 @@ impl TabSet {
         session.title = next;
         session.title_locked = true;
         changed
+    }
+
+    /// The tab color `id` carries, if any.
+    // Wired to the context-menu swatches in a later task; the tests pin the
+    // store now.
+    #[allow(dead_code)]
+    pub fn color(&self, id: SessionId) -> Option<crate::theme::Rgb> {
+        self.session(id).and_then(|session| session.color)
+    }
+
+    /// Sets the tab color `id` carries, returning whether it actually changed
+    /// so a repeat choice costs no repaint.
+    // Wired to the context-menu swatches in a later task.
+    #[allow(dead_code)]
+    pub fn set_color(&mut self, id: SessionId, color: Option<crate::theme::Rgb>) -> bool {
+        let Some(session) = self.session_mut(id) else {
+            return false;
+        };
+        if session.color == color {
+            return false;
+        }
+        session.color = color;
+        true
     }
 }
 
@@ -602,6 +660,66 @@ mod tests {
             Some(0),
             "the index follows the removal"
         );
+    }
+
+    #[test]
+    fn move_tab_is_a_noop_at_the_edges() {
+        let mut tabs = TabSet::new();
+        let a = tabs.next_id();
+        tabs.push(test_session(a));
+        let b = tabs.next_id();
+        tabs.push(test_session(b));
+        assert!(!tabs.move_tab(0, 0));
+        assert!(!tabs.move_tab(0, 2));
+        assert_eq!(tabs[0].id, a);
+        assert_eq!(tabs[1].id, b);
+    }
+
+    #[test]
+    fn move_tab_keeps_the_active_session_active() {
+        let mut tabs = TabSet::new();
+        let a = tabs.next_id();
+        tabs.push(test_session(a));
+        let b = tabs.next_id();
+        tabs.push(test_session(b));
+        let c = tabs.next_id();
+        tabs.push(test_session(c));
+        tabs.select(0);
+        assert!(tabs.move_tab(0, 2));
+        assert_eq!(tabs.titles().len(), 3);
+        assert_eq!(tabs.active().map(|session| session.id), Some(a));
+        assert_eq!(tabs[0].id, b);
+        assert_eq!(tabs[1].id, c);
+        assert_eq!(tabs[2].id, a);
+
+        // A remove/insert is a true move, not a swap: moving the first tab to
+        // the middle shifts the tab after it left and keeps the rest in order.
+        assert!(tabs.move_tab(0, 1));
+        assert_eq!(
+            tabs.iter_mut()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec![c, b, a],
+            "the id vector must move with the sessions vector"
+        );
+        assert_eq!(tabs.active().map(|session| session.id), Some(a));
+    }
+
+    #[test]
+    fn color_is_stored_per_session() {
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        assert_eq!(tabs.color(id), None);
+        assert!(tabs.set_color(id, Some(crate::theme::Rgb::new(1, 2, 3))));
+        assert_eq!(tabs.color(id), Some(crate::theme::Rgb::new(1, 2, 3)));
+        assert!(
+            !tabs.set_color(id, Some(crate::theme::Rgb::new(1, 2, 3))),
+            "the same color must not ask for a repaint"
+        );
+        assert!(tabs.set_color(id, None));
+        assert_eq!(tabs.color(id), None);
+        assert!(!tabs.set_color(id + 100, Some(crate::theme::Rgb::new(1, 2, 3))));
     }
 
     #[test]
