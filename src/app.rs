@@ -29,6 +29,7 @@ use crate::term::{LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
 use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
+use crate::ui::rename::RenameState;
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
@@ -104,6 +105,8 @@ pub struct App {
     /// The open tab context menu, if any. Mutually exclusive with `menu`:
     /// opening one closes the other.
     tab_menu: Option<TabMenuState>,
+    /// The inline rename editor over a tab, if one is being edited.
+    rename: Option<RenameState>,
     /// What the pointer is over in the strip, painted as hover. The `+` and `⌄`
     /// buttons highlight too; empty band paints nothing.
     strip_hover: Option<StripHover>,
@@ -160,6 +163,7 @@ impl App {
             layout: None,
             menu: None,
             tab_menu: None,
+            rename: None,
             strip_hover: None,
             tooltip_hover: None,
             clipboard: None,
@@ -355,6 +359,78 @@ impl App {
     /// A later task wires each arm; until then no command does anything, so
     /// the caller keeps the window open.
     fn run_tab_command(&mut self, _target: SessionId, _command: TabCommand) -> bool {
+        false
+    }
+
+    /// Begins editing the title of the tab `id` inline, seeding the editor with
+    /// the tab's current title so Enter without edits keeps the name.
+    // The context-menu `Rename` arm that calls this lands in a later task.
+    #[allow(dead_code)]
+    fn start_rename(&mut self, id: SessionId) {
+        let Some(index) = self.tabs.position(id) else {
+            return;
+        };
+        let current = self
+            .tabs
+            .titles()
+            .get(index)
+            .copied()
+            .unwrap_or(FALLBACK_TITLE)
+            .to_string();
+        self.close_tab_menu();
+        self.rename = Some(RenameState::new(id, &current));
+        self.selection = None;
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Applies the edited title and clears the editor. A blank name clears the
+    /// stored title and its lock, letting the shell name the tab again.
+    fn commit_rename(&mut self) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        self.tabs.rename(rename.id, &rename.text);
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Routes a key to the inline rename editor. Escape cancels, Enter commits,
+    /// and printable characters append. Returns `false`: editing a title never
+    /// closes the window.
+    fn rename_key(&mut self, event: &KeyEvent) -> bool {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.rename = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Enter) => self.commit_rename(),
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(rename) = self.rename.as_mut() {
+                    rename.backspace();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Key::Character(text) if !self.modifiers.control_key() && !self.modifiers.alt_key() => {
+                if let Some(rename) = self.rename.as_mut() {
+                    for ch in text.chars() {
+                        rename.push(ch);
+                    }
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            _ => {}
+        }
         false
     }
 
@@ -925,6 +1001,20 @@ impl App {
             let size = window.inner_size();
             (size.width as f32, size.height as f32)
         });
+        // The rename editor's ghost title (shown while its field is empty) is
+        // read from the tabset before the renderer borrow starts: the renderer
+        // owns the pixmap during the paint and cannot touch `self.tabs`.
+        let rename_overlay: Option<(usize, String)> = self.rename.as_ref().and_then(|rename| {
+            let index = self.tabs.position(rename.id)?;
+            let current = self
+                .tabs
+                .titles()
+                .get(index)
+                .copied()
+                .unwrap_or(FALLBACK_TITLE)
+                .to_string();
+            Some((index, current))
+        });
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
             return;
         };
@@ -951,6 +1041,18 @@ impl App {
         renderer.draw(&snapshot, &maps, self.selection.as_ref());
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &icons, self.strip_hover);
+        }
+        if let Some((index, current)) = rename_overlay.as_ref() {
+            if let (Some(rename), Some(layout)) = (self.rename.as_ref(), self.layout.as_ref()) {
+                if let Some(tab) = layout.tabs.get(*index) {
+                    renderer.draw_rename(
+                        tab.body,
+                        current,
+                        rename,
+                        layout.strip_h / TAB_STRIP_HEIGHT,
+                    );
+                }
+            }
         }
         if let Some(tab_menu) = self.tab_menu.as_ref() {
             renderer.draw_context_menu(&tab_menu.menu);
@@ -1006,6 +1108,11 @@ impl App {
         // Typing always reveals the cursor, so a keystroke is never typed into
         // a cursor that happens to be in its hidden phase.
         self.blink.restart(Instant::now());
+        // The inline rename editor owns every key until it commits or cancels,
+        // so a title edit never reaches the shell.
+        if self.rename.is_some() {
+            return self.rename_key(&event);
+        }
         // The tab context menu is a layer over the grid: Escape dismisses it,
         // and any other key dismisses the layer and falls through to the
         // terminal or a shortcut.
@@ -2698,7 +2805,18 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::Ime(Ime::Commit(text)) => self.send_text(&text),
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if let Some(rename) = self.rename.as_mut() {
+                    for ch in text.chars() {
+                        rename.push(ch);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                } else {
+                    self.send_text(&text);
+                }
+            }
             // Composition preview (preedit) is Phase 3; the OS candidate window
             // is enough until the grid can render it.
             WindowEvent::Ime(_) => {}

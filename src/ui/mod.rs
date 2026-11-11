@@ -5,6 +5,7 @@
 
 pub mod context_menu;
 pub mod menu;
+pub mod rename;
 pub mod tab_bar;
 pub mod tab_menu;
 pub mod tooltip;

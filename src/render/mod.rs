@@ -4,6 +4,7 @@ mod atlas;
 mod context_menu;
 mod glyph_cache;
 mod menu;
+mod rename;
 mod tooltip;
 mod ui_text;
 
