@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::config::Config;
+use crate::palette::{Palette, PaletteCommand, PaletteContext};
 use crate::settings::SettingsState;
 
 /// Escape sequence that hides the cursor, clears the grid and the scrollback,
@@ -37,39 +38,23 @@ impl PageKind {
     }
 }
 
-/// What activating a palette entry does. The palette has no row for itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageAction {
-    Profile(usize),
-    Settings,
-    About,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaletteEntry {
-    pub label: String,
-    pub action: PageAction,
-}
-
 /// A shell-less tab. The palette owns its query and highlighted entry; the
 /// other kinds are static views of live data.
 #[derive(Debug, Clone)]
 pub struct Page {
     kind: PageKind,
-    query: String,
-    selected: usize,
     /// The Settings tab's selection, viewport, inline edit, and status. The
     /// other page kinds leave it untouched.
     settings: SettingsState,
+    palette: Palette,
 }
 
 impl Page {
     pub fn new(kind: PageKind) -> Self {
         Self {
             kind,
-            query: String::new(),
-            selected: 0,
             settings: SettingsState::new(),
+            palette: Palette::new(),
         }
     }
 
@@ -81,55 +66,37 @@ impl Page {
         self.kind.title()
     }
 
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    pub fn set_palette_context(&mut self, context: PaletteContext) {
+        self.palette.set_context(context);
+    }
+
+    // Task 2 reuses an open palette tab, which must not keep its old query.
+    #[allow(dead_code)]
+    pub fn reset_palette(&mut self) {
+        self.palette.reset();
+    }
+
+    pub fn palette_command(&self, config: &Config) -> Option<PaletteCommand> {
+        self.palette.command(config)
+    }
+
     /// Appends typed text and returns the highlight to the first match, so the
     /// list always shows what the new query ranks highest.
     pub fn type_char(&mut self, character: char) {
-        self.query.push(character);
-        self.selected = 0;
+        self.palette.type_char(character);
     }
 
     pub fn backspace(&mut self) {
-        self.query.pop();
-        self.selected = 0;
+        self.palette.backspace();
     }
 
     /// Moves the highlight by `delta`, wrapping around `count` entries.
     pub fn move_selection(&mut self, delta: isize, count: usize) {
-        if count == 0 {
-            self.selected = 0;
-            return;
-        }
-        self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-    }
-
-    /// Commands matching the query, case-insensitively, in menu order.
-    pub fn matches(&self, config: &Config) -> Vec<PaletteEntry> {
-        let query = self.query.to_lowercase();
-        let mut entries: Vec<PaletteEntry> = crate::profiles::profiles(config)
-            .into_iter()
-            .enumerate()
-            .map(|(index, profile)| PaletteEntry {
-                label: profile.name,
-                action: PageAction::Profile(index),
-            })
-            .collect();
-        entries.push(PaletteEntry {
-            label: PageKind::Settings.title().to_string(),
-            action: PageAction::Settings,
-        });
-        entries.push(PaletteEntry {
-            label: PageKind::About.title().to_string(),
-            action: PageAction::About,
-        });
-        entries.retain(|entry| entry.label.to_lowercase().contains(&query));
-        entries
-    }
-
-    /// The command under the highlight, if the query matches anything.
-    pub fn selected_action(&self, config: &Config) -> Option<PageAction> {
-        self.matches(config)
-            .get(self.selected)
-            .map(|entry| entry.action)
+        self.palette.move_selection(delta, count);
     }
 
     /// The Settings model, when this is a Settings tab.
@@ -155,7 +122,11 @@ impl Page {
     pub fn text(&self, config: &Config, config_path: &Path, cols: usize, rows: usize) -> String {
         match self.kind {
             PageKind::Settings => self.settings_text(config, config_path, cols, rows),
-            PageKind::CommandPalette => self.palette_text(config),
+            PageKind::CommandPalette => {
+                let mut out = String::from(RESET_SCREEN);
+                out.push_str(&self.palette.text(config, cols, rows));
+                out
+            }
             PageKind::About => about_page_text(),
         }
     }
@@ -169,28 +140,6 @@ impl Page {
     ) -> String {
         let mut out = String::from(RESET_SCREEN);
         out.push_str(&self.settings.render(config, config_path, cols, rows));
-        out
-    }
-
-    fn palette_text(&self, config: &Config) -> String {
-        let mut out = String::with_capacity(1024);
-        out.push_str(RESET_SCREEN);
-        out.push_str("\x1b[1mCommand palette\x1b[0m\r\n\r\n");
-        let _ = write!(out, "> {}\x1b[7m \x1b[0m\r\n\r\n", self.query);
-        let entries = self.matches(config);
-        if entries.is_empty() {
-            out.push_str("\x1b[2mNo matching commands\x1b[0m\r\n");
-        } else {
-            let selected = self.selected.min(entries.len() - 1);
-            for (index, entry) in entries.iter().enumerate() {
-                if index == selected {
-                    let _ = write!(out, "\x1b[7m  {}\x1b[0m\r\n", entry.label);
-                } else {
-                    let _ = write!(out, "  {}\r\n", entry.label);
-                }
-            }
-        }
-        out.push_str("\r\n\x1b[2mUp/Down select, Enter run, Esc close\x1b[0m\r\n");
         out
     }
 }
@@ -235,56 +184,27 @@ mod tests {
         Config::default().validate()
     }
 
-    fn palette() -> Page {
-        Page::new(PageKind::CommandPalette)
+    #[test]
+    fn the_palette_page_resets_the_screen_and_shows_the_query() {
+        let config = Config::default().validate();
+        let mut page = Page::new(PageKind::CommandPalette);
+        page.type_char('s');
+        let text = page.text(&config, Path::new("config.toml"), 80, 24);
+        assert!(text.starts_with(RESET_SCREEN));
+        assert!(text.contains("> s"));
+        assert!(text.contains("Settings"));
     }
 
     #[test]
-    fn typing_filters_the_palette_and_resets_the_highlight() {
-        let config = config();
-        let mut page = palette();
-        for character in "sett".chars() {
+    fn the_palette_page_reports_an_empty_list() {
+        let config = Config::default().validate();
+        let mut page = Page::new(PageKind::CommandPalette);
+        for character in "zzz".chars() {
             page.type_char(character);
         }
-        assert_eq!(page.query, "sett");
-        let matches = page.matches(&config);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].action, PageAction::Settings);
-        assert_eq!(page.selected, 0);
-    }
-
-    #[test]
-    fn backspace_widens_the_match_list() {
-        let config = config();
-        let mut page = palette();
-        for character in "po".chars() {
-            page.type_char(character);
-        }
-        assert_eq!(page.matches(&config).len(), 1);
-        page.backspace();
-        assert_eq!(page.query, "p");
-        assert!(page.matches(&config).len() > 1);
-    }
-
-    #[test]
-    fn the_arrows_wrap_the_highlight() {
-        let mut page = palette();
-        page.move_selection(-1, 4);
-        assert_eq!(page.selected, 3);
-        page.move_selection(1, 4);
-        assert_eq!(page.selected, 0);
-        page.move_selection(0, 0);
-        assert_eq!(page.selected, 0);
-    }
-
-    #[test]
-    fn the_selected_command_follows_the_highlight() {
-        let config = config();
-        let mut page = palette();
-        for character in "about".chars() {
-            page.type_char(character);
-        }
-        assert_eq!(page.selected_action(&config), Some(PageAction::About));
+        let text = page.text(&config, Path::new("config.toml"), 80, 24);
+        assert!(text.contains("No matching commands"));
+        assert_eq!(page.palette_command(&config), None);
     }
 
     #[test]

@@ -20,7 +20,8 @@ use crate::find::FindState;
 use crate::fonts::{FontSet, UI_SIZE_PX};
 use crate::icon;
 use crate::input::{self, KeyInput, Mods};
-use crate::page::{self, Page, PageAction, PageKind};
+use crate::page::{self, Page, PageKind};
+use crate::palette::{PaletteCommand, PaletteContext};
 use crate::platform;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
@@ -119,6 +120,9 @@ pub struct App {
     tab_menu: Option<TabMenuState>,
     /// The inline rename editor over a tab, if one is being edited.
     rename: Option<RenameState>,
+    /// The tab the palette acts on. Captured before the palette tab exists,
+    /// because "Close tab" must never mean "close the palette".
+    palette_target: Option<SessionId>,
     /// The find-in-buffer overlay, if it is open. Mutually exclusive with the
     /// rename editor: opening one closes the other.
     find: Option<FindState>,
@@ -199,6 +203,7 @@ impl App {
             menu: None,
             tab_menu: None,
             rename: None,
+            palette_target: None,
             find: None,
             strip_hover: None,
             tooltip_hover: None,
@@ -1504,33 +1509,35 @@ impl App {
                     page.backspace();
                 }
             }
-            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
-                let delta = if matches!(event.logical_key, Key::Named(NamedKey::ArrowUp)) {
-                    -1
-                } else {
-                    1
-                };
+            Key::Named(NamedKey::ArrowUp) => {
                 let count = self.tabs[index]
                     .page
                     .as_ref()
-                    .map_or(0, |page| page.matches(&self.config).len());
+                    .map_or(0, |page| page.palette().rows(&self.config).len());
                 if let Some(page) = self.tabs[index].page.as_mut() {
-                    page.move_selection(delta, count);
+                    page.move_selection(-1, count);
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                let count = self.tabs[index]
+                    .page
+                    .as_ref()
+                    .map_or(0, |page| page.palette().rows(&self.config).len());
+                if let Some(page) = self.tabs[index].page.as_mut() {
+                    page.move_selection(1, count);
                 }
             }
             Key::Named(NamedKey::Enter) if !event.repeat => {
-                let action = self.tabs[index]
+                let command = self.tabs[index]
                     .page
                     .as_ref()
-                    .and_then(|page| page.selected_action(&self.config));
-                let Some(action) = action else {
-                    return Some(false);
-                };
-                self.close_tab(index);
-                self.run_menu_action(palette_action(action));
-                // The chosen row always opens or focuses a tab; only exit when
-                // a failed profile spawn left nothing behind.
-                return Some(self.tabs.is_empty());
+                    .and_then(|page| page.palette_command(&self.config));
+                let exit = self.close_tab(index);
+                self.focus_palette_target();
+                if let Some(command) = command {
+                    self.run_palette_command(command);
+                }
+                return Some(exit || self.tabs.is_empty());
             }
             Key::Character(text) if !text.is_empty() => {
                 if let Some(page) = self.tabs[index].page.as_mut() {
@@ -1925,7 +1932,7 @@ impl App {
                 }
             }
             MenuAction::Settings => self.open_page(PageKind::Settings),
-            MenuAction::CommandPalette => self.open_page(PageKind::CommandPalette),
+            MenuAction::CommandPalette => self.open_command_palette(),
             MenuAction::About => self.open_page(PageKind::About),
         }
     }
@@ -1954,15 +1961,82 @@ impl App {
         }
     }
 
+    /// Opens the command palette, capturing the tab it acts on first.
+    fn open_command_palette(&mut self) {
+        self.palette_target = self.tabs.active().map(|session| session.id);
+        self.open_page(PageKind::CommandPalette);
+    }
+
+    fn palette_context(&self) -> PaletteContext {
+        PaletteContext::resolve(
+            self.tabs.len(),
+            self.palette_target.and_then(|id| self.tabs.position(id)),
+            self.palette_tab_index(),
+        )
+    }
+
+    fn palette_tab_index(&self) -> Option<usize> {
+        (0..self.tabs.len()).find(|&index| {
+            self.tabs[index]
+                .page
+                .as_ref()
+                .is_some_and(|page| page.kind() == PageKind::CommandPalette)
+        })
+    }
+
+    fn run_palette_command(&mut self, command: PaletteCommand) {
+        match command {
+            PaletteCommand::Profile(index) => self.run_menu_action(MenuAction::Profile(index)),
+            PaletteCommand::Settings => self.run_menu_action(MenuAction::Settings),
+            PaletteCommand::About => self.run_menu_action(MenuAction::About),
+            PaletteCommand::Find => self.start_find(),
+            PaletteCommand::ExportText => self.export_text(),
+            PaletteCommand::NextTab => self.cycle_tab(1),
+            PaletteCommand::PreviousTab => self.cycle_tab(-1),
+            PaletteCommand::CloseTab => self.run_origin_command(TabCommand::CloseTab),
+            PaletteCommand::DuplicateTab => self.run_origin_command(TabCommand::Duplicate),
+            PaletteCommand::MoveTabLeft => self.run_origin_command(TabCommand::MoveLeft),
+            PaletteCommand::MoveTabRight => self.run_origin_command(TabCommand::MoveRight),
+            PaletteCommand::CloseOtherTabs => self.run_origin_command(TabCommand::CloseOtherTabs),
+            PaletteCommand::CloseTabsToRight => {
+                self.run_origin_command(TabCommand::CloseTabsToRight)
+            }
+        }
+    }
+
+    fn run_origin_command(&mut self, command: TabCommand) {
+        let Some(target) = self.palette_target else {
+            tracing::debug!("the palette target tab is gone");
+            return;
+        };
+        self.run_tab_command(target, command);
+    }
+
+    /// Re-selects the tab the palette was opened from after the palette closes.
+    fn focus_palette_target(&mut self) {
+        let Some(target) = self.palette_target else {
+            return;
+        };
+        let Some(index) = self.tabs.position(target) else {
+            return;
+        };
+        self.tabs.select(index);
+        self.selection = None;
+    }
+
     /// Regenerates a page's grid from live data. Called on open, on every
     /// palette key, and when the Settings poll sees a new config save.
     fn refill_page(&mut self, id: SessionId) {
+        let context = self.palette_context();
         let Some(session) = self.tabs.session_mut(id) else {
             return;
         };
         let Some(page) = session.page.as_mut() else {
             return;
         };
+        if page.kind() == PageKind::CommandPalette {
+            page.set_palette_context(context);
+        }
         page.ensure_visible(self.rows);
         let text = page.text(&self.config, &self.config_path, self.cols, self.rows);
         session.terminal.feed(text.as_bytes());
@@ -3103,34 +3177,18 @@ impl App {
     }
 }
 
-/// Number of profiles that own a numbered `Ctrl+Shift+<digit>` shortcut.
-///
-/// Mirrors [`digit_profile`]: those rows name a key the window listens for, and
-/// a further profile would name one nothing binds.
-const PROFILE_SHORTCUTS: usize = 5;
-
-/// Maps a palette row to the menu action that runs it. Both enums name the
-/// same commands; the palette simply drops its own row.
-fn palette_action(action: PageAction) -> MenuAction {
-    match action {
-        PageAction::Profile(index) => MenuAction::Profile(index),
-        PageAction::Settings => MenuAction::Settings,
-        PageAction::About => MenuAction::About,
-    }
-}
-
 /// The rows of the `⌄` dropdown: one per profile, then the window commands.
 ///
 /// The shortcut column is the key that actually reaches the row, so a profile
-/// past [`PROFILE_SHORTCUTS`] leaves it empty instead of naming a key that
-/// opens nothing.
+/// past [`crate::palette::PROFILE_SHORTCUTS`] leaves it empty instead of naming
+/// a key that opens nothing.
 fn menu_items(config: &Config) -> Vec<MenuItem> {
     let default = crate::profiles::default_profile_index(config);
     let mut items: Vec<MenuItem> = crate::profiles::profiles(config)
         .iter()
         .enumerate()
         .map(|(index, profile)| {
-            let shortcut = if index < PROFILE_SHORTCUTS {
+            let shortcut = if index < crate::palette::PROFILE_SHORTCUTS {
                 format!("Ctrl+Shift+{}", index + 1)
             } else {
                 String::new()

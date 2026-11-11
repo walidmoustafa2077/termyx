@@ -9,6 +9,7 @@ mod fonts;
 mod icon;
 mod input;
 mod page;
+mod palette;
 mod platform;
 mod profiles;
 mod pty;
