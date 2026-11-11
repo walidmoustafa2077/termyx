@@ -94,14 +94,9 @@ impl Palette {
         }
     }
 
-    // The app reads `rows` and `command`; these accessors are the tests'
-    // window into the model.
-    #[allow(dead_code)]
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
-    #[allow(dead_code)]
+    // The app reads `rows` and `command`; this accessor is the tests' window
+    // into the model.
+    #[cfg(test)]
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -226,7 +221,7 @@ impl Palette {
             }
         }
 
-        out.push_str("\r\n\x1b[2mUp/Down select, Enter run, Esc close\x1b[0m\r\n");
+        out.push_str("\r\n\x1b[2mUp/Down select, Enter run, Esc close\x1b[0m");
         out
     }
 }
@@ -288,8 +283,14 @@ fn score(query: &str, label: &str) -> Option<i32> {
 /// The row always spans exactly `cols` cells so the reverse-video highlight of
 /// the selected row reaches the right edge.
 fn row_line(entry: &PaletteRow, cols: usize) -> String {
-    let lead = "  ";
-    let shortcut = if cols >= 12 { entry.shortcut } else { "" };
+    // The hint is decided after measuring: a clipped shortcut would read as
+    // the wrong key, so it is dropped whole when the row cannot hold it.
+    let shortcut = if cols >= 2 + entry.shortcut.chars().count() {
+        entry.shortcut
+    } else {
+        ""
+    };
+    let lead = if cols >= 2 { "  " } else { "" };
     let shortcut_width = shortcut.chars().count();
     let label_width = cols.saturating_sub(lead.chars().count() + shortcut_width);
     let label = truncate(&entry.label, label_width);
@@ -389,16 +390,29 @@ mod tests {
 
     #[test]
     fn backspace_widens_the_list_and_resets_the_highlight() {
+        let config = config();
         let mut palette = Palette::new();
-        for character in "sett".chars() {
+        palette.set_context(PaletteContext {
+            tabs: 2,
+            position: 0,
+        });
+        for character in "tabx".chars() {
             palette.type_char(character);
         }
-        palette.move_selection(1, 3);
-        assert_eq!(palette.selected(), 1);
-        palette.type_char('i');
-        assert_eq!(palette.selected(), 0);
+        assert!(
+            palette.rows(&config).is_empty(),
+            "the fixture must start with no rows"
+        );
+
         palette.backspace();
-        assert_eq!(palette.query(), "sett");
+        let widened = palette.rows(&config).len();
+        assert!(widened > 0, "backspace must bring the rows back");
+        assert_eq!(palette.selected(), 0);
+
+        palette.move_selection(1, widened);
+        assert_eq!(palette.selected(), 1);
+        palette.type_char('x');
+        assert_eq!(palette.selected(), 0);
     }
 
     #[test]
@@ -440,26 +454,52 @@ mod tests {
 
     #[test]
     fn shortcuts_name_only_real_bindings() {
-        let config = config();
+        let mut config = Config::default();
+        config.profiles = (0..6)
+            .map(|index| crate::config::ProfileConfig {
+                name: format!("Profile {index}"),
+                program: "cmd.exe".to_string(),
+                args: Vec::new(),
+            })
+            .collect();
+        let config = config.validate();
         let mut palette = Palette::new();
-        // "Next tab" only exists with somewhere to go, so the fixture needs two tabs.
+        // Move and close rows need a middle tab among three.
         palette.set_context(PaletteContext {
-            tabs: 2,
-            position: 0,
+            tabs: 3,
+            position: 1,
         });
+
+        let expected = [
+            ("Profile 0", "Ctrl+Shift+1"),
+            ("Profile 1", "Ctrl+Shift+2"),
+            ("Profile 2", "Ctrl+Shift+3"),
+            ("Profile 3", "Ctrl+Shift+4"),
+            ("Profile 4", "Ctrl+Shift+5"),
+            ("Profile 5", ""),
+            ("Close tab", "Ctrl+Shift+W"),
+            ("Duplicate tab", ""),
+            ("Move tab left", ""),
+            ("Move tab right", ""),
+            ("Close other tabs", ""),
+            ("Close tabs to right", ""),
+            ("Next tab", "Ctrl+Tab"),
+            ("Previous tab", "Ctrl+Shift+Tab"),
+            ("Settings", ""),
+            ("Find", "Ctrl+F"),
+            ("Export text", ""),
+            ("About", ""),
+        ];
         let rows = palette.rows(&config);
-        for (index, row) in crate::profiles::profiles(&config).iter().enumerate() {
-            let listed = rows.iter().find(|entry| entry.label == row.name).unwrap();
-            let expected = PROFILE_SHORTCUT_LABELS.get(index).copied().unwrap_or("");
-            assert_eq!(listed.shortcut, expected);
+        assert_eq!(
+            rows.len(),
+            expected.len(),
+            "the table must cover every catalog row"
+        );
+        for (row, (label, shortcut)) in rows.iter().zip(expected) {
+            assert_eq!(row.label, label);
+            assert_eq!(row.shortcut, shortcut, "{label} names a wrong key");
         }
-        let by_label = |label: &str| rows.iter().find(|row| row.label == label).unwrap();
-        assert_eq!(by_label("Close tab").shortcut, "Ctrl+Shift+W");
-        assert_eq!(by_label("Next tab").shortcut, "Ctrl+Tab");
-        assert_eq!(by_label("Find").shortcut, "Ctrl+F");
-        assert_eq!(by_label("Settings").shortcut, "");
-        assert_eq!(by_label("Export text").shortcut, "");
-        assert_eq!(by_label("About").shortcut, "");
     }
 
     #[test]
@@ -505,8 +545,14 @@ mod tests {
         assert_eq!(row_line(&entry, 60).chars().count(), 60);
         assert!(row_line(&entry, 60).ends_with("Ctrl+Shift+Tab"));
         // Too narrow for a truthful hint: the shortcut is dropped, not clipped.
+        assert_eq!(row_line(&entry, 15).chars().count(), 15);
+        assert!(!row_line(&entry, 15).contains("Ctrl"));
+        assert_eq!(row_line(&entry, 12).chars().count(), 12);
+        assert!(!row_line(&entry, 12).contains("Ctrl"));
         assert_eq!(row_line(&entry, 8).chars().count(), 8);
         assert!(!row_line(&entry, 8).contains("Ctrl"));
+        // Below the lead width the row still fills the cell it has.
+        assert_eq!(row_line(&entry, 1).chars().count(), 1);
     }
 
     #[test]
@@ -514,6 +560,31 @@ mod tests {
         assert_eq!(truncate("Settings", 8), "Settings");
         assert_eq!(truncate("Close tabs to right", 10), "Close ta..");
         assert_eq!(truncate("Close tabs to right", 2), "Cl");
+    }
+
+    #[test]
+    fn a_full_height_palette_fits_the_grid_without_scrolling() {
+        let mut config = Config::default();
+        config.profiles = (0..12)
+            .map(|index| crate::config::ProfileConfig {
+                name: format!("Profile {index}"),
+                program: "cmd.exe".to_string(),
+                args: Vec::new(),
+            })
+            .collect();
+        let config = config.validate();
+        let palette = Palette::new();
+        let text = palette.text(&config, 80, 8);
+        assert!(
+            text.split("\r\n").count() <= 8,
+            "the rendered text must fit the eight-row grid"
+        );
+        assert!(
+            !text.ends_with('\n'),
+            "a trailing newline scrolls the title off"
+        );
+        assert!(text.contains("Command palette"));
+        assert!(text.contains("Up/Down select, Enter run, Esc close"));
     }
 
     #[test]

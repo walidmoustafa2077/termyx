@@ -1395,9 +1395,12 @@ impl App {
             return false;
         }
         // Ctrl+Shift+P opens the command palette. Checked before the tab
-        // shortcuts so it is never sent to the shell.
+        // shortcuts so it is never sent to the shell. A held key still belongs
+        // to the shortcut, but must not clear the query once per repeat.
         if is_command_palette_shortcut(&event.logical_key, self.modifiers) {
-            self.open_command_palette();
+            if !event.repeat {
+                self.open_command_palette();
+            }
             return false;
         }
         // The tab context menu is a layer over the grid: Escape dismisses it,
@@ -1499,8 +1502,7 @@ impl App {
     /// paste, and tab cycling keep working while a page is open.
     fn page_key(&mut self, event: &KeyEvent) -> Option<bool> {
         let index = self.tabs.active_index()?;
-        let kind = self.tabs[index].page.as_ref().map(Page::kind);
-        match kind {
+        match self.tabs[index].page.as_ref().map(Page::kind) {
             Some(PageKind::Settings) => return self.settings_page_key(index, event),
             Some(PageKind::CommandPalette) => {}
             _ => return None,
@@ -1512,12 +1514,10 @@ impl App {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 let exit = self.close_tab(index);
-                if kind == Some(PageKind::CommandPalette) {
-                    // `TabSet::remove` activates the left neighbour, so a
-                    // palette opened from a middle tab would land on the wrong
-                    // one without reselecting the captured target.
-                    self.focus_palette_target();
-                }
+                // `TabSet::remove` activates the left neighbour, so a palette
+                // opened from a middle tab would land on the wrong one without
+                // reselecting the captured target.
+                self.focus_palette_target();
                 return Some(exit);
             }
             Key::Named(NamedKey::Backspace) => {
@@ -1548,11 +1548,12 @@ impl App {
                     .page
                     .as_ref()
                     .and_then(|page| page.palette_command(&self.config));
+                let Some(command) = command else {
+                    return Some(false);
+                };
                 let exit = self.close_tab(index);
                 self.focus_palette_target();
-                if let Some(command) = command {
-                    self.run_palette_command(command);
-                }
+                self.run_palette_command(command);
                 return Some(exit || self.tabs.is_empty());
             }
             Key::Character(text) if !text.is_empty() => {
@@ -1982,6 +1983,12 @@ impl App {
     /// Reopening while the palette is already up keeps the target captured on
     /// the first open instead of capturing the palette tab itself.
     fn open_command_palette(&mut self) {
+        // The palette is a layer too: opening it dismisses the menus, the find
+        // bar, and the suggestion menu, so only one overlay is on screen.
+        self.close_tab_menu();
+        self.close_menu();
+        self.close_find();
+        self.dismiss_spellcheck_menu();
         let target = match self.tabs.active_index() {
             Some(index) if Some(index) == self.palette_tab_index() => self.palette_target,
             _ => self.tabs.active().map(|session| session.id),
@@ -1992,8 +1999,6 @@ impl App {
                 page.reset_palette();
             }
             self.palette_target = target;
-            self.close_find();
-            self.dismiss_spellcheck_menu();
             if self.tabs.active_index() != Some(index) {
                 self.release_forwarded_button();
                 self.tabs.select(index);

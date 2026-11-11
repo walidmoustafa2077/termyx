@@ -87,8 +87,8 @@ column stays empty.
 ### Catalog order
 
 Profiles in configured order (the first five carry their `Ctrl+Shift+1` .. `5`
-hint), then tab commands in menu order, then Settings, Find, Export text, About.
-With an empty query this is the displayed order.
+hint), then tab commands beginning with `Close tab`, then Settings, Find,
+Export text, About. With an empty query this is the displayed order.
 
 ### Availability
 
@@ -127,7 +127,7 @@ matches everything with score 0.
 3. `> {query}` followed by a reverse-video block as the caret
 4. blank
 5. one line per visible row: two leading spaces, label, right-aligned shortcut
-   at `cols - 2`, the selected row in reverse video across the width
+   at `cols`, the selected row in reverse video across the width
 6. blank
 7. dim `Up/Down select, Enter run, Esc close`
 

@@ -1,4 +1,4 @@
-﻿# Termyx Command Palette Implementation Plan
+# Termyx Command Palette Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -42,7 +42,7 @@
   - `pub struct Palette` with `new()`, `query() -> &str`, `selected() -> usize`, `type_char(char)`, `backspace()`, `move_selection(isize, usize)`, `reset()`, `set_context(PaletteContext)`, `rows(&Config) -> Vec<PaletteRow>`, `command(&Config) -> Option<PaletteCommand>`, `text(&Config, usize, usize) -> String`
   - `Page::{palette, set_palette_context, reset_palette, palette_command}`
 
-- [ ] **Step 1: Write `src/palette.rs` with the failing tests**
+- [x] **Step 1: Write `src/palette.rs` with the failing tests**
 
 Create the file with the module doc, the imports, and the whole `#[cfg(test)] mod tests` block. Do not define the catalog, the ranking, or the rendering yet: the tests must not compile until Step 4.
 
@@ -251,7 +251,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Register the module**
+- [x] **Step 2: Register the module**
 
 In `src/main.rs`, the module list is alphabetical. Add the line after `mod page;`:
 
@@ -259,12 +259,12 @@ In `src/main.rs`, the module list is alphabetical. Add the line after `mod page;
 mod palette;
 ```
 
-- [ ] **Step 3: Run the palette tests and confirm they fail to compile**
+- [x] **Step 3: Run the palette tests and confirm they fail to compile**
 
 Run: `cargo test palette`
 Expected: FAIL with `cannot find type Palette`/`cannot find function score` in the test block. Compilation errors are the failing state for a new module; there is no runtime behavior yet.
 
-- [ ] **Step 4: Add the catalog, ranking, rendering, and text**
+- [x] **Step 4: Add the catalog, ranking, rendering, and text**
 
 Insert this above `#[cfg(test)]`, below the imports:
 
@@ -551,7 +551,7 @@ fn truncate(text: &str, width: usize) -> String {
 }
 ```
 
-- [ ] **Step 5: Rework `src/page.rs` to delegate to the palette**
+- [x] **Step 5: Rework `src/page.rs` to delegate to the palette**
 
 Imports become:
 
@@ -622,7 +622,7 @@ In `text`, the `CommandPalette` arm becomes:
 
 Delete the old private `palette_text`. Keep `settings_text`, `settings_stamp`, `about_text`, `about_page_text`, and `ensure_visible` unchanged.
 
-- [ ] **Step 6: Replace the palette tests in `src/page.rs`**
+- [x] **Step 6: Replace the palette tests in `src/page.rs`**
 
 Delete the tests that touch `Page::matches`, `Page::selected_action`, `page.query`, or `page.selected`. Add:
 
@@ -653,7 +653,7 @@ Delete the tests that touch `Page::matches`, `Page::selected_action`, `page.quer
 
 Keep the Settings page tests, the About tests, and the "refill drops previous history" test, adjusting only the calls that no longer exist.
 
-- [ ] **Step 7: Wire the app (imports, field, menu path, refill, Enter)**
+- [x] **Step 7: Wire the app (imports, field, menu path, refill, Enter)**
 
 In `src/app.rs`:
 
@@ -795,28 +795,29 @@ and initialize it as `palette_target: None,` in `App::new`.
                             .page
                             .as_ref()
                             .and_then(|page| page.palette_command(&self.config));
+                        let Some(command) = command else {
+                            return Some(false);
+                        };
                         let exit = self.close_tab(index);
                         self.focus_palette_target();
-                        if let Some(command) = command {
-                            self.run_palette_command(command);
-                        }
+                        self.run_palette_command(command);
                         return Some(exit || self.tabs.is_empty());
                     }
 ```
 
-Keep the surrounding `refill_page(id); self.request_redraw();` tail. `Some(exit || ...)` keeps Esc's behavior of exiting once the last tab closes; `close_tab` already returns whether the window should exit, so this is belt and braces. Do not call `refill_page` on the closed id before returning. `focus_palette_target` runs before dispatch so every command that acts on the active tab (`Find`, `ExportText`, `NextTab`, `PreviousTab`) sees the origin.
+Keep the surrounding `refill_page(id); self.request_redraw();` tail. `Some(exit || ...)` keeps Esc's behavior of exiting once the last tab closes; `close_tab` already returns whether the window should exit, so this is belt and braces. With no matching row nothing happens and the palette stays open. Do not call `refill_page` on the closed id before returning. `focus_palette_target` runs before dispatch so every command that acts on the active tab (`Find`, `ExportText`, `NextTab`, `PreviousTab`) sees the origin.
 
-- [ ] **Step 8: Run the tests**
+- [x] **Step 8: Run the tests**
 
 Run: `cargo test palette && cargo test page && cargo test`
 Expected: PASS. Fix any borrow or unused-import errors before moving on.
 
-- [ ] **Step 9: Run the gates**
+- [x] **Step 9: Run the gates**
 
 Run: `cargo fmt --check; cargo clippy --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add src/palette.rs src/main.rs src/page.rs src/app.rs
@@ -835,7 +836,7 @@ git -c user.name=Termyx -c user.email=dev@localhost commit -m "feat(palette): ra
 - Consumes: `PaletteCommand`, `PaletteContext`, `Palette::reset`, `Page::reset_palette`, `App::{palette_tab_index, close_find, dismiss_spellcheck_menu, refill_page, release_forwarded_button, rebuild_layout}`.
 - Produces: `fn is_command_palette_shortcut(logical: &Key, modifiers: ModifiersState) -> bool` (private, unit-tested).
 
-- [ ] **Step 1: Write the failing shortcut test**
+- [x] **Step 1: Write the failing shortcut test**
 
 In the `#[cfg(test)] mod tests` of `src/app.rs`, next to the tab shortcut tests:
 
@@ -866,12 +867,12 @@ In the `#[cfg(test)] mod tests` of `src/app.rs`, next to the tab shortcut tests:
     }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `cargo test ctrl_shift_p_is_the_palette_shortcut`
 Expected: FAIL with `cannot find function is_command_palette_shortcut`.
 
-- [ ] **Step 3: Add the helper and its branch**
+- [x] **Step 3: Add the helper and its branch**
 
 Put the helper near `shortcut_for`:
 
@@ -896,7 +897,7 @@ In `on_key`, immediately after the existing `Ctrl+F` block:
         }
 ```
 
-- [ ] **Step 4: Make reopening reuse the existing palette tab**
+- [x] **Step 4: Make reopening reuse the existing palette tab**
 
 Replace `open_command_palette` with:
 
@@ -934,7 +935,7 @@ Replace `open_command_palette` with:
 
 `refill_page` reads `palette_target` before borrowing the session, so the context is right on this first refill; no second refill is needed.
 
-- [ ] **Step 5: Name the shortcut on the menu row**
+- [x] **Step 5: Name the shortcut on the menu row**
 
 In `menu_items`, the tail becomes:
 
@@ -958,12 +959,12 @@ In `menu_items`, the tail becomes:
 
 Adjust the exact constructor formatting to whatever `rustfmt` produces; the strings are what matter.
 
-- [ ] **Step 6: Run the tests and gates**
+- [x] **Step 6: Run the tests and gates**
 
 Run: `cargo test ctrl_shift_p && cargo test && cargo fmt --check; cargo clippy --all-targets -- -D warnings`
 Expected: PASS, clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/app.rs

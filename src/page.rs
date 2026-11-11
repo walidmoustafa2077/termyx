@@ -116,8 +116,9 @@ impl Page {
         }
     }
 
-    /// The full screen contents for this page. The grid dimensions are needed
-    /// only by Settings, whose viewport is exactly the visible body rows.
+    /// The full screen contents for this page. Both Settings and the command
+    /// palette use the grid dimensions: Settings sizes its viewport to the
+    /// visible body rows, and the palette clamps its rows and width to the grid.
     pub fn text(&self, config: &Config, config_path: &Path, cols: usize, rows: usize) -> String {
         match self.kind {
             PageKind::Settings => self.settings_text(config, config_path, cols, rows),
