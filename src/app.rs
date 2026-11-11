@@ -534,15 +534,18 @@ impl App {
     /// Opens `profile` in a new tab and shows it.
     ///
     /// A failed spawn leaves the window as it was; the caller decides whether
-    /// that is fatal (the first tab) or a warning (a later click).
-    fn new_tab(&mut self, profile: usize) -> anyhow::Result<()> {
+    /// that is fatal (the first tab) or a warning (a later click). The returned
+    /// id names the session so a duplicate can copy its metadata.
+    fn new_tab(&mut self, profile: usize) -> anyhow::Result<SessionId> {
         let profiles = crate::profiles::profiles(&self.config);
-        let Some(profile) = profiles.get(profile).or_else(|| profiles.first()) else {
-            anyhow::bail!("no shell profiles configured");
-        };
+        if profiles.is_empty() {
+            anyhow::bail!("no shell profile is configured");
+        }
+        let profile_index = if profile < profiles.len() { profile } else { 0 };
+        let profile = &profiles[profile_index];
         tracing::debug!(profile = %profile.name, "opening a tab");
         let id = self.tabs.next_id();
-        let session = spawn_session(
+        let mut session = spawn_session(
             id,
             &profile.shell,
             self.cols,
@@ -550,6 +553,7 @@ impl App {
             self.config.scrollback.lines,
             self.proxy.clone(),
         )?;
+        session.profile = Some(profile_index);
         // A forwarded press belongs to the tab that owns it. Balance it before
         // the new session becomes active, or the release would reach the wrong
         // shell and leave the original one stuck down.
@@ -568,7 +572,12 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
-        Ok(())
+        let id = self
+            .tabs
+            .active()
+            .map(|session| session.id)
+            .unwrap_or_default();
+        Ok(id)
     }
 
     /// The icon for `program`, reading it at most once per program.

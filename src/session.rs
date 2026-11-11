@@ -1,8 +1,8 @@
 //! Tabs over terminal sessions.
 //!
 //! [`TabSlots`] is the bookkeeping every tab operation needs: which slot is
-//! active, which id it holds, and the title it shows. It is split from
-//! [`TabSet`] so the rules can be tested without spawning shells.
+//! active and which id it holds. It is split from [`TabSet`] so the rules can
+//! be tested without spawning shells.
 
 use std::ops::{Index, IndexMut};
 
@@ -17,10 +17,11 @@ pub type SessionId = u64;
 /// Title shown when a session has not set one, or cleared it.
 pub const FALLBACK_TITLE: &str = "Termyx";
 
-/// The form a title is stored in: trimmed, with blank titles cleared.
+/// The form an OSC title is stored in: trimmed, with blank and path-like
+/// titles cleared.
 fn clean_title(title: &str) -> Option<String> {
     let title = title.trim();
-    (!title.is_empty()).then(|| title.to_string())
+    title_is_usable(title).then(|| title.to_string())
 }
 
 /// Whether an OSC 0/2 title can label a tab.
@@ -44,7 +45,6 @@ pub fn title_is_usable(title: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct TabSlots {
     ids: Vec<SessionId>,
-    titles: Vec<Option<String>>,
     active: Option<usize>,
 }
 
@@ -55,7 +55,6 @@ impl TabSlots {
 
     pub fn push(&mut self, id: SessionId) {
         self.ids.push(id);
-        self.titles.push(None);
         self.active = Some(self.ids.len() - 1);
     }
 
@@ -88,7 +87,6 @@ impl TabSlots {
             return None;
         }
         let id = self.ids.remove(index);
-        self.titles.remove(index);
         match self.active {
             Some(active) if active == index => {
                 self.active = if self.ids.is_empty() {
@@ -115,42 +113,14 @@ impl TabSlots {
     pub fn ids(&self) -> Vec<SessionId> {
         self.ids.clone()
     }
-
-    /// Sets the title the slot with `id` shows, clearing it when `title` is
-    /// blank. Returns whether the stored label actually changed, so a repeat
-    /// of the same title costs no repaint.
-    ///
-    /// A title that is really a program path is ignored: ConPTY leaves the
-    /// executable path behind when the shell sets no title of its own.
-    pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
-        let Some(index) = self.ids.iter().position(|slot| *slot == id) else {
-            return false;
-        };
-        let next = clean_title(title);
-        // A path is not a name, but a blank title must still clear the slot so
-        // the fallback can come back.
-        if next.is_some() && !title_is_usable(title) {
-            return false;
-        }
-        let changed = self.titles[index] != next;
-        self.titles[index] = next;
-        changed
-    }
-
-    /// The labels of every slot, with the fallback for untitled ones.
-    pub fn titles(&self) -> Vec<&str> {
-        self.titles
-            .iter()
-            .map(|title| title.as_deref().unwrap_or(FALLBACK_TITLE))
-            .collect()
-    }
 }
 
 /// One tab: its parser and, for shell tabs, its child.
 ///
-/// Its title is not stored here: [`TabSlots`] is the single store, and the tab
-/// strip reads it through [`TabSet::titles`]. Its icon is: the program it
-/// started is a property of this session, not of the strip.
+/// Its title lives here so a rename and the shell's own OSC title update the
+/// same store the strip reads through [`TabSet::titles`]. Its icon is here for
+/// the same reason: the program it started is a property of this session, not
+/// of the strip.
 ///
 /// In-app pages (Settings, palette, About) use the same grid so rendering,
 /// scrolling, and selection stay one path, but they have no child process and
@@ -163,18 +133,33 @@ pub struct Session {
     pub icon: Option<crate::icon::TabIcon>,
     /// Set when this tab is an in-app page rather than a shell.
     pub page: Option<crate::page::Page>,
+    /// The label the strip shows, or `None` for [`FALLBACK_TITLE`].
+    pub title: Option<String>,
+    /// A user rename wins over later OSC titles until the rename is cleared.
+    pub title_locked: bool,
+    /// The tab color chosen from the context menu.
+    // No reader until the color picker lands; the field is part of this
+    // task's interface so the picker only has to store it.
+    #[allow(dead_code)]
+    pub color: Option<crate::theme::Rgb>,
+    /// Index into `profiles(&config)` for a shell tab; `None` for a page tab.
+    pub profile: Option<usize>,
 }
 
 impl Session {
     pub fn new(id: SessionId, terminal: Terminal, pty: PtySession) -> Self {
         // A session does not know which profile started it, so the app fills
-        // the icon in once it has resolved the program.
+        // the icon and profile in once it has resolved the program.
         Self {
             id,
             terminal,
             pty: Some(pty),
             icon: None,
             page: None,
+            title: None,
+            title_locked: false,
+            color: None,
+            profile: None,
         }
     }
 
@@ -186,11 +171,15 @@ impl Session {
             pty: None,
             icon: None,
             page: Some(page),
+            title: None,
+            title_locked: false,
+            color: None,
+            profile: None,
         }
     }
 }
 
-/// The live sessions plus the title bookkeeping from [`TabSlots`].
+/// The live sessions plus the slot bookkeeping.
 pub struct TabSet {
     slots: TabSlots,
     sessions: Vec<Session>,
@@ -274,7 +263,10 @@ impl TabSet {
     }
 
     pub fn titles(&self) -> Vec<&str> {
-        self.slots.titles()
+        self.sessions
+            .iter()
+            .map(|session| session.title.as_deref().unwrap_or(FALLBACK_TITLE))
+            .collect()
     }
 
     pub fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
@@ -286,8 +278,55 @@ impl TabSet {
         self.sessions.iter().position(|session| session.id == id)
     }
 
+    /// Sets the title the session `id` shows, clearing it when `title` is
+    /// blank. Returns whether the stored label actually changed, so a repeat
+    /// of the same title costs no repaint.
+    ///
+    /// A title that is really a program path is ignored: ConPTY leaves the
+    /// executable path behind when the shell sets no title of its own. A user
+    /// rename locks the title, and later OSC updates leave it alone.
     pub fn set_title(&mut self, id: SessionId, title: &str) -> bool {
-        self.slots.set_title(id, title)
+        let Some(session) = self.session_mut(id) else {
+            return false;
+        };
+        if session.title_locked {
+            return false;
+        }
+        let next = clean_title(title);
+        // A path is not a name, but a blank title must still clear the label so
+        // the fallback can come back.
+        if next.is_none() && !title.trim().is_empty() {
+            return false;
+        }
+        let changed = session.title != next;
+        session.title = next;
+        changed
+    }
+
+    /// Renames the session `id` and locks the title against OSC updates.
+    /// A blank name clears the title and the lock, so the shell can name the
+    /// tab again.
+    // The rename UI that calls this lands in a later task; the tests pin the
+    // behavior now.
+    #[allow(dead_code)]
+    pub fn rename(&mut self, id: SessionId, title: &str) -> bool {
+        let Some(session) = self.session_mut(id) else {
+            return false;
+        };
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            let changed = session.title.is_some() || session.title_locked;
+            session.title = None;
+            session.title_locked = false;
+            return changed;
+        }
+        // An explicit rename is the user's choice, so it bypasses the path-like
+        // filter that protects OSC titles from becoming `C:\...`.
+        let next = Some(trimmed.to_string());
+        let changed = session.title != next || !session.title_locked;
+        session.title = next;
+        session.title_locked = true;
+        changed
     }
 }
 
@@ -402,13 +441,14 @@ mod tests {
 
     #[test]
     fn titles_fall_back_to_the_window_name() {
-        let mut slots = TabSlots::new();
-        slots.push(1);
-        assert_eq!(slots.titles(), vec!["Termyx"]);
-        slots.set_title(1, "build");
-        assert_eq!(slots.titles(), vec!["build"]);
-        slots.set_title(1, "  ");
-        assert_eq!(slots.titles(), vec!["Termyx"]);
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        assert_eq!(tabs.titles(), vec!["Termyx"]);
+        tabs.set_title(id, "build");
+        assert_eq!(tabs.titles(), vec!["build"]);
+        tabs.set_title(id, "  ");
+        assert_eq!(tabs.titles(), vec!["Termyx"]);
     }
 
     #[test]
@@ -424,12 +464,13 @@ mod tests {
 
     #[test]
     fn a_shell_path_does_not_replace_the_stored_title() {
-        let mut slots = TabSlots::new();
-        slots.push(1);
-        slots.set_title(1, "Windows PowerShell");
-        assert!(!slots.set_title(1, r"C:\WINDOWS\System32\WindX"));
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        tabs.set_title(id, "Windows PowerShell");
+        assert!(!tabs.set_title(id, r"C:\WINDOWS\System32\WindX"));
         assert_eq!(
-            slots.titles(),
+            tabs.titles(),
             vec!["Windows PowerShell"],
             "a ConPTY path must leave the profile name in place"
         );
@@ -464,6 +505,29 @@ mod tests {
         let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
+    }
+
+    #[test]
+    fn rename_locks_the_title_against_osc_updates() {
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        assert!(tabs.rename(id, "Build"));
+        assert_eq!(tabs.titles(), vec!["Build"]);
+        assert!(!tabs.set_title(id, "shell title"));
+        assert_eq!(tabs.titles(), vec!["Build"]);
+    }
+
+    #[test]
+    fn a_blank_rename_clears_the_lock() {
+        let mut tabs = TabSet::new();
+        let id = tabs.next_id();
+        tabs.push(test_session(id));
+        assert!(tabs.rename(id, "Build"));
+        assert!(tabs.rename(id, "   "));
+        assert_eq!(tabs.titles(), vec![FALLBACK_TITLE]);
+        assert!(tabs.set_title(id, "shell title"));
+        assert_eq!(tabs.titles(), vec!["shell title"]);
     }
 
     #[test]
