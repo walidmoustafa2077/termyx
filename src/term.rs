@@ -384,7 +384,12 @@ impl Terminal {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                text.push(cell.c);
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(extra) = cell.zerowidth() {
+                    for ch in extra {
+                        text.push(*ch);
+                    }
+                }
             }
             out.push_str(text.trim_end());
             out.push('\n');
@@ -819,6 +824,14 @@ mod tests {
         let text = terminal.all_text();
         assert!(text.starts_with("line0\nline1\n"), "got {text:?}");
         assert!(text.ends_with("line5\n"), "got {text:?}");
+    }
+
+    #[test]
+    fn all_text_keeps_combining_marks() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        terminal.feed("بَ\r\n".as_bytes());
+        let text = terminal.all_text();
+        assert!(text.contains("بَ"), "got {text:?}");
     }
 
     #[test]
