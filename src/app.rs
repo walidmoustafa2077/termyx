@@ -1,7 +1,7 @@
 //! Window, surface, and event wiring.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -26,12 +26,16 @@ use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
 use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
-use crate::term::{LogicalPos, RowSnapshot, Terminal};
+use crate::spellcheck::{self, Misspelling};
+use crate::term::{GridSnapshot, LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
 use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
 use crate::ui::find_bar::{FindBar, FindHit};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
 use crate::ui::rename::RenameState;
+use crate::ui::spellcheck_menu::{
+    MenuItem as SpellcheckItem, SpellcheckMenu, SpellcheckMenuLayout,
+};
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
@@ -145,6 +149,17 @@ pub struct App {
     scrollbar_hover: bool,
     blink: CursorBlink,
     cursor_pos: (f64, f64),
+    /// Misspelled spans painted by the last frame.
+    spellcheck_spans: Vec<Misspelling>,
+    /// Rect of the input line from the last frame, in physical pixels: the
+    /// anchor the suggestion menu hangs from.
+    spellcheck_anchor: Option<Rect>,
+    /// The open suggestion menu, if any. It is the topmost overlay and owns the
+    /// pointer while open, like the tab context menu.
+    spellcheck_menu: Option<SpellcheckMenu>,
+    /// Session flag set by "Hide underlines"; the config value is the persisted
+    /// setting and is not rewritten.
+    hide_underlines: bool,
     cols: usize,
     rows: usize,
     /// Program to icon, filled the first time a profile opens a tab. A second
@@ -190,6 +205,10 @@ impl App {
             // (0, 0) is inside the strip band, so a press arriving first would
             // be eaten as a chrome press.
             cursor_pos: (-1.0, -1.0),
+            spellcheck_spans: Vec::new(),
+            spellcheck_anchor: None,
+            spellcheck_menu: None,
+            hide_underlines: false,
             cols: 80,
             rows: 24,
             icon_cache: std::collections::HashMap::new(),
@@ -848,6 +867,7 @@ impl App {
         let mut session = spawn_session(
             id,
             &profile.shell,
+            self.config.spellcheck.autocorrect,
             self.cols,
             self.rows,
             self.config.scrollback.lines,
@@ -1197,13 +1217,22 @@ impl App {
             .iter()
             .map(|line| VisualMap::for_row(line, &self.config.bidi))
             .collect();
+        // The spans and the anchor are frame state: the draw below paints them
+        // and the right-click hit test reads the very same rectangles.
+        self.spellcheck_spans = compute_spellcheck_spans(
+            &snapshot,
+            self.config.spellcheck.enabled,
+            self.hide_underlines,
+        );
+        self.spellcheck_anchor = input_line_anchor(&snapshot, renderer);
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.set_maximized(maximized);
-        renderer.draw(
+        renderer.draw_with_spellcheck(
             &snapshot,
             &maps,
             self.selection.as_ref(),
             self.find.as_ref(),
+            &self.spellcheck_spans,
         );
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &icons, &colors, self.strip_hover);
@@ -1253,6 +1282,14 @@ impl App {
                 }
             }
         }
+        // The suggestion menu is the topmost overlay, above the tab menus and
+        // the tooltip, because it is opened directly over the grid.
+        if let Some(menu) = self.spellcheck_menu.as_ref() {
+            if let Some(anchor) = self.spellcheck_anchor {
+                let viewport = grid_viewport(renderer, window_width, self.rows);
+                renderer.draw_spellcheck_menu(menu, anchor, viewport);
+            }
+        }
         renderer.sync();
 
         match surface.buffer_mut() {
@@ -1280,6 +1317,19 @@ impl App {
         // Typing always reveals the cursor, so a keystroke is never typed into
         // a cursor that happens to be in its hidden phase.
         self.blink.restart(Instant::now());
+        // The suggestion menu is the topmost layer: Escape closes it here,
+        // before any other Escape handler, and any other key dismisses it and
+        // falls through like the tab context menu.
+        if self.spellcheck_menu.is_some() {
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                self.spellcheck_menu = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return false;
+            }
+            self.spellcheck_menu = None;
+        }
         // The inline rename editor owns every key until it commits or cancels,
         // so a title edit never reaches the shell.
         if self.rename.is_some() {
@@ -1585,8 +1635,70 @@ impl App {
         }
     }
 
+    /// Geometry of the open suggestion menu, or `None` without a menu, an
+    /// anchor from the last frame, or a window to measure.
+    fn spellcheck_menu_layout(&self) -> Option<SpellcheckMenuLayout> {
+        let menu = self.spellcheck_menu.as_ref()?;
+        let anchor = self.spellcheck_anchor?;
+        let renderer = self.renderer.as_ref()?;
+        let window = self.window.as_ref()?;
+        let viewport = grid_viewport(renderer, window.inner_size().width as f32, self.rows);
+        Some(menu.layout(anchor, viewport, renderer.scale_factor()))
+    }
+
+    /// The menu for the span under `position`, or `None` when the pointer is
+    /// not over a misspelled word.
+    fn spellcheck_menu_at(&self, position: (f64, f64)) -> Option<SpellcheckMenu> {
+        let cell = self.pos_at(position.0, position.1)?;
+        let snapshot = self.tabs.active()?.terminal.snapshot();
+        // Recomputed from the live grid rather than the last frame: a click
+        // must not miss a word the shell painted after the previous redraw.
+        let spans = compute_spellcheck_spans(
+            &snapshot,
+            self.config.spellcheck.enabled,
+            self.hide_underlines,
+        );
+        let cells = snapshot.row_cells(cell.row);
+        spellcheck_menu_for(&spans, cell.row, cell.col, &cells, snapshot.cursor.logical)
+    }
+
+    /// Runs the chosen row and closes the menu, the way every other overlay
+    /// dismisses after a command.
+    fn apply_spellcheck_item(&mut self, token: &str, item: SpellcheckItem) {
+        self.spellcheck_menu = None;
+        match item {
+            SpellcheckItem::Suggest(word) => {
+                // `select` already refused a disabled suggestion; the cursor is
+                // still at the end of this token.
+                let bytes = replacement_bytes(token, &word);
+                self.write_input(&bytes);
+            }
+            SpellcheckItem::AddToDictionary => {
+                if let Some(path) = user_words_path() {
+                    if let Err(err) = append_user_word(&path, token) {
+                        tracing::warn!(%err, "could not append the user word");
+                    }
+                }
+                spellcheck::add_word(token);
+            }
+            SpellcheckItem::HideUnderlines => self.hide_underlines = true,
+        }
+    }
+
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        if self.spellcheck_menu.is_some() {
+            // The suggestion menu is the topmost layer while it is open: motion
+            // steps its hover and nothing beneath the panel reacts.
+            let layout = self.spellcheck_menu_layout();
+            if let (Some(menu), Some(layout)) = (self.spellcheck_menu.as_mut(), layout) {
+                menu.set_hover(&layout, x as f32, y as f32);
+            }
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
         if let Some(tab_menu) = self.tab_menu.as_mut() {
             // The context menu owns the pointer while it is open: motion steps
             // the row highlight and opens or closes submenus beneath it.
@@ -1654,6 +1766,11 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        // An open suggestion menu owns the pointer: the wheel must not scroll
+        // the grid out from under its anchor.
+        if self.spellcheck_menu.is_some() {
+            return;
+        }
         // The dropdown owns the pointer while it is open; the wheel must not
         // scroll the grid under the panel.
         if self.menu.is_some() {
@@ -1762,6 +1879,51 @@ impl App {
         self.blink.restart(Instant::now());
 
         if state == ElementState::Pressed {
+            // The suggestion menu is the topmost overlay: a press on a row runs
+            // it, a press on its padding or a disabled row keeps it open, and a
+            // press outside closes it without pasting or reaching the grid.
+            if self.spellcheck_menu.is_some() {
+                let (x, y) = (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32);
+                let layout = self.spellcheck_menu_layout();
+                let mut chosen = None;
+                let mut dismiss = true;
+                if let (Some(menu), Some(layout)) = (self.spellcheck_menu.as_mut(), layout.as_ref())
+                {
+                    menu.set_hover(layout, x, y);
+                    if button == MouseButton::Left {
+                        match menu.hit(layout, x, y) {
+                            Some(index) => match menu.select(index) {
+                                Some(item) => chosen = Some((menu.token.clone(), item)),
+                                // A dimmed suggestion: the menu stays open so
+                                // the reason is still readable.
+                                None => dismiss = false,
+                            },
+                            // The panel's own padding is part of the layer even
+                            // though it is no row.
+                            None => dismiss = !layout.panel.contains(x, y),
+                        }
+                    }
+                    // Any other button, including a second right-click, closes
+                    // the layer; nothing beneath it sees the press.
+                }
+                if dismiss {
+                    self.spellcheck_menu = None;
+                }
+                // A forwarded button belongs to the tab that owns it; balance
+                // it before the menu takes over the pointer.
+                self.release_forwarded_button();
+                self.mouse_down = false;
+                self.click_count = 0;
+                self.last_click = None;
+                self.press_in_chrome = true;
+                if let Some((token, item)) = chosen {
+                    self.apply_spellcheck_item(&token, item);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return false;
+            }
             // The find bar owns presses inside it while it is open: the close
             // box dismisses it, the field consumes the press, and a press
             // outside falls through to the grid (so the user can click back
@@ -2049,6 +2211,20 @@ impl App {
 
             // Shift+drag and non-reporting apps keep local text selection.
             self.app_mouse_button = None;
+
+            // A right-click on a spelled word opens its suggestion menu. A miss
+            // falls through to the paste below, so every other right-click
+            // keeps its old meaning.
+            if button == MouseButton::Right {
+                if let Some(menu) = self.spellcheck_menu_at(self.cursor_pos) {
+                    self.spellcheck_menu = Some(menu);
+                    self.app_mouse_button = None;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return false;
+                }
+            }
 
             // A right or middle click that stays local pastes; the forwarding
             // branch above has already claimed the click for mouse-reporting
@@ -3349,6 +3525,154 @@ fn cell_at(x: f64, y: f64, grid: GridGeometry, cols: usize, rows: usize) -> (usi
     (row, visual)
 }
 
+/// Misspelled spans on the shell's live input line, as grid rows.
+///
+/// Nothing is reported unless the feature is on, the underlines have not been
+/// hidden for this session, the viewport is at the bottom, and the OSC 133 `B`
+/// mark sits on the cursor's row. `cursor.row` is a viewport row and only
+/// equals the mark's grid line because the `display_offset == 0` gate above
+/// rules out a scrolled-back viewport.
+fn compute_spellcheck_spans(
+    snapshot: &GridSnapshot,
+    enabled: bool,
+    hide_underlines: bool,
+) -> Vec<Misspelling> {
+    if !enabled || hide_underlines || snapshot.display_offset != 0 {
+        return Vec::new();
+    }
+    let Some(start) = snapshot.input_start else {
+        return Vec::new();
+    };
+    if start.row < 0 || start.row as usize != snapshot.cursor.row {
+        return Vec::new();
+    }
+
+    let cursor_col = snapshot.cursor.logical.min(snapshot.cols);
+    // The producer can report the mark at the row's last column, which is one
+    // past the last cell, so both ends are clamped before `scan` indexes.
+    let start_col = start.col.min(snapshot.cols);
+    let cells = snapshot.row_cells(snapshot.cursor.row);
+    let mut spans = spellcheck::scan(&cells, start_col, cursor_col);
+    for span in &mut spans {
+        span.row = start.row as usize;
+    }
+    spans
+}
+
+/// The row rectangle the suggestion menu hangs from, in physical pixels.
+///
+/// A scrolled-back viewport has no live input line, and `cursor.row` means
+/// nothing there, so no anchor is reported.
+fn input_line_anchor(snapshot: &GridSnapshot, renderer: &Renderer) -> Option<Rect> {
+    if snapshot.display_offset != 0 {
+        return None;
+    }
+    let (x, top) = renderer.grid_origin();
+    let cell_h = renderer.fonts().cell_h as f32;
+    Some(Rect {
+        x,
+        y: top + snapshot.cursor.row as f32 * cell_h,
+        w: snapshot.cols as f32 * renderer.fonts().cell_w as f32,
+        h: cell_h,
+    })
+}
+
+/// The grid area a floating panel may use: every row of the live screen.
+///
+/// Using the grid rather than the whole surface keeps a tall menu inside a
+/// region the press handler can still hit test against the same numbers.
+fn grid_viewport(renderer: &Renderer, window_width: f32, rows: usize) -> Rect {
+    let padding = renderer.padding() as f32;
+    let (x, y) = renderer.grid_origin();
+    Rect {
+        x,
+        y,
+        w: (window_width - 2.0 * padding).max(0.0),
+        h: (rows as f32 * renderer.fonts().cell_h as f32).max(0.0),
+    }
+}
+
+/// Builds the menu for the span containing cell `(row, col)`, or `None` when
+/// the pointer is between words or outside the input line.
+///
+/// Replacement is offered only for the last span with the cursor at its end:
+/// `scan` stops at the cursor, so any earlier token would be followed by text
+/// the backspaces would not delete.
+fn spellcheck_menu_for(
+    spans: &[Misspelling],
+    row: usize,
+    col: usize,
+    cells: &[crate::term::Cell],
+    cursor_col: usize,
+) -> Option<SpellcheckMenu> {
+    let index = spans
+        .iter()
+        .position(|span| span.row == row && col >= span.col && col < span.col + span.len)?;
+    let span = spans[index];
+    let can_replace = index + 1 == spans.len() && span.col + span.len == cursor_col;
+    let token: String = cells
+        .get(span.col..span.col + span.len)?
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect();
+    Some(SpellcheckMenu::new(
+        row,
+        span.col,
+        token.clone(),
+        spellcheck::suggestions(&token, 5),
+        can_replace,
+        None,
+    ))
+}
+
+/// The bytes that replace `token` with `replacement` in the shell's line
+/// editor: one backspace per cell of the token, then the word.
+///
+/// A token that starts with a capital keeps one, so replacing `Teh` with `the`
+/// writes `The`, not `the`.
+fn replacement_bytes(token: &str, replacement: &str) -> Vec<u8> {
+    let mut bytes = vec![0x7f; token.len()];
+    let mut word = replacement.to_string();
+    if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            word = first.to_ascii_uppercase().to_string() + chars.as_str();
+        }
+    }
+    bytes.extend_from_slice(word.as_bytes());
+    bytes
+}
+
+/// The user-word file the PowerShell module also reads.
+///
+/// `None` when the platform has no `LOCALAPPDATA`; the caller then still adds
+/// the word to this session's in-memory set.
+fn user_words_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(base)
+            .join("Termyx")
+            .join("user-words.txt"),
+    )
+}
+
+/// Appends one word as a line, creating the directory and the file.
+fn append_user_word(path: &Path, word: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut line = String::with_capacity(word.len() + 1);
+    line.push_str(word);
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())
+}
+
 fn wheel_lines(delta: MouseScrollDelta, cell_h: f32, remainder: &mut f32) -> i32 {
     *remainder += match delta {
         MouseScrollDelta::LineDelta(_, y) => y * 3.0,
@@ -3376,7 +3700,7 @@ mod tests {
     use crate::config::{BaseDirection, ShellConfig};
     use crate::pty::PtySession;
     use crate::session::Session;
-    use crate::term::{Cell, RowSnapshot, Style};
+    use crate::term::{Affinity, Cell, CursorShape, CursorState, InputStart, RowSnapshot, Style};
 
     #[test]
     fn grid_size_uses_padding_and_minimums() {
@@ -4497,7 +4821,7 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
+        let pty = PtySession::spawn_with(&idle_shell(), false, 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
@@ -4857,5 +5181,191 @@ mod tests {
             !enabled(&items, "Duplicate tab"),
             "`Duplicate tab` must be disabled for a page tab"
         );
+    }
+
+    /// A snapshot with one input line per entry, a cursor at the end of
+    /// `cursor_row`, and an optional OSC 133 mark.
+    fn spellcheck_snapshot(
+        cursor_row: usize,
+        lines: &[&str],
+        start: Option<(i32, usize)>,
+    ) -> GridSnapshot {
+        let lines: Vec<RowSnapshot> = lines
+            .iter()
+            .map(|text| RowSnapshot {
+                cells: text
+                    .chars()
+                    .map(|c| Cell {
+                        text: c.to_string(),
+                        width: 1,
+                        style: Style::default(),
+                    })
+                    .collect(),
+                wrapped: false,
+            })
+            .collect();
+        let cols = lines
+            .iter()
+            .map(|line| line.cells.len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let rows = lines.len().max(1);
+        GridSnapshot {
+            cols,
+            rows,
+            cursor: CursorState {
+                row: cursor_row,
+                logical: lines.get(cursor_row).map_or(0, |line| line.cells.len()),
+                affinity: Affinity::Before,
+                shape: CursorShape::Block,
+                visible: true,
+                blinking: false,
+            },
+            input_start: start.map(|(row, col)| InputStart { row, col }),
+            lines,
+            display_offset: 0,
+            history: 0,
+        }
+    }
+
+    #[test]
+    fn no_spans_when_disabled() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((0, 4)));
+        assert!(compute_spellcheck_spans(&snapshot, false, false).is_empty());
+    }
+
+    #[test]
+    fn no_spans_when_hidden() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((0, 4)));
+        assert!(compute_spellcheck_spans(&snapshot, true, true).is_empty());
+    }
+
+    #[test]
+    fn no_spans_when_scrolled_back() {
+        let mut snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((0, 4)));
+        snapshot.display_offset = 3;
+        assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
+    }
+
+    #[test]
+    fn no_spans_without_a_mark() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], None);
+        assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
+
+        // A mark whose line has scrolled into history cannot be the cursor's
+        // row, so it is refused even at the bottom of the viewport.
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh"], Some((-1, 4)));
+        assert!(compute_spellcheck_spans(&snapshot, true, false).is_empty());
+    }
+
+    #[test]
+    fn spans_cover_the_active_line() {
+        let snapshot =
+            spellcheck_snapshot(2, &["PS> ", "PS> ", "PS> Get-ChildItem wrng"], Some((2, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        assert_eq!(
+            spans,
+            vec![Misspelling {
+                row: 2,
+                col: 18,
+                len: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn hit_finds_the_word_under_the_pointer() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        assert_eq!(spans.len(), 2);
+        let cells = snapshot.row_cells(0);
+        let menu =
+            spellcheck_menu_for(&spans, 0, spans[0].col + 1, &cells, snapshot.cursor.logical)
+                .expect("a click on the word opens the menu");
+        assert_eq!(menu.token, "teh");
+        assert_eq!((menu.row, menu.col), (0, spans[0].col));
+    }
+
+    #[test]
+    fn hit_is_none_between_words() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        let cells = snapshot.row_cells(0);
+        let gap = spans[0].col + spans[0].len;
+        assert!(
+            spellcheck_menu_for(&spans, 0, gap, &cells, snapshot.cursor.logical).is_none(),
+            "the space after a word is not part of its span"
+        );
+        assert!(spellcheck_menu_for(&spans, 1, gap, &cells, snapshot.cursor.logical).is_none());
+    }
+
+    #[test]
+    fn replacement_allowed_only_for_the_last_word() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem teh wrng"], Some((0, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        let cells = snapshot.row_cells(0);
+        let first = spellcheck_menu_for(&spans, 0, spans[0].col, &cells, snapshot.cursor.logical)
+            .expect("the first span still opens a menu");
+        assert!(
+            !first.enabled,
+            "a word before the cursor cannot be replaced"
+        );
+
+        let last = spellcheck_menu_for(&spans, 0, spans[1].col, &cells, snapshot.cursor.logical)
+            .expect("the last span opens a menu");
+        assert!(
+            last.enabled,
+            "the word ending at the cursor can be replaced"
+        );
+    }
+
+    #[test]
+    fn replacement_requires_the_cursor_at_the_end() {
+        let snapshot = spellcheck_snapshot(0, &["PS> Get-ChildItem wrng"], Some((0, 4)));
+        let spans = compute_spellcheck_spans(&snapshot, true, false);
+        let cells = snapshot.row_cells(0);
+        let span = spans[0];
+        let menu = spellcheck_menu_for(&spans, 0, span.col, &cells, span.col + span.len + 1)
+            .expect("the span opens a menu");
+        assert!(!menu.enabled);
+        assert_eq!(
+            menu.disabled_reason,
+            Some(crate::ui::spellcheck_menu::SPELLCHECK_NOT_LAST_WORD)
+        );
+    }
+
+    #[test]
+    fn replacement_deletes_exactly_the_token() {
+        assert_eq!(replacement_bytes("teh", "the"), b"\x7f\x7f\x7fthe");
+    }
+
+    #[test]
+    fn replacement_preserves_a_leading_capital() {
+        assert_eq!(replacement_bytes("Teh", "the"), b"\x7f\x7f\x7fThe");
+    }
+
+    #[test]
+    fn replacement_keeps_lowercase_for_lowercase_tokens() {
+        assert_eq!(replacement_bytes("teh", "tea"), b"\x7f\x7f\x7ftea");
+    }
+
+    #[test]
+    fn appending_a_user_word_creates_the_directory_and_appends() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("termyx-words-{}-{stamp}", std::process::id()));
+        let path = dir.join("user-words.txt");
+
+        append_user_word(&path, "wrng").expect("the directory is created");
+        append_user_word(&path, "teh").expect("the file is appended");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file exists"),
+            "wrng\nteh\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

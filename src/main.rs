@@ -17,8 +17,6 @@ mod scrollbar;
 mod selection;
 mod session;
 mod shape;
-// Consumed by the renderer and the app in later spellcheck tasks.
-#[allow(dead_code)]
 mod spellcheck;
 mod term;
 mod theme;

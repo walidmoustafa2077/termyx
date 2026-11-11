@@ -5,9 +5,6 @@
 //! pure coordinates and state, so the layout and the hit test are exercised
 //! without a window and the painter reads the same numbers.
 
-// Task 6 wires this module into the app; the allow disappears with it.
-#![allow(dead_code)]
-
 use crate::ui::tab_bar::Rect;
 
 /// Width of the panel in logical pixels, at the reference scale.

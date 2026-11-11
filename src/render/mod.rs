@@ -234,6 +234,12 @@ impl Renderer {
         true
     }
 
+    /// Draws the grid with no spellcheck spans.
+    ///
+    /// Production paints through [`Renderer::draw_with_spellcheck`]; this
+    /// four-argument form stays for the render tests, which do not care about
+    /// the overlay.
+    #[cfg(test)]
     pub fn draw(
         &mut self,
         snapshot: &GridSnapshot,
@@ -244,9 +250,7 @@ impl Renderer {
         self.draw_with_spellcheck(snapshot, maps, selection, find, &[]);
     }
 
-    /// Draws the grid, then the spellcheck underlines for `spans`. Separate
-    /// from [`Renderer::draw`] so the 34 existing call sites keep their four
-    /// arguments until the app is switched over.
+    /// Draws the grid, then the spellcheck underlines for `spans`.
     pub fn draw_with_spellcheck(
         &mut self,
         snapshot: &GridSnapshot,
@@ -1241,6 +1245,14 @@ impl Renderer {
 
     pub fn top_inset(&self) -> u32 {
         self.top_inset
+    }
+
+    /// X/Y of the grid's first cell's top-left corner, in physical pixels.
+    ///
+    /// The x origin is the window padding alone; the y origin also clears the
+    /// tab strip, matching `grid_top`.
+    pub fn grid_origin(&self) -> (f32, f32) {
+        (self.padding as f32, self.grid_top())
     }
 
     /// Y of the grid's first row: the window padding plus the tab strip.

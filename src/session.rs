@@ -401,17 +401,19 @@ impl IndexMut<usize> for TabSet {
 /// Spawns the shell for a new session and builds its parser.
 ///
 /// The id tags both ends of the session: the parser's event proxy and the PTY
-/// reader thread.
+/// reader thread. `autocorrect` is exported as `TERMYX_AUTOCORRECT` for
+/// the child.
 pub fn spawn_session(
     id: SessionId,
     shell: &ShellConfig,
+    autocorrect: bool,
     cols: usize,
     rows: usize,
     scrollback: usize,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<Session> {
     let terminal = Terminal::new_with_events(cols, rows, scrollback, Some((proxy.clone(), id)));
-    let pty = PtySession::spawn(shell, cols as u16, rows as u16, proxy, id)?;
+    let pty = PtySession::spawn(shell, autocorrect, cols as u16, rows as u16, proxy, id)?;
     Ok(Session::new(id, terminal, pty))
 }
 
@@ -556,7 +558,7 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty = PtySession::spawn_with(&idle_shell(), 80, 24, |_| {}, || {})
+        let pty = PtySession::spawn_with(&idle_shell(), false, 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
@@ -741,6 +743,7 @@ mod tests {
             as fn(
                 SessionId,
                 &ShellConfig,
+                bool,
                 usize,
                 usize,
                 usize,

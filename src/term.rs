@@ -115,6 +115,20 @@ pub struct GridSnapshot {
     pub history: usize,
 }
 
+impl GridSnapshot {
+    /// Cells of visible row `row`, or an empty vector when the row is outside
+    /// the snapshot.
+    ///
+    /// The clone keeps the accessor's ownership simple: the spellcheck scan
+    /// takes a plain slice and cannot alias the snapshot.
+    pub fn row_cells(&self, row: usize) -> Vec<Cell> {
+        self.lines
+            .get(row)
+            .map(|line| line.cells.clone())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TermSize {
     pub cols: usize,
@@ -753,6 +767,22 @@ mod tests {
         assert_eq!(snapshot.lines[0].cells[4].text, "o");
         assert_eq!(snapshot.cursor.row, 0);
         assert_eq!(snapshot.cursor.logical, 5);
+    }
+
+    #[test]
+    fn row_cells_returns_the_row_or_nothing() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"hello");
+        let snapshot = term.snapshot();
+        let cells = snapshot.row_cells(0);
+        assert_eq!(cells.len(), 20);
+        assert_eq!(cells[0].text, "h");
+        assert_eq!(cells[4].text, "o");
+        assert!(
+            snapshot.row_cells(5).is_empty(),
+            "a row outside the snapshot has no cells"
+        );
+        assert!(snapshot.row_cells(usize::MAX).is_empty());
     }
 
     #[test]

@@ -91,12 +91,24 @@ two-glyph forms. See `assets/fonts/README.md`.
 
 ```toml
 [spellcheck]
-enabled = true            # spellcheck overlay
-autocorrect = true        # autocorrect on the shell input line
+enabled = true            # underline misspelled words on the shell input line
+autocorrect = true        # export TERMYX_AUTOCORRECT=1 to child shells
 underline_color = "#d19a66"   # #rrggbb
 ```
 
-These keys configure the spellcheck overlay for the shell input line.
+These keys configure the spellcheck overlay for the shell input line, which is
+the line the prompt wrapper marks with OSC 133 `B`.
+
+- `enabled` draws the underlines. Right-click an underlined word for spelling
+  suggestions, to add it to `%LOCALAPPDATA%\Termyx\user-words.txt`, or to
+  hide the underlines for the rest of the session. Underlines appear only on
+  the live screen: once the viewport is scrolled back, nothing is checked or
+  drawn. `false` turns the feature off entirely.
+- `autocorrect` exports `TERMYX_AUTOCORRECT=1` to every child shell so the
+  PowerShell module autocorrects the same line; `false` exports `0`. Termyx also
+  exports `TERMYX=1` so the module can tell it is running inside this terminal.
+- `underline_color` is the color of the underline band; an invalid value falls
+  back to `#d19a66`.
 
 ## Mouse
 

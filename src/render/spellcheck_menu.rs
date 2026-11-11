@@ -3,9 +3,6 @@
 //! The geometry comes from `ui::spellcheck_menu`; this module only turns those
 //! rectangles into pixels, so the painter and the hit test cannot disagree.
 
-// Task 6 wires this module into the app; the allow disappears with it.
-#![allow(dead_code)]
-
 use super::ui_text;
 use super::Renderer;
 use crate::fonts::UI_FONT_ID;

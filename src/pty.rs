@@ -28,8 +28,12 @@ pub struct PtySession {
 impl PtySession {
     /// Spawns the configured shell and forwards its output, tagged with
     /// `session`, through `proxy`.
+    ///
+    /// `autocorrect` is exported to the child as `TERMYX_AUTOCORRECT`, so
+    /// the PowerShell module agrees with the window's setting.
     pub fn spawn(
         config: &ShellConfig,
+        autocorrect: bool,
         cols: u16,
         rows: u16,
         proxy: EventLoopProxy<UserEvent>,
@@ -38,6 +42,7 @@ impl PtySession {
         let exit_proxy = proxy.clone();
         Self::spawn_with(
             config,
+            autocorrect,
             cols,
             rows,
             move |bytes| {
@@ -55,6 +60,7 @@ impl PtySession {
     /// The reader thread owns both callbacks and exits when the PTY closes.
     pub fn spawn_with<F, G>(
         config: &ShellConfig,
+        autocorrect: bool,
         cols: u16,
         rows: u16,
         on_output: F,
@@ -79,6 +85,14 @@ impl PtySession {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "termyx");
+        // The PowerShell module keys its prompt marks and autocorrect on these;
+        // exporting them here is what makes the child agree with the setting
+        // the window is using now.
+        command.env("TERMYX", "1");
+        command.env(
+            "TERMYX_AUTOCORRECT",
+            if autocorrect { "1" } else { "0" },
+        );
 
         let mut child = pair.slave.spawn_command(command)?;
         let killer = child.clone_killer();
@@ -229,6 +243,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _session = PtySession::spawn_with(
             &shell,
+            false,
             80,
             24,
             move |bytes| {
@@ -276,6 +291,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _session = PtySession::spawn_with(
             &shell,
+            false,
             80,
             24,
             |_| {},

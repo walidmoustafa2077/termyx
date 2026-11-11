@@ -196,9 +196,12 @@ impl Default for SelectionConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SpellcheckConfig {
-    /// `false` removes the underlines from the grid.
+    /// Underline misspelled words on the shell's live input line. A scrolled-back
+    /// viewport shows none, and "Hide underlines" in the right-click menu turns
+    /// them off for the rest of the session without rewriting this setting.
     pub enabled: bool,
-    /// `false` leaves the child shell's autocorrect environment unset.
+    /// Export `TERMYX_AUTOCORRECT=1` (or `0`) to every child shell. The
+    /// PowerShell module reads it to enable its autocorrect on the same line.
     pub autocorrect: bool,
     /// `#rrggbb` for the underline band. Invalid values fall back to
     /// `#d19a66`; the field is a string so the parser stays in [`crate::theme`].
