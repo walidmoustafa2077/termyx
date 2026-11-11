@@ -808,6 +808,56 @@ Describe 'Module commands' {
     }
 }
 
+Describe 'Word-wise undo' {
+    It 'keeps undoing while a typed word is incomplete' {
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'if then' -After 'if the'
+        } | Should -BeFalse
+
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'if t' -After 'if '
+        } | Should -BeTrue
+    }
+
+    It 'stops when the line becomes empty' {
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'hello' -After ''
+        } | Should -BeTrue
+    }
+
+    It 'stops after a pasted or corrected block in one step' {
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'echo hello world' -After ''
+        } | Should -BeTrue
+
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'echo teh ' -After 'echo '
+        } | Should -BeTrue
+    }
+
+    It 'stops when nothing changed' {
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'abc' -After 'abc'
+        } | Should -BeTrue
+    }
+
+    It 'takes a trailing space by itself' {
+        & (Get-Module Termyx) {
+            Test-TermyxUndoComplete -Before 'echo ' -After 'echo'
+        } | Should -BeTrue
+    }
+
+    It 'exposes undo and redo handlers that fall back to PSReadLine' {
+        $undo = & (Get-Module Termyx) { Get-TermyxUndoHandler }
+        $undo.ToString() | Should -Match 'Invoke-TermyxUndoKeyPress'
+        $undo.ToString() | Should -Match 'PSConsoleReadLine\]::Undo'
+
+        $redo = & (Get-Module Termyx) { Get-TermyxRedoHandler }
+        $redo.ToString() | Should -Match 'Invoke-TermyxRedoKeyPress'
+        $redo.ToString() | Should -Match 'PSConsoleReadLine\]::Redo'
+    }
+}
+
 Describe 'Install script' {
     BeforeAll {
         $script:sandbox = Join-Path $env:TEMP ('termyx-install-' + [guid]::NewGuid().ToString('N'))

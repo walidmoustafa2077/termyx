@@ -86,3 +86,159 @@ function Invoke-TermyxSpaceKeyPress {
     # it to know whether the keypress was already consumed.
     return $true
 }
+
+function Get-TermyxUndoHandler {
+    return {
+        param($key, $arg)
+
+        $handled = $false
+
+        try {
+            $module = Get-Module Termyx
+            if ($null -ne $module) {
+                & $module { param($k, $a) Invoke-TermyxUndoKeyPress -Key $k -Arg $a } $key $arg
+                $handled = $true
+            }
+        }
+        catch {
+        }
+
+        # A removed or broken module must never leave Ctrl+Z dead.
+        if (-not $handled) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Undo($key, $arg)
+        }
+    }
+}
+
+function Get-TermyxRedoHandler {
+    return {
+        param($key, $arg)
+
+        $handled = $false
+
+        try {
+            $module = Get-Module Termyx
+            if ($null -ne $module) {
+                & $module { param($k, $a) Invoke-TermyxRedoKeyPress -Key $k -Arg $a } $key $arg
+                $handled = $true
+            }
+        }
+        catch {
+        }
+
+        if (-not $handled) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Redo($key, $arg)
+        }
+    }
+}
+
+function Test-TermyxUndoComplete {
+    [CmdletBinding()]
+    param(
+        [string]$Before,
+        [string]$After
+    )
+
+    $removed = $Before.Length - $After.Length
+
+    # No movement means there is nothing left to undo. More than one character
+    # means the step was a paste or a correction replacement, which PSReadLine
+    # already records as a single editing unit: one undo is the whole block.
+    if ($removed -le 0) { return $true }
+    if ($removed -gt 1) { return $true }
+
+    # The line is empty, so the word being removed was the only content.
+    if ($After.Length -eq 0) { return $true }
+
+    # The character just removed was whitespace; the word before it is whole.
+    if ([char]::IsWhiteSpace($Before[$After.Length])) { return $true }
+
+    # The line now ends on whitespace, so the word in front of it is whole.
+    if ([char]::IsWhiteSpace($After[$After.Length - 1])) { return $true }
+
+    return $false
+}
+
+function Invoke-TermyxUndoKeyPress {
+    param($Key, $Arg)
+
+    $line = $null
+    $cursor = 0
+    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+
+    $startLine = $line
+    $atEnd = ($cursor -eq $line.Length)
+    $steps = 0
+
+    # PSReadLine undoes one edit item at a time, so typing costs one step per
+    # character. Keep stepping until a whole word has come off; a paste or a
+    # replacement comes off in one step and stops the loop by itself.
+    while ($steps -lt 256) {
+        $stepBefore = $line
+        [Microsoft.PowerShell.PSConsoleReadLine]::Undo($Key, $Arg)
+        $steps++
+
+        $nextLine = $null
+        $nextCursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$nextLine, [ref]$nextCursor)
+
+        if ($nextLine -ceq $line -and $nextCursor -eq $cursor) {
+            break
+        }
+
+        $line = $nextLine
+        $cursor = $nextCursor
+
+        # Mid-line undo keeps the native one-step behavior: the word boundary
+        # heuristic only applies while typing at the end of the line.
+        if (-not $atEnd) { break }
+        if (Test-TermyxUndoComplete -Before $stepBefore -After $line) { break }
+    }
+
+    if ($line -cne $startLine) {
+        $script:TermyxUndo = @{
+            Before = $startLine
+            After  = $line
+        }
+    }
+    else {
+        $script:TermyxUndo = $null
+    }
+}
+
+function Invoke-TermyxRedoKeyPress {
+    param($Key, $Arg)
+
+    $line = $null
+    $cursor = 0
+    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+
+    $state = $script:TermyxUndo
+
+    # Only replay the exact word-wise undo that was just performed. Anything
+    # else (a new edit, another undo, a moved cursor) uses the native redo.
+    if ($null -eq $state -or $line -cne $state.After) {
+        $script:TermyxUndo = $null
+        [Microsoft.PowerShell.PSConsoleReadLine]::Redo($Key, $Arg)
+        return
+    }
+
+    $steps = 0
+    while ($steps -lt 256) {
+        [Microsoft.PowerShell.PSConsoleReadLine]::Redo($Key, $Arg)
+        $steps++
+
+        $nextLine = $null
+        $nextCursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$nextLine, [ref]$nextCursor)
+
+        if ($nextLine -ceq $line) {
+            break
+        }
+
+        $line = $nextLine
+        if ($line -ceq $state.Before) { break }
+    }
+
+    $script:TermyxUndo = $null
+}

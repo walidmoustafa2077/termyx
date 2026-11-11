@@ -27,6 +27,7 @@ $script:TermyxParameterNameCache = @{}
 $script:TermyxTokenKindCache = @{}
 $script:TermyxCommandCacheTime = [datetime]::MinValue
 $script:TermyxLastCorrection = $null
+$script:TermyxUndo = $null
 
 . (Join-Path $script:TermyxRoot 'private\Token-Classifier.ps1')
 . (Join-Path $script:TermyxRoot 'private\Decision.ps1')
@@ -119,7 +120,10 @@ function Enable-TermyxAutocorrect {
 
     Import-Module PSReadLine -ErrorAction Stop
     Set-PSReadLineKeyHandler -Key Spacebar -ScriptBlock (Get-TermyxSpaceHandler)
+    Set-PSReadLineKeyHandler -Key Ctrl+Z -ScriptBlock (Get-TermyxUndoHandler)
+    Set-PSReadLineKeyHandler -Key Ctrl+Y -ScriptBlock (Get-TermyxRedoHandler)
     $script:TermyxLastCorrection = $null
+    $script:TermyxUndo = $null
     $script:TermyxEnabled = $true
 
     # The prompt marks are an enhancement, never a prerequisite: a prompt that
@@ -139,6 +143,8 @@ function Disable-TermyxAutocorrect {
     try {
         if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
             Set-PSReadLineKeyHandler -Key Spacebar -Function SelfInsert
+            Set-PSReadLineKeyHandler -Key Ctrl+Z -Function Undo
+            Set-PSReadLineKeyHandler -Key Ctrl+Y -Function Redo
         }
     }
     catch {
@@ -146,6 +152,7 @@ function Disable-TermyxAutocorrect {
 
     $script:TermyxEnabled = $false
     $script:TermyxLastCorrection = $null
+    $script:TermyxUndo = $null
 
     try {
         Disable-TermyxPrompt
