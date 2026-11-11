@@ -318,6 +318,11 @@ mod tests {
             layout.panel.y < anchor.y,
             "a panel that cannot open below flips above"
         );
+        assert_eq!(
+            layout.panel.y,
+            anchor.y - layout.panel.h - SPELLCHECK_GAP,
+            "the flipped panel sits one gap above the anchor's top edge"
+        );
         assert!(
             layout.panel.y + layout.panel.h <= viewport().y + viewport().h,
             "the flipped panel still fits the viewport"
@@ -348,6 +353,31 @@ mod tests {
         assert_eq!(
             layout.panel.x, 0.0,
             "a negative range is pinned to the origin"
+        );
+    }
+
+    #[test]
+    fn pins_an_oversized_panel_to_the_viewport_top() {
+        // 50 px cannot hold a three-row panel (88 px), so the only safe place
+        // is the viewport's origin: the clamp range would otherwise invert and
+        // a bare `f32::clamp` would panic.
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 50.0,
+        };
+        let menu =
+            SpellcheckMenu::new(0, 0, "teh".to_string(), vec!["the".to_string()], true, None);
+        let layout = menu.layout(anchor(10.0, 40.0), viewport, 1.0);
+        assert_eq!(
+            layout.panel.y, viewport.y,
+            "an oversized panel pins to the top"
+        );
+        assert_eq!(
+            layout.panel.h,
+            menu.items.len() as f32 * SPELLCHECK_ROW_HEIGHT + 2.0 * SPELLCHECK_PADDING,
+            "the panel keeps its full computed height"
         );
     }
 

@@ -220,6 +220,25 @@ mod tests {
             action > renderer.theme.menu_disabled.r,
             "an action row keeps the foreground ink (peak {action})"
         );
+
+        // The same menu with replacement allowed must lift the suggestion back
+        // to the foreground ink: a painter that always dimmed `Suggest` rows
+        // would otherwise satisfy every assertion above.
+        let mut enabled_renderer = menu_renderer();
+        let enabled =
+            SpellcheckMenu::new(2, 4, "teh".to_string(), vec!["the".to_string()], true, None);
+        enabled_renderer.draw_spellcheck_menu(&enabled, anchor(), viewport());
+        let enabled_layout = enabled.layout(anchor(), viewport(), enabled_renderer.scale_factor);
+        let brightened = peak_red(&enabled_renderer, enabled_layout.rows[0]);
+        assert!(
+            brightened > renderer.theme.menu_disabled.r,
+            "an enabled suggestion keeps the foreground ink (peak {brightened})"
+        );
+        assert!(
+            brightened > suggestion,
+            "the same row is strictly brighter once replacement is allowed \
+             ({brightened} vs {suggestion})"
+        );
     }
 
     #[test]
