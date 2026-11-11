@@ -132,22 +132,13 @@ pub(crate) const GLYPH_HELP: &str = "\u{E897}";
 ///
 /// Windows Terminal draws its tab menu's rows from Segoe Fluent Icons; MDL2,
 /// the face the chrome falls back to, maps the same private-use codepoints.
-// The painter consumes these in a later task; the row builder pins them now.
-#[allow(dead_code)]
 pub(crate) const GLYPH_TAB_COLOR: &str = "\u{E790}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_RENAME: &str = "\u{E8AC}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_DUPLICATE: &str = "\u{E8C8}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_SPLIT: &str = "\u{E8A9}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_MOVE_TAB: &str = "\u{E8DE}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_EXPORT: &str = "\u{E74E}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_FIND: &str = "\u{E721}";
-#[allow(dead_code)]
 pub(crate) const GLYPH_CHEVRON_RIGHT: &str = "\u{E76C}";
 
 /// Icon-face em size for the tab's own `✕`, in logical pixels.

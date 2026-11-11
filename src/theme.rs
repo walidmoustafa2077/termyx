@@ -195,9 +195,7 @@ impl Theme {
 
     /// The ink that stays readable on `background`: the grid's foreground on
     /// a dark fill and the grid's own background on a light one, so a colored
-    /// tab's title never drowns in the color it shows. Colored tabs read this
-    /// in a later task.
-    #[allow(dead_code)]
+    /// tab's title never drowns in the color it shows.
     pub fn ink_on(&self, background: Rgb) -> Rgb {
         let luminance = 0.299 * f32::from(background.r)
             + 0.587 * f32::from(background.g)

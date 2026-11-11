@@ -339,9 +339,6 @@ impl TabSet {
     /// Renames the session `id` and locks the title against OSC updates.
     /// A blank name clears the title and the lock, so the shell can name the
     /// tab again.
-    // The rename UI that calls this lands in a later task; the tests pin the
-    // behavior now.
-    #[allow(dead_code)]
     pub fn rename(&mut self, id: SessionId, title: &str) -> bool {
         let Some(session) = self.session_mut(id) else {
             return false;

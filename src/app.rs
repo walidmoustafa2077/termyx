@@ -807,6 +807,11 @@ impl App {
             // Reflow invalidates logical selection positions.
             self.selection = None;
         }
+        // Both panels were measured at the old scale, so their anchors and row
+        // metrics no longer match the rebuilt strip. Dismiss them rather than
+        // repaint them at a stale size.
+        self.close_menu();
+        self.close_tab_menu();
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -864,8 +869,11 @@ impl App {
         self.tabs[index].icon = tab_icon;
         // The tab is named for the profile until the shell names itself.
         self.tabs.set_title(id, &profile.name);
-        // The new tab is active, so a selection on the old grid is stale.
+        // The new tab is active, so a selection on the old grid is stale and a
+        // find bar or inline rename belongs to the tab that was just left.
         self.selection = None;
+        self.rename = None;
+        self.close_find();
         self.mouse_down = false;
         self.rebuild_layout();
         if let Some(window) = &self.window {
@@ -909,8 +917,10 @@ impl App {
         // The tab being renamed may have been closed while its editor was open;
         // dropping the state stops the dead editor from swallowing keys.
         self.rename = None;
-        // A find bar anchored to the closed tab's grid is stale too.
+        // A find bar anchored to the closed tab's grid is stale too, and so is a
+        // tab menu whose target just vanished (a shell can exit without a click).
         self.close_find();
+        self.close_tab_menu();
         // The drag that was extending a selection in this tab has nothing left
         // to extend.
         self.mouse_down = false;
@@ -1653,9 +1663,9 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
-        // The dropdown owns the pointer while it is open; the wheel must not
-        // scroll the grid under the panel.
-        if self.menu.is_some() {
+        // The dropdown and the tab menu own the pointer while they are open; the
+        // wheel must not scroll the grid under either panel.
+        if self.menu.is_some() || self.tab_menu.is_some() {
             return;
         }
         // The strip is chrome: a wheel over it must not scroll the grid or
@@ -1891,6 +1901,9 @@ impl App {
                         StripAction::Select(index) => {
                             self.tabs.select(index);
                             self.selection = None;
+                            // The overlays are bound to the tab that owned them;
+                            // an in-progress rename is cancelled, not committed.
+                            self.rename = None;
                             self.close_find();
                             self.rebuild_layout();
                         }

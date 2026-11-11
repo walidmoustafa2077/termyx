@@ -1709,7 +1709,7 @@ mod tests {
             .flat_map(|y| (rect.x as u32..(rect.x + rect.w) as u32).map(move |x| (x, y)))
             .map(|(x, y)| pixel_at(renderer, x as f32, y as f32).r)
             .min()
-            .unwrap_or(0)
+            .unwrap_or(255)
     }
 
     fn count_color(renderer: &Renderer, rect: crate::ui::tab_bar::Rect, color: Rgb) -> usize {
