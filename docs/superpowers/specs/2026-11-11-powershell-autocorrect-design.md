@@ -139,12 +139,15 @@ resolve before any parsing happens.
    |---|---|---|---|
    | `Command` | cached command/alias/function names from `Get-Command` | 2 | unique best candidate; distance 2 allowed only for the line's first token |
    | `Parameter` | `Parameters.Keys` of the owning command only | 2 | unique best candidate |
-   | `Argument` | bundled word set + user word set | 1, or 2 when token length ≤ 6 | unique best candidate |
+   | `Argument` | bundled word set + user word set | 1, or 2 when token length ≤ 6 | unique best candidate, or the most frequent candidate when several tie |
 
-   A candidate is applied only when exactly one exists at the best distance. Ties are
-   never guessed.
-5. **Rewrite.** If a fix exists: `Replace(start, tokenLength, fix)`, then
-   `SetCursorPosition` to the end of `fix`, then `SelfInsert(' ')`. Otherwise a single
+   Command and parameter ties are never guessed. Argument ties are resolved with the
+   bundled English frequency list (`assets/en_US.frequency.txt`): candidates that are as
+   long as or longer than the typed token win over shorter ones (a deletion is a last
+   resort), then the lowest frequency rank wins. If no tied candidate carries a rank, the
+   token is left alone as before.
+5. **Rewrite.** If a fix exists: `Replace(start, tokenLength + 1, fix + ' ')` in a single
+   edit, then `SetCursorPosition` to the end of `fix`. Otherwise a single
    `SelfInsert(' ')`.
 
 ### 6.1 Guard rails
@@ -214,12 +217,19 @@ namespace Termyx {
 ## 8. Dictionary
 
 - `assets/en_US.wordlist.txt` — newline-delimited, sorted, lowercase, **pre-expanded** so
-  inflections (`cats`, `running`, `happier`) appear as their own entries. Approximately
-  100–150k words, ~1.2 MB.
-- `tools/Build-WordList.ps1` regenerates it from the Hunspell en_US `.dic` + `.aff` sources
-  (downloaded once at build time with `Invoke-WebRequest`; the repo commits the generated
-  list, so users never need network access). The script performs affix expansion with the
-  `.aff` rules and writes a stable, sorted output, documented in the README for provenance.
+  inflections (`cats`, `running`, `happier`) appear as their own entries. The committed
+  list holds 87,928 words (~905 KB), the full expansion of the pinned Hunspell source;
+  stems flagged NOSUGGEST in the `.aff`/`.dic` are excluded.
+- `assets/en_US.frequency.txt` — newline-delimited English words in descending frequency
+  order, 46,717 entries (~420 KB), used only to break ties between argument candidates.
+  It never adds words to the dictionary: a candidate must already be in the word list.
+  Source: `hermitdave/FrequencyWords`, `content/2018/en/en_50k.txt` (OpenSubtitles 2018,
+  CC BY-SA 4.0), filtered to `^[a-z]+$` and deduplicated by `tools/Build-FrequencyList.ps1`.
+- `tools/Build-WordList.ps1` regenerates the word list from the Hunspell en_US `.dic` +
+  `.aff` sources (downloaded once at build time with `System.Net.WebClient`; the repo
+  commits the generated list, so users never need network access). The script performs
+  affix expansion with the `.aff` rules and writes a stable, sorted output, documented in
+  the README for provenance.
 - User additions go to `%LOCALAPPDATA%\Termyx\user-words.txt`, never into the repo.
 
 ## 9. Command and parameter awareness
@@ -300,8 +310,8 @@ Pester 3.4 ships with Windows PowerShell 5.1; the tests stick to the `Describe` 
 `Should` subset so they also run on Pester 5.
 
 **Engine tests (pure C#)** — known-word hits and misses, `SuggestWord` distance-1 results,
-case preservation, unique-best tie rejection, memoization returns identical results,
-`AddUserWord` visible immediately.
+case preservation, frequency ranking of argument ties, strict tie rejection for commands and
+parameters, memoization returns identical results, `AddUserWord` visible immediately.
 
 **Classifier table tests** — a corpus of ~40 lines asserting `Skip` for:
 `git commit -m "hello wrld"`, here-strings, `C:\temp\foo`, `./script.ps1`,
@@ -330,7 +340,7 @@ untouched; one `Ctrl+Z` reverts exactly one correction; typing remains responsiv
 | Risk | Mitigation |
 |---|---|
 | PSReadLine 2.0 behaves differently across Windows builds | Handler wrapped and manually verified on Windows Terminal and conhost |
-| Aggressive corrections annoy or corrupt intent | Defaults conservative (unique-best only, distance-2 limited to first token); exceptions file; single-key undo |
+| Aggressive corrections annoy or corrupt intent | Defaults conservative (ties rejected for commands and parameters, frequency only breaks argument ties, distance-2 limited to first token); exceptions file; single-key undo |
 | Word list size inflates module | Commit compressed? No — keep plain text ~1.2 MB; it is source, and compression would add import cost |
 | Command cache goes stale after modules load | 30-second refresh window plus explicit `Update-TermyxCommandCache` |
 | Undo granularity differs on some builds | Covered by manual checklist; fallback is a single `Replace` of the whole token including the space |
