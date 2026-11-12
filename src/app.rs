@@ -22,6 +22,9 @@ use crate::icon;
 use crate::input::{self, KeyInput, Mods};
 use crate::page::{self, Page, PageKind};
 use crate::palette::{PaletteCommand, PaletteContext};
+// Only the Windows build draws into the native frame, so the module is unused
+// elsewhere and importing it unconditionally fails `-D warnings` on Linux.
+#[cfg(target_os = "windows")]
 use crate::platform;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
