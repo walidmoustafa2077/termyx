@@ -4,9 +4,9 @@ use std::io;
 
 /// Where the `Support` menu row, palette command, and About field point.
 ///
-/// One constant, because the destination is expected to move: this is a
-/// placeholder handle, and a claimed PayPal.me address replaces it in one edit.
-pub(crate) const SUPPORT_URL: &str = "https://paypal.me/termyx";
+/// One constant, because the destination is expected to move: a different
+/// payment page replaces it in one edit and nothing else in the app changes.
+pub(crate) const SUPPORT_URL: &str = "https://paypal.me/WalidMostafa77";
 
 /// The address as it reads on the About page, without the scheme.
 ///
@@ -89,6 +89,6 @@ mod tests {
     fn the_display_address_drops_the_scheme() {
         // Short enough for a narrow About grid, and still the address a reader
         // would type after "https://".
-        assert_eq!(display(), "paypal.me/termyx");
+        assert_eq!(display(), "paypal.me/WalidMostafa77");
     }
 }

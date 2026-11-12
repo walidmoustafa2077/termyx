@@ -323,7 +323,7 @@ mod tests {
     fn the_about_page_points_at_the_support_page() {
         let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 80, 24);
         assert!(text.contains("Support"));
-        assert!(text.contains("paypal.me/termyx"));
+        assert!(text.contains("paypal.me/WalidMostafa77"));
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
         assert!(text.contains("Walid Mostafa"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         assert!(
-            text.contains("paypal.me/termyx"),
+            text.contains("paypal.me/WalidMostafa77"),
             "the address still fits forty columns"
         );
     }
@@ -349,7 +349,7 @@ mod tests {
         // one field that steps aside rather than running off the edge.
         let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 24, 10);
         assert!(text.contains("Walid Mostafa"));
-        assert!(!text.contains("paypal.me/termyx"));
+        assert!(!text.contains("paypal.me/WalidMostafa77"));
     }
 
     #[test]

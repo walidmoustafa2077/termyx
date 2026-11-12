@@ -368,9 +368,9 @@ the same VT path but were not run on this machine.
 ## Supporting Termyx
 
 Termyx is a solo project, and support goes through PayPal:
-<https://paypal.me/termyx>. The `Support` row in the `⌄` menu, the `Support`
-command in the palette, and the `Support` field on the About page all open that
-address.
+<https://paypal.me/WalidMostafa77>. The `Support` row in the `⌄` menu, the
+`Support` command in the palette, and the `Support` field on the About page all
+open that address.
 
 `SUPPORT_URL` in `src/support.rs` is the only place the address lives, so a
 different PayPal.me handle is a one-line change on every surface.
