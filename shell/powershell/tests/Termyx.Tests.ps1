@@ -9,7 +9,8 @@ Describe 'Module and engine loading' {
     }
 
     It 'reports the module version' {
-        (Get-Module Termyx).Version | Should -Be ([version]'0.1.0')
+        $manifest = Import-PowerShellDataFile $script:moduleManifest
+        (Get-Module Termyx).Version | Should -Be ([version]$manifest.ModuleVersion)
     }
 
     It 'survives a forced re-import with the engine and commands intact' {
@@ -877,7 +878,8 @@ Describe 'Install script' {
         & $script:installer -ModuleSource $script:moduleSource -ModuleRoot $script:moduleRoot -ProfilePath $script:profilePath
 
         (Test-Path -LiteralPath (Join-Path $script:moduleRoot 'Termyx')) | Should -BeTrue
-        (Test-Path -LiteralPath (Join-Path $script:moduleRoot 'Termyx\0.1.0\Termyx.psd1')) | Should -BeTrue
+        $version = (Import-PowerShellDataFile (Join-Path $script:moduleSource 'Termyx.psd1')).ModuleVersion
+        (Test-Path -LiteralPath (Join-Path $script:moduleRoot "Termyx\$version\Termyx.psd1")) | Should -BeTrue
 
         $profileText = Get-Content -LiteralPath $script:profilePath -Raw
         $profileText.Contains('Import-Module Termyx') | Should -BeTrue
@@ -903,7 +905,8 @@ Describe 'Install script' {
         $webProfile = Join-Path $script:sandbox 'web-profile.ps1'
         & $script:installer -ModuleSource $webSource -ModuleRoot $webRoot -ProfilePath $webProfile
 
-        $installed = Join-Path $webRoot 'Termyx\0.1.0\private\Decision.ps1'
+        $version = (Import-PowerShellDataFile (Join-Path $script:moduleSource 'Termyx.psd1')).ModuleVersion
+        $installed = Join-Path $webRoot "Termyx\$version\private\Decision.ps1"
         (Test-Path -LiteralPath $installed) | Should -BeTrue
         Get-Item -LiteralPath $installed -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }

@@ -1,6 +1,6 @@
 @{
     RootModule        = 'Termyx.psm1'
-    ModuleVersion     = '0.1.0'
+    ModuleVersion     = '0.1.1'
     GUID              = '0f8f5d4c-3f4c-4a71-9b0e-6a2f3c9d1e57'
     Author            = 'Termyx'
     Description       = 'Command-aware autocorrect and spellcheck for Windows PowerShell 5.1.'
