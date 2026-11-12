@@ -19,23 +19,48 @@ Windows requires the MSVC build tools. Linux requires `libxkbcommon`,
 
 ## Install (Windows)
 
-For a per-user installation that needs no administrator rights:
+Grab `Termyx-<version>-setup.exe` from the
+[Releases page](https://github.com/walidmoustafa2077/termyx/releases) and run
+it. The wizard installs for the current user only, so it never asks for
+administrator rights, and it lets you choose what to set up:
 
-```powershell
-.\install.ps1
-```
+- the install folder (default `%LOCALAPPDATA%\Programs\Termyx`)
+- Start Menu and desktop shortcuts
+- adding `termyx` to your `PATH`
+- Explorer entries **Open in Termyx** and **Open in Termyx (Administrator)** for
+  folders, folder backgrounds, and drives
+- the `Termyx` PowerShell module (prompt and spellcheck)
 
-The script builds the release binary, copies it to
-`%LOCALAPPDATA%\Programs\Termyx`, adds that folder to the user `PATH`, creates a
-Start Menu shortcut, installs the optional `Termyx` PowerShell module, and
-registers Explorer entries for folders, folder backgrounds, and drives:
-
-- **Open in Termyx**
-- **Open in Termyx (Administrator)**
+Each step reports its progress, and the last page can launch Termyx. To remove
+it, use Settings → Apps (or "Add or remove programs"); your config in
+`%APPDATA%\termyx` and spellcheck words are kept.
 
 Right-clicking a folder opens a shell in that folder. From a terminal,
 `termyx <folder>` and `termyx --directory <folder>` do the same. The executable
 also registers under `App Paths`, so `termyx` works from Win+R and new shells.
+
+### Build the installer yourself
+
+With Rust and [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:
+
+```powershell
+cargo build --release
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\Termyx.iss
+```
+
+The installer lands in `dist\Termyx-<version>-setup.exe`. Pushing a `v*` tag
+runs `.github/workflows/release.yml`, which checks the tree, builds the binary,
+compiles the installer, and publishes the installer, a portable zip, and
+`SHA256SUMS.txt` to the Releases page.
+
+### Scripted install (development)
+
+`install.ps1` builds straight from the working tree and registers the same
+pieces without the wizard:
+
+```powershell
+.\install.ps1
+```
 
 Options: `-NoBuild`, `-NoPath`, `-NoShortcut`, `-NoContextMenu`, `-NoModule`,
 `-InstallDir <path>`, and `-Uninstall`. Uninstall keeps `%APPDATA%\termyx`
