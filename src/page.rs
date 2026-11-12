@@ -4,14 +4,18 @@
 //! fed to the tab's own `Terminal`, so the grid, theme, scrolling, selection,
 //! and copy paths work without a second render path.
 
-use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::config::Config;
 use crate::palette::{Palette, PaletteCommand, PaletteContext};
 use crate::settings::SettingsState;
+
+/// Shown on the About page as the project's author.
+const CREATOR: &str = "Walid Mostafa";
 
 /// Escape sequence that hides the cursor, clears the grid and the scrollback,
 /// and homes the cursor.
@@ -127,7 +131,7 @@ impl Page {
                 out.push_str(&self.palette.text(config, cols, rows));
                 out
             }
-            PageKind::About => about_page_text(),
+            PageKind::About => about_page_text(cols, rows),
         }
     }
 
@@ -150,30 +154,101 @@ pub fn settings_stamp(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
-/// One line plus a blank line, for both the About page and the window title.
-pub fn about_text() -> String {
-    format!(
-        "Termyx {}\n\nA Rust terminal with RTL support.",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-fn about_page_text() -> String {
-    let mut out = String::with_capacity(512);
+fn about_page_text(cols: usize, rows: usize) -> String {
+    let mut out = String::with_capacity(1_024);
     out.push_str(RESET_SCREEN);
-    let _ = write!(out, "\x1b[1m{}\x1b[0m\r\n\r\n", about_text());
-    let profile = if cfg!(debug_assertions) {
+
+    let title = "T E R M Y X";
+    let tagline = "A native terminal with RTL support";
+    let version = env!("CARGO_PKG_VERSION");
+    let build = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
-    let _ = write!(
-        out,
-        "\x1b[2mBuild\x1b[0m  {profile}\r\n\x1b[2mOS\x1b[0m     {}\r\n\x1b[2mArch\x1b[0m   {}\r\n",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
+    let platform = format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH);
+    let fields = [
+        ("Version", version.to_string()),
+        ("Creator", CREATOR.to_string()),
+        ("Build", build.to_string()),
+        ("Platform", platform),
+    ];
+    let label_col = 9;
+
+    let inner = (tagline.width() + 6).max(title.width() + 10);
+    let frame_width = inner + 2;
+    let mut lines: Vec<String> = Vec::new();
+
+    // The framed card needs five rows plus the tagline, a gap, and the four
+    // fields. Smaller grids get the compact form so the page never spills
+    // into the scrollback.
+    if rows >= 12 && cols >= frame_width {
+        let rule = "─".repeat(inner);
+        lines.push(centred(
+            &format!("\x1b[2m╭{rule}╮\x1b[0m"),
+            frame_width,
+            cols,
+        ));
+        lines.push(centred(
+            &format!("\x1b[2m│\x1b[0m{}\x1b[2m│\x1b[0m", " ".repeat(inner)),
+            frame_width,
+            cols,
+        ));
+        lines.push(centred(
+            &format!(
+                "\x1b[2m│\x1b[0m\x1b[1;36m{:^inner$}\x1b[0m\x1b[2m│\x1b[0m",
+                title
+            ),
+            frame_width,
+            cols,
+        ));
+        lines.push(centred(
+            &format!("\x1b[2m│\x1b[0m{}\x1b[2m│\x1b[0m", " ".repeat(inner)),
+            frame_width,
+            cols,
+        ));
+        lines.push(centred(
+            &format!("\x1b[2m╰{rule}╯\x1b[0m"),
+            frame_width,
+            cols,
+        ));
+        lines.push(centred(
+            &format!("\x1b[2m{tagline}\x1b[0m"),
+            tagline.width(),
+            cols,
+        ));
+        lines.push(String::new());
+    } else {
+        lines.push(centred(
+            &format!("\x1b[1;36m{title}\x1b[0m"),
+            title.width(),
+            cols,
+        ));
+        lines.push(centred(
+            &format!("\x1b[2m{tagline}\x1b[0m"),
+            tagline.width(),
+            cols,
+        ));
+        lines.push(String::new());
+    }
+
+    for (label, value) in fields {
+        let width = label_col + value.width();
+        lines.push(centred(
+            &format!("\x1b[2m{label:<label_col$}\x1b[0m{value}"),
+            width,
+            cols,
+        ));
+    }
+
+    out.push_str(&lines.join("\r\n"));
     out
+}
+
+/// Pre-pads a styled line so its visible text is centred in `cols`. `width`
+/// is the line's visible width, excluding escape sequences.
+fn centred(line: &str, width: usize, cols: usize) -> String {
+    format!("{}{line}", " ".repeat(cols.saturating_sub(width) / 2))
 }
 
 #[cfg(test)]
@@ -231,9 +306,23 @@ mod tests {
     }
 
     #[test]
-    fn the_about_page_names_the_app_and_its_version() {
+    fn the_about_page_names_the_app_its_version_and_creator() {
         let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 80, 24);
-        assert!(text.contains("Termyx"));
+        assert!(text.contains("T E R M Y X"));
+        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(text.contains("Walid Mostafa"));
+    }
+
+    #[test]
+    fn the_about_page_fits_a_short_grid() {
+        // A page that overflows the grid would leave the hidden lines in the
+        // scrollback, so a ten-row terminal gets the compact layout.
+        let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 40, 10);
+        assert!(
+            text.lines().count() <= 10,
+            "the page must not exceed the grid rows"
+        );
+        assert!(text.contains("Walid Mostafa"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
     }
 
