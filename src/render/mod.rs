@@ -51,8 +51,7 @@ pub struct Renderer {
     /// glyph for the restore glyph. The app reads this from the live window
     /// before each frame because the WM can maximise it without a click.
     maximized: bool,
-    /// The bundled app icon, decoded once to fall back on for a tab whose
-    /// profile has no icon of its own.
+    /// The bundled app icon, decoded once: every tab stamps it.
     app_icon: Option<TabIcon>,
 }
 
@@ -408,16 +407,13 @@ impl Renderer {
     /// a window narrower than the strip never shows grid through it.
     ///
     /// `ui_px` is the physical chrome em size, already scaled by the window's
-    /// DPI factor; `active` indexes the tab the window shows, `icons` carries
-    /// one square image per tab, index-aligned, and `hover` is the strip target
-    /// under the pointer, if any. A tab with no icon of its own stamps the
-    /// bundled app icon instead, so the strip never shows a hole.
+    /// DPI factor; `active` indexes the tab the window shows and `hover` is the
+    /// strip target under the pointer, if any.
     pub fn draw_chrome(
         &mut self,
         layout: &TabBarLayout,
         ui_px: f32,
         active: usize,
-        icons: &[Option<TabIcon>],
         colors: &[Option<Rgb>],
         hover: Option<StripHover>,
     ) {
@@ -435,7 +431,7 @@ impl Renderer {
         // above the strip's bottom edge, so painting them after the rule cannot
         // erase it, and the rule (already down) cannot cut through a control.
         self.draw_caption_buttons(layout, hover);
-        self.draw_titles(layout, active, icons, colors, hover);
+        self.draw_titles(layout, active, colors, hover);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -632,19 +628,17 @@ impl Renderer {
         }
     }
 
-    /// Tab titles, each with its own icon on the left and the close glyph on
+    /// Tab titles, each with the app icon on the left and the close glyph on
     /// the active tab or whichever tab the pointer is over.
     ///
-    /// Every tab stamps the icon of the shell it runs, so the strip identifies
-    /// the program at a glance; a tab whose icon could not be read falls back
-    /// to the bundled app icon. The inactive title has its own chrome grey
-    /// rather than the grid's ANSI palette, so the tab on screen reads as the
-    /// active one even when both tabs share a band.
+    /// Every tab stamps the bundled app icon, so the strip always shows the
+    /// program the window belongs to. The inactive title has its own chrome
+    /// grey rather than the grid's ANSI palette, so the tab on screen reads as
+    /// the active one even when both tabs share a band.
     fn draw_titles(
         &mut self,
         layout: &TabBarLayout,
         active: usize,
-        icons: &[Option<TabIcon>],
         colors: &[Option<Rgb>],
         hover: Option<StripHover>,
     ) {
@@ -658,10 +652,9 @@ impl Renderer {
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
             // the layout drops a close box that will not fit.
-            let icon = icons
-                .get(tab.index)
-                .and_then(|icon| icon.as_ref())
-                .or(self.app_icon.as_ref())
+            let icon = self
+                .app_icon
+                .as_ref()
                 .filter(|_| tab.rect.w >= icon_inset + icon_size);
             if let Some(icon) = icon {
                 let icon_x = tab.rect.x + icon_inset;
@@ -1468,8 +1461,8 @@ mod tests {
         Affinity, Cell, Color, CursorShape, CursorState, LogicalPos, RowSnapshot, Style,
     };
 
-    /// Shorthand for the strip cases that inspect the renderer's own fallback
-    /// icon: they pass no per-tab icon and expect the bundled one.
+    /// Shorthand for the strip cases that need no tab colors: the strip is the
+    /// only thing they inspect.
     fn draw_chrome(
         renderer: &mut Renderer,
         layout: &TabBarLayout,
@@ -1477,7 +1470,7 @@ mod tests {
         active: usize,
         hover: Option<StripHover>,
     ) {
-        renderer.draw_chrome(layout, ui_px, active, &[], &[], hover);
+        renderer.draw_chrome(layout, ui_px, active, &[], hover);
     }
 
     #[test]
@@ -1570,7 +1563,7 @@ mod tests {
         let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one", "two"]);
         let color = Rgb::new(120, 40, 200);
         let colors = vec![Some(color), None];
-        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &[], &colors, None);
+        renderer.draw_chrome(&layout, crate::fonts::UI_SIZE_PX, 0, &colors, None);
         // Both probes sit below the rounded top corners.
         let colored = pixel_at(&renderer, layout.tabs[0].body.x + 4.0, 16.0);
         assert_eq!(
@@ -1595,7 +1588,6 @@ mod tests {
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
-            &[],
             &[Some(Rgb::new(20, 20, 20))],
             None,
         );
@@ -1622,7 +1614,6 @@ mod tests {
             &layout,
             crate::fonts::UI_SIZE_PX,
             0,
-            &[],
             &[Some(Rgb::new(240, 240, 240))],
             None,
         );
@@ -2524,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn the_active_tab_paints_its_app_icon() {
+    fn every_tab_paints_the_app_icon() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
         let layout =
@@ -2533,43 +2524,13 @@ mod tests {
 
         // The icon slot starts 10 logical px into the tab and is 16 px square,
         // centred in the 32 px body with its one-pixel drop, so its middle row
-        // is y=24.
-        let icon_pixel = pixel_at(&renderer, layout.tabs[0].body.x + 20.0, 24.0);
-        assert_ne!(
-            icon_pixel, renderer.theme.tab_active,
-            "the icon slot is empty"
-        );
-        // The inactive tab stamps the same icon over its own fill.
-        assert_ne!(
-            pixel_at(&renderer, layout.tabs[1].body.x + 20.0, 24.0),
-            renderer.theme.tab_bar,
-            "every tab, not only the active one, carries the icon"
-        );
-    }
-
-    #[test]
-    fn a_tab_stamps_its_own_icon_instead_of_the_app_icon() {
-        let mut renderer = default_renderer();
-        renderer.resize(400, 120);
-        let layout = TabBarLayout::new(400.0, TAB_STRIP_HEIGHT, &["one"]);
-        // Solid red: no pixel of this can come from the bundled app icon.
-        let red = crate::icon::TabIcon {
-            rgba: [255, 0, 0, 255].repeat(16 * 16),
-            size: 16,
-        };
-        renderer.draw_chrome(
-            &layout,
-            crate::fonts::UI_SIZE_PX,
-            0,
-            &[Some(red)],
-            &[],
-            None,
-        );
-        // The icon slot starts 10 px into the tab and is 16 px square.
+        // is y=24. Both tabs must carry the same bitmap.
+        let active = pixel_at(&renderer, layout.tabs[0].body.x + 20.0, 24.0);
+        assert_ne!(active, renderer.theme.tab_active, "the icon slot is empty");
         assert_eq!(
-            pixel_at(&renderer, layout.tabs[0].rect.x + 20.0, 24.0),
-            Rgb::new(255, 0, 0),
-            "the tab's own icon must replace the app icon"
+            pixel_at(&renderer, layout.tabs[1].body.x + 20.0, 24.0),
+            active,
+            "every tab stamps the app icon, active or not"
         );
     }
 

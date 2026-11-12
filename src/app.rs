@@ -909,11 +909,7 @@ impl App {
         // the new session becomes active, or the release would reach the wrong
         // shell and leave the original one stuck down.
         self.release_forwarded_button();
-        let index = self.tabs.push(session);
-        // Every tab shows the icon of the program it runs; a program whose
-        // icon cannot be read leaves the renderer's bundled fallback in place.
-        let tab_icon = self.cached_icon(&profile.shell.program);
-        self.tabs[index].icon = tab_icon;
+        self.tabs.push(session);
         // The tab is named for the profile until the shell names itself.
         self.tabs.set_title(id, &profile.name);
         // The new tab is active, so a selection on the old grid is stale and a
@@ -1207,12 +1203,6 @@ impl App {
         let Some(active) = self.tabs.active_index() else {
             return;
         };
-        // One square per tab, in strip order. Cloned because the renderer owns
-        // the pixmap during the paint and cannot borrow the sessions at the
-        // same time.
-        let icons: Vec<Option<icon::TabIcon>> = (0..self.tabs.len())
-            .map(|index| self.tabs[index].icon.clone())
-            .collect();
         let colors: Vec<Option<Rgb>> = (0..self.tabs.len())
             .map(|index| self.tabs[index].color)
             .collect();
@@ -1281,7 +1271,7 @@ impl App {
             &self.spellcheck_spans,
         );
         if let Some(layout) = self.layout.as_ref() {
-            renderer.draw_chrome(layout, ui_px, active, &icons, &colors, self.strip_hover);
+            renderer.draw_chrome(layout, ui_px, active, &colors, self.strip_hover);
         }
         if let Some((index, current)) = rename_overlay.as_ref() {
             if let (Some(rename), Some(layout)) = (self.rename.as_ref(), self.layout.as_ref()) {

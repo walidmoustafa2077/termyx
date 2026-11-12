@@ -118,9 +118,7 @@ impl TabSlots {
 /// One tab: its parser and, for shell tabs, its child.
 ///
 /// Its title lives here so a rename and the shell's own OSC title update the
-/// same store the strip reads through [`TabSet::titles`]. Its icon is here for
-/// the same reason: the program it started is a property of this session, not
-/// of the strip.
+/// same store the strip reads through [`TabSet::titles`].
 ///
 /// In-app pages (Settings, palette, About) use the same grid so rendering,
 /// scrolling, and selection stay one path, but they have no child process and
@@ -129,8 +127,6 @@ pub struct Session {
     pub id: SessionId,
     pub terminal: Terminal,
     pub pty: Option<PtySession>,
-    /// The program's icon, once the app has looked one up.
-    pub icon: Option<crate::icon::TabIcon>,
     /// Set when this tab is an in-app page rather than a shell.
     pub page: Option<crate::page::Page>,
     /// The label the strip shows, or `None` for [`FALLBACK_TITLE`].
@@ -146,12 +142,11 @@ pub struct Session {
 impl Session {
     pub fn new(id: SessionId, terminal: Terminal, pty: PtySession) -> Self {
         // A session does not know which profile started it, so the app fills
-        // the icon and profile in once it has resolved the program.
+        // the profile in once it has resolved the program.
         Self {
             id,
             terminal,
             pty: Some(pty),
-            icon: None,
             page: None,
             title: None,
             title_locked: false,
@@ -166,7 +161,6 @@ impl Session {
             id,
             terminal,
             pty: None,
-            icon: None,
             page: Some(page),
             title: None,
             title_locked: false,
@@ -721,10 +715,6 @@ mod tests {
     fn a_session_owns_a_live_parser_and_child() {
         let mut session = test_session(1);
         assert!(!session.terminal.feed(b""));
-        assert!(
-            session.icon.is_none(),
-            "a session starts without an icon; only the app knows its program"
-        );
         session
             .pty
             .as_mut()
