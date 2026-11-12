@@ -1953,6 +1953,11 @@ impl App {
             }
             MenuAction::Settings => self.open_page(PageKind::Settings),
             MenuAction::CommandPalette => self.open_command_palette(),
+            MenuAction::Support => {
+                if let Err(err) = crate::support::open() {
+                    tracing::warn!(%err, "could not open the support page");
+                }
+            }
             MenuAction::About => self.open_page(PageKind::About),
         }
     }
@@ -2041,6 +2046,7 @@ impl App {
         match command {
             PaletteCommand::Profile(index) => self.run_menu_action(MenuAction::Profile(index)),
             PaletteCommand::Settings => self.run_menu_action(MenuAction::Settings),
+            PaletteCommand::Support => self.run_menu_action(MenuAction::Support),
             PaletteCommand::About => self.run_menu_action(MenuAction::About),
             PaletteCommand::Find => self.start_find(),
             PaletteCommand::ExportText => self.export_text(),
@@ -3258,8 +3264,8 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
             item
         })
         .collect();
-    // Settings and About have no key binding, so their hint stays empty: a
-    // dead shortcut would be a lie. The palette really does open on
+    // Settings, Support, and About have no key binding, so their hint stays
+    // empty: a dead shortcut would be a lie. The palette really does open on
     // Ctrl+Shift+P.
     items.push(MenuItem::fixed(
         MenuAction::Settings,
@@ -3272,6 +3278,12 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
         "Command palette",
         "Ctrl+Shift+P",
         crate::fonts::GLYPH_COMMAND_PALETTE,
+    ));
+    items.push(MenuItem::fixed(
+        MenuAction::Support,
+        "Support",
+        "",
+        crate::fonts::GLYPH_COFFEE,
     ));
     items.push(MenuItem::fixed(
         MenuAction::About,
@@ -5444,7 +5456,7 @@ mod tests {
     #[test]
     fn the_menu_lists_a_row_per_profile_then_the_window_commands() {
         let items = menu_items(&six_profiles());
-        assert_eq!(items.len(), 6 + 3);
+        assert_eq!(items.len(), 6 + 4);
         assert_eq!(items[0].action, MenuAction::Profile(0));
         assert_eq!(items[0].label, "Profile 1");
         assert_eq!(items[5].action, MenuAction::Profile(5));
@@ -5473,6 +5485,14 @@ mod tests {
                 items[8].action,
                 items[8].label.as_str(),
                 items[8].shortcut.as_str()
+            ),
+            (MenuAction::Support, "Support", "")
+        );
+        assert_eq!(
+            (
+                items[9].action,
+                items[9].label.as_str(),
+                items[9].shortcut.as_str()
             ),
             (MenuAction::About, "About", "")
         );

@@ -35,6 +35,7 @@ pub enum PaletteCommand {
     Settings,
     Find,
     ExportText,
+    Support,
     About,
 }
 
@@ -192,6 +193,7 @@ impl Palette {
         rows.push(row("Settings", "", PaletteCommand::Settings));
         rows.push(row("Find", "Ctrl+F", PaletteCommand::Find));
         rows.push(row("Export text", "", PaletteCommand::ExportText));
+        rows.push(row("Support", "", PaletteCommand::Support));
         rows.push(row("About", "", PaletteCommand::About));
         rows
     }
@@ -488,6 +490,7 @@ mod tests {
             ("Settings", ""),
             ("Find", "Ctrl+F"),
             ("Export text", ""),
+            ("Support", ""),
             ("About", ""),
         ];
         let rows = palette.rows(&config);

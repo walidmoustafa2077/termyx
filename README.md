@@ -202,8 +202,8 @@ session.
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle forward and back.
 - `Ctrl+Shift+1` … `Ctrl+Shift+5` open the first five profiles directly.
 - The `⌄` menu lists every profile, then `Settings` (opens the config file, or
-  its folder on a first run), `Command palette` (or `Ctrl+Shift+P`), and
-  `About`. No key opens `Settings`.
+  its folder on a first run), `Command palette` (or `Ctrl+Shift+P`), `Support`
+  (opens the project's support page), and `About`. No key opens `Settings`.
 
 `Ctrl+Shift+W` closes the shell in the active tab immediately; there is no
 confirmation and no undo.
@@ -231,8 +231,8 @@ tab. Type to filter, `Up`/`Down` to move, `Enter` to run, `Esc` to close.
 
 It lists the configured profiles (new tab), tab commands (close, duplicate, move,
 close others, close to the right, next, previous), and `Settings`, `Find`,
-`Export text`, and `About`. Rows that cannot act on the current strip are
-omitted, and the right-hand hints name only keys that really work.
+`Export text`, `Support`, and `About`. Rows that cannot act on the current strip
+are omitted, and the right-hand hints name only keys that really work.
 
 Tab commands act on the tab that was active when the palette opened, so
 `Close tab` never closes the palette itself. Opening the palette again while it
@@ -364,6 +364,21 @@ The renderer budget is checked by an ignored test; run
 lam-alef, selection, and resize behavior is covered by the test suite and the
 Phase 2 acceptance run above. PowerShell was exercised here; bash and zsh use
 the same VT path but were not run on this machine.
+
+## Supporting Termyx
+
+Termyx is a solo project. The `Support` row in the `⌄` menu, the `Support`
+command in the palette, and the `Support` field on the About page all open this
+section.
+
+There is no payment page yet. When one exists, it is a one-line change:
+`SUPPORT_URL` in `src/support.rs` is the only place the address lives, and every
+surface follows it.
+
+Until then the support that helps most costs nothing:
+
+- A bug report naming the program, the shell, and what the terminal drew wrong.
+- A note about a terminal behavior Termyx gets wrong on your font or layout.
 
 ## Known limitations
 

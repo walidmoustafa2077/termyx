@@ -135,6 +135,8 @@ pub(crate) const GLYPH_CHEVRON: &str = "\u{E70D}";
 pub(crate) const GLYPH_SETTINGS: &str = "\u{E713}";
 pub(crate) const GLYPH_COMMAND_PALETTE: &str = "\u{E945}";
 pub(crate) const GLYPH_HELP: &str = "\u{E897}";
+/// A coffee cup, for the row that opens the support page.
+pub(crate) const GLYPH_COFFEE: &str = "\u{EC32}";
 
 /// Icon-face codepoints for the tab context menu's rows.
 ///

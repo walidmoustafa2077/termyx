@@ -20,6 +20,7 @@ mod session;
 mod settings;
 mod shape;
 mod spellcheck;
+mod support;
 mod term;
 mod theme;
 mod ui;

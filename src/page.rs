@@ -167,19 +167,25 @@ fn about_page_text(cols: usize, rows: usize) -> String {
         "release"
     };
     let platform = format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH);
-    let fields = [
+    let mut fields = vec![
         ("Version", version.to_string()),
         ("Creator", CREATOR.to_string()),
         ("Build", build.to_string()),
         ("Platform", platform),
     ];
     let label_col = 9;
+    // The support address is the longest row and the only one that can outgrow
+    // a narrow grid; the menu and the palette still reach it from there.
+    let support = crate::support::display();
+    if cols >= label_col + support.width() {
+        fields.push(("Support", support.to_string()));
+    }
 
     let inner = (tagline.width() + 6).max(title.width() + 10);
     let frame_width = inner + 2;
     let mut lines: Vec<String> = Vec::new();
 
-    // The framed card needs five rows plus the tagline, a gap, and the four
+    // The framed card needs five rows plus the tagline, a gap, and the
     // fields. Smaller grids get the compact form so the page never spills
     // into the scrollback.
     if rows >= 12 && cols >= frame_width {
@@ -314,6 +320,13 @@ mod tests {
     }
 
     #[test]
+    fn the_about_page_points_at_the_support_page() {
+        let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 80, 24);
+        assert!(text.contains("Support"));
+        assert!(text.contains("github.com/walidmoustafa2077/termyx"));
+    }
+
+    #[test]
     fn the_about_page_fits_a_short_grid() {
         // A page that overflows the grid would leave the hidden lines in the
         // scrollback, so a ten-row terminal gets the compact layout.
@@ -324,6 +337,10 @@ mod tests {
         );
         assert!(text.contains("Walid Mostafa"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(
+            !text.contains("github.com"),
+            "a 40-column grid has no room for the address"
+        );
     }
 
     #[test]

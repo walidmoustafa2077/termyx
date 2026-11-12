@@ -48,6 +48,8 @@ pub enum MenuAction {
     Profile(usize),
     Settings,
     CommandPalette,
+    /// Opens the project's support page in the browser.
+    Support,
     About,
 }
 
