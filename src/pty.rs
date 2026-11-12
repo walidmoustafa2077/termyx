@@ -104,10 +104,7 @@ impl PtySession {
         // exporting them here is what makes the child agree with the setting
         // the window is using now.
         command.env("TERMYX", "1");
-        command.env(
-            "TERMYX_AUTOCORRECT",
-            if autocorrect { "1" } else { "0" },
-        );
+        command.env("TERMYX_AUTOCORRECT", if autocorrect { "1" } else { "0" });
 
         let mut child = pair.slave.spawn_command(command)?;
         let killer = child.clone_killer();

@@ -528,7 +528,7 @@ Describe 'Decision function' {
     }
 
     It 'leaves a hyphenated argument alone' {
-        $r = Invoke-TermyxDecisionForTest -Line 'Write-Host termyx' -Cursor 22
+        $r = Invoke-TermyxDecisionForTest -Line 'Write-Host termyx-terminal' -Cursor 22
         $r.ShouldApply | Should -BeFalse
         $r.Reason | Should -Be 'Compound'
     }

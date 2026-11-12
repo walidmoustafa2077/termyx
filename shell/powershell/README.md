@@ -1,4 +1,4 @@
-# Termyx
+# Termyx PowerShell module
 
 Command-aware autocorrect and spellcheck for Windows PowerShell 5.1.
 

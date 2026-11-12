@@ -87,11 +87,7 @@ pub fn add_word(token: &str) {
 /// the word to this session's in-memory set.
 pub fn user_words_path() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(
-        PathBuf::from(base)
-            .join("Termyx")
-            .join("user-words.txt"),
-    )
+    Some(PathBuf::from(base).join("Termyx").join("user-words.txt"))
 }
 
 /// Loads every saved user word into the in-memory set.
