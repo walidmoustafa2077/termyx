@@ -2,6 +2,9 @@
 
 A fast, native terminal emulator with first-class RTL support.
 
+If Termyx saves you time, you can
+[support its development](https://paypal.me/WalidMostafa77).
+
 Phase 2 adds per-row UAX #9 bidi reordering, Arabic/Persian/Urdu shaping with
 rustybuzz, Arabic-capable font fallback, and bidi-aware cursor, selection, and
 hit-testing. The grid stays logical; a per-row `VisualMap` performs all visual
