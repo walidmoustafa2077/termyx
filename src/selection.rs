@@ -381,6 +381,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -454,6 +455,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -587,6 +589,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let maps = identity_maps(2, 5);
         let mut selection = Selection::block(position(0, 1));
@@ -616,6 +619,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let maps = identity_maps(2, 5);
         let mut selection = Selection::block(position(1, 3));
@@ -645,6 +649,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let maps = vec![VisualMap::from_bidi(&snapshot.lines[0], BaseDirection::Ltr)];
         let mut selection = Selection::block(position(0, 0));
@@ -682,6 +687,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let mut line = snapshot.lines[0].clone();
         line.cells[0].width = 2;

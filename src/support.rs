@@ -18,6 +18,13 @@ pub(crate) fn display() -> &'static str {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn open() -> io::Result<()> {
+    open_target(SUPPORT_URL)
+}
+
+/// Opens a URL or a file path with the OS handler, the same way the support
+/// page opens: a link underlined in the grid arrives here on click.
+#[cfg(target_os = "windows")]
+pub(crate) fn open_target(target: &str) -> io::Result<()> {
     use std::ptr;
 
     #[link(name = "shell32")]
@@ -37,7 +44,7 @@ pub(crate) fn open() -> io::Result<()> {
     const SUCCESS_FLOOR: isize = 32;
 
     let operation = wide("open");
-    let file = wide(SUPPORT_URL);
+    let file = wide(&expand_home(target));
     // SAFETY: both strings are NUL-terminated and outlive the call; the null
     // window, parameters, and directory are the documented "no owner, no
     // arguments" form.
@@ -55,7 +62,7 @@ pub(crate) fn open() -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "ShellExecuteW refused the support page with code {code}"
+            "ShellExecuteW refused {target} with code {code}"
         )))
     }
 }
@@ -68,6 +75,11 @@ fn wide(text: &str) -> Vec<u16> {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn open() -> io::Result<()> {
+    open_target(SUPPORT_URL)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn open_target(target: &str) -> io::Result<()> {
     use std::process::Command;
 
     #[cfg(target_os = "macos")]
@@ -76,9 +88,31 @@ pub(crate) fn open() -> io::Result<()> {
     const OPENER: &str = "xdg-open";
 
     Command::new(OPENER)
-        .arg(SUPPORT_URL)
+        .arg(expand_home(target))
         .spawn()
         .map(|_child| ())
+}
+
+/// Expands a leading `~/` to the user's home directory, so a link the shell
+/// printed as `~/notes.txt` opens. Anything else passes through unchanged.
+fn expand_home(target: &str) -> String {
+    let Some(rest) = target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("~\\"))
+    else {
+        return target.to_string();
+    };
+    #[cfg(target_os = "windows")]
+    let home = std::env::var("USERPROFILE");
+    #[cfg(not(target_os = "windows"))]
+    let home = std::env::var("HOME");
+    match home {
+        Ok(home) => std::path::Path::new(&home)
+            .join(rest)
+            .to_string_lossy()
+            .into_owned(),
+        Err(_) => target.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +124,26 @@ mod tests {
         // Short enough for a narrow About grid, and still the address a reader
         // would type after "https://".
         assert_eq!(display(), "paypal.me/WalidMostafa77");
+    }
+
+    #[test]
+    fn the_home_prefix_expands_to_the_user_home() {
+        #[cfg(target_os = "windows")]
+        let home = std::env::var("USERPROFILE").expect("USERPROFILE");
+        #[cfg(not(target_os = "windows"))]
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(
+            expand_home("~/notes.txt"),
+            std::path::Path::new(&home)
+                .join("notes.txt")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn ordinary_targets_pass_through_the_home_expansion() {
+        assert_eq!(expand_home("https://x.com"), "https://x.com");
+        assert_eq!(expand_home(r"C:\x\y.txt"), r"C:\x\y.txt");
+        assert_eq!(expand_home(r"\\server\share"), r"\\server\share");
     }
 }

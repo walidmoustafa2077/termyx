@@ -246,10 +246,11 @@ impl Renderer {
         selection: Option<&Selection>,
         find: Option<&FindState>,
     ) {
-        self.draw_with_spellcheck(snapshot, maps, selection, find, &[]);
+        self.draw_with_spellcheck(snapshot, maps, selection, find, &[], &[]);
     }
 
-    /// Draws the grid, then the spellcheck underlines for `spans`.
+    /// Draws the grid, then the spellcheck underlines for `spans` and the
+    /// link underlines for `links`.
     pub fn draw_with_spellcheck(
         &mut self,
         snapshot: &GridSnapshot,
@@ -257,6 +258,7 @@ impl Renderer {
         selection: Option<&Selection>,
         find: Option<&FindState>,
         spellcheck: &[crate::spellcheck::Misspelling],
+        links: &[crate::links::LinkSpan],
     ) {
         self.shape_cache.clear();
         self.draw_background();
@@ -375,6 +377,7 @@ impl Renderer {
         self.draw_decorations(snapshot, maps, cell_w, cell_h);
 
         self.draw_spellcheck_underlines(snapshot, maps, spellcheck, cell_w, cell_h);
+        self.draw_links(snapshot, maps, links, cell_w, cell_h);
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
@@ -995,6 +998,57 @@ impl Renderer {
                     cell_w,
                     thickness,
                     self.theme.spellcheck_underline,
+                );
+            }
+        }
+    }
+
+    /// Paints a one-pixel underline under every cell a link covers, always
+    /// visible so a destination reads as clickable. Link rows are snapshot
+    /// line indices already, unlike the spellcheck spans' grid rows.
+    fn draw_links(
+        &mut self,
+        snapshot: &GridSnapshot,
+        maps: &[VisualMap],
+        spans: &[crate::links::LinkSpan],
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        if spans.is_empty() {
+            return;
+        }
+        let thickness = (self.scale_factor).round().max(1.0);
+        // Bright ANSI blue: distinct from the orange spellcheck band without
+        // a theme key of its own.
+        let color = self.theme.bright[4];
+
+        for span in spans {
+            let row = span.row;
+            if row >= snapshot.lines.len() {
+                continue;
+            }
+            let Some(map) = maps.get(row) else {
+                continue;
+            };
+            let cols = snapshot.lines[row].cells.len();
+            if span.col >= cols {
+                continue;
+            }
+            let start = span.col;
+            let end = (span.col + span.len.max(1)).min(cols);
+            // Map every logical column so bidi reordering and wide cells
+            // land on the right visual cells, as the decorations do.
+            let mut columns: Vec<usize> = (start..end).map(|col| map.visual_of(col)).collect();
+            columns.sort_unstable();
+            columns.dedup();
+            let y = self.grid_top() + row as f32 * cell_h + (cell_h - thickness);
+            for col in columns {
+                self.fill_rect(
+                    self.padding as f32 + col as f32 * cell_w,
+                    y,
+                    cell_w,
+                    thickness,
+                    color,
                 );
             }
         }
@@ -2617,6 +2671,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -2653,6 +2708,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -2664,7 +2720,7 @@ mod tests {
         spans: &[crate::spellcheck::Misspelling],
     ) {
         resize_and_draw(renderer, snapshot, |renderer, maps| {
-            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans);
+            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans, &[]);
         });
     }
 
@@ -2949,6 +3005,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -2978,6 +3035,7 @@ mod tests {
             display_offset: offset,
             input_start: None,
             history,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -3420,6 +3478,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let maps: Vec<VisualMap> = (0..2).map(|_| VisualMap::identity(3)).collect();
         let mut selection = Selection::block(LogicalPos { row: 0, col: 0 });
@@ -4043,6 +4102,7 @@ mod tests {
             display_offset: 0,
             input_start: None,
             history: 0,
+            hyperlinks: Vec::new(),
         };
         let maps = vec![VisualMap::identity(cols); rows];
 

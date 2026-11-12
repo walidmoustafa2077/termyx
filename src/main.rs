@@ -8,6 +8,7 @@ mod find;
 mod fonts;
 mod icon;
 mod input;
+mod links;
 mod page;
 mod palette;
 mod platform;

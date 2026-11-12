@@ -101,6 +101,22 @@ pub struct Match {
     pub end: usize,
 }
 
+/// One row-local run of cells sharing an OSC 8 hyperlink.
+///
+/// A run never crosses a row boundary: a link that wraps produces one run
+/// per row, the same split the underline pass paints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HyperlinkRun {
+    /// Index into [`GridSnapshot::lines`].
+    pub row: usize,
+    /// First logical column, inclusive.
+    pub start: usize,
+    /// One past the last logical column.
+    pub end: usize,
+    /// The URI the shell attached to the run.
+    pub uri: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridSnapshot {
     pub cols: usize,
@@ -113,6 +129,9 @@ pub struct GridSnapshot {
     /// Scrollback rows the scrollbar can map to; leading blank rows are
     /// excluded so the thumb reaches the top where scrolling stops.
     pub history: usize,
+    /// OSC 8 hyperlink runs collected while the cells were read, so link
+    /// detection never has to revisit the terminal.
+    pub hyperlinks: Vec<HyperlinkRun>,
 }
 
 impl GridSnapshot {
@@ -409,10 +428,25 @@ impl Terminal {
         let mut lines = Vec::with_capacity(rows);
         let mut cells = Vec::with_capacity(cols);
         let mut wrapped = false;
+        let mut hyperlinks = Vec::new();
+        // The OSC 8 run currently being read: its start column and link. A run
+        // closes at the row boundary, on a cell without a link, or when the
+        // link changes.
+        let mut open_run: Option<(usize, alacritty_terminal::term::cell::Hyperlink)> = None;
 
         for (index, indexed) in content.display_iter.enumerate() {
             let cell = indexed.cell;
             if index > 0 && index % cols == 0 {
+                // The boundary lands before the new row's first cell, so the
+                // run closes against the row that was just filled.
+                if let Some((start, link)) = open_run.take() {
+                    hyperlinks.push(HyperlinkRun {
+                        row: lines.len(),
+                        start,
+                        end: cells.len(),
+                        uri: link.uri().to_string(),
+                    });
+                }
                 lines.push(RowSnapshot {
                     cells: std::mem::take(&mut cells),
                     wrapped,
@@ -420,12 +454,51 @@ impl Terminal {
                 cells = Vec::with_capacity(cols);
             }
             wrapped = cell.flags.contains(Flags::WRAPLINE);
+            let col = index % cols;
+            match cell.hyperlink() {
+                Some(link) => match open_run.take() {
+                    Some((start, previous)) if previous == link => {
+                        open_run = Some((start, previous));
+                    }
+                    Some((start, previous)) => {
+                        hyperlinks.push(HyperlinkRun {
+                            row: lines.len(),
+                            start,
+                            end: col,
+                            uri: previous.uri().to_string(),
+                        });
+                        open_run = Some((col, link));
+                    }
+                    None => open_run = Some((col, link)),
+                },
+                None => {
+                    if let Some((start, link)) = open_run.take() {
+                        hyperlinks.push(HyperlinkRun {
+                            row: lines.len(),
+                            start,
+                            end: col,
+                            uri: link.uri().to_string(),
+                        });
+                    }
+                }
+            }
             cells.push(convert_cell(cell));
+        }
+        if let Some((start, link)) = open_run.take() {
+            hyperlinks.push(HyperlinkRun {
+                row: lines.len(),
+                start,
+                end: cells.len(),
+                uri: link.uri().to_string(),
+            });
         }
         if !cells.is_empty() {
             lines.push(RowSnapshot { cells, wrapped });
         }
         lines.truncate(rows);
+        // The run indexes above counted rows before the viewport was clamped;
+        // a run past the kept rows has no cells to underline.
+        hyperlinks.retain(|run| run.row < lines.len());
         while lines.len() < rows {
             lines.push(RowSnapshot {
                 cells: vec![
@@ -474,6 +547,7 @@ impl Terminal {
             display_offset: content.display_offset,
             history: self.scrollable_history(),
             input_start: self.input_start,
+            hyperlinks,
         }
     }
 
@@ -783,6 +857,63 @@ mod tests {
             "a row outside the snapshot has no cells"
         );
         assert!(snapshot.row_cells(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn osc8_hyperlinks_become_row_runs() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(
+            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ and \x1b]8;;https://other.example\x1b\\more\x1b]8;;\x1b\\",
+        );
+        let snapshot = term.snapshot();
+        assert_eq!(
+            snapshot.hyperlinks,
+            vec![
+                HyperlinkRun {
+                    row: 0,
+                    start: 0,
+                    end: 4,
+                    uri: "https://example.com".into()
+                },
+                HyperlinkRun {
+                    row: 0,
+                    start: 9,
+                    end: 13,
+                    uri: "https://other.example".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hyperlink_that_wraps_produces_one_run_per_row() {
+        let mut term = Terminal::new(10, 5, 1_000);
+        term.feed(b"\x1b]8;;https://example.com\x1b\\abcdefghijkl\x1b]8;;\x1b\\");
+        let snapshot = term.snapshot();
+        assert_eq!(
+            snapshot.hyperlinks,
+            vec![
+                HyperlinkRun {
+                    row: 0,
+                    start: 0,
+                    end: 10,
+                    uri: "https://example.com".into()
+                },
+                HyperlinkRun {
+                    row: 1,
+                    start: 0,
+                    end: 2,
+                    uri: "https://example.com".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_output_has_no_hyperlink_runs() {
+        let mut term = Terminal::new(20, 5, 1_000);
+        term.feed(b"https://example.com");
+        assert!(term.snapshot().hyperlinks.is_empty());
     }
 
     #[test]

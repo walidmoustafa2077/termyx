@@ -168,11 +168,12 @@ pub enum SettingsRow {
     CopyOnSelect,
     TrimTrailing,
     DynamicTitle,
+    LinkOpen,
     Save,
     Revert,
 }
 
-pub const ROWS: [SettingsRow; 32] = [
+pub const ROWS: [SettingsRow; 33] = [
     SettingsRow::FontFamily,
     SettingsRow::FontSize,
     SettingsRow::LineHeight,
@@ -203,6 +204,7 @@ pub const ROWS: [SettingsRow; 32] = [
     SettingsRow::CopyOnSelect,
     SettingsRow::TrimTrailing,
     SettingsRow::DynamicTitle,
+    SettingsRow::LinkOpen,
     SettingsRow::Save,
     SettingsRow::Revert,
 ];
@@ -221,6 +223,7 @@ impl SettingsRow {
             Self::CopyOnSelect => "Copy on select",
             Self::TrimTrailing => "Trim trailing",
             Self::DynamicTitle => "Dynamic title",
+            Self::LinkOpen => "Link opening",
             Self::Save => "Save",
             Self::Revert => "Revert",
         }
@@ -264,6 +267,7 @@ impl SettingsRow {
             Self::CopyOnSelect => toggle(config.selection.copy_on_select),
             Self::TrimTrailing => toggle(config.selection.trim_trailing),
             Self::DynamicTitle => toggle(config.window.dynamic_title),
+            Self::LinkOpen => config.links.open.label().to_string(),
             Self::Save | Self::Revert => String::new(),
         }
     }
@@ -317,7 +321,7 @@ enum Display {
 }
 
 /// The page's whole display list. Scroll offsets index into it.
-const DISPLAY: [Display; 36] = [
+const DISPLAY: [Display; 37] = [
     Display::Header("Appearance"),
     Display::Row(0),
     Display::Row(1),
@@ -351,9 +355,10 @@ const DISPLAY: [Display; 36] = [
     Display::Row(27),
     Display::Row(28),
     Display::Row(29),
-    Display::Header("Actions"),
     Display::Row(30),
+    Display::Header("Actions"),
     Display::Row(31),
+    Display::Row(32),
 ];
 
 #[derive(Debug, Clone)]
@@ -488,6 +493,10 @@ impl SettingsState {
             }
             SettingsRow::DynamicTitle => {
                 config.window.dynamic_title = !config.window.dynamic_title;
+                true
+            }
+            SettingsRow::LinkOpen => {
+                config.links.open = config.links.open.cycle(delta);
                 true
             }
             _ => false,
@@ -904,6 +913,7 @@ fn paint(text: String, selected: bool, cols: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LinkOpen;
 
     fn config() -> Config {
         Config::default().validate()
@@ -986,7 +996,7 @@ mod tests {
         state.move_selection(1, 10);
         assert_eq!(state.selected(), 1);
         state.move_selection(1_000, 10);
-        assert_eq!(state.selected(), 31);
+        assert_eq!(state.selected(), 32);
         state.move_selection(-1_000, 10);
         assert_eq!(state.selected(), 0);
 
@@ -1011,7 +1021,7 @@ mod tests {
         assert_eq!(state.selected(), 0);
         assert_eq!(state.scroll(), 0);
         state.end(10);
-        assert_eq!(state.selected(), 31);
+        assert_eq!(state.selected(), 32);
         assert!(state.scroll() > 0);
     }
 
@@ -1107,6 +1117,29 @@ mod tests {
         assert!(!config.selection.copy_on_select);
         state.adjust(-1, &mut config);
         assert!(config.selection.copy_on_select);
+    }
+
+    #[test]
+    fn the_link_gesture_cycles_and_renders() {
+        let mut config = config();
+        let mut state = SettingsState::new();
+        select(&mut state, &config, 40, "Link opening");
+        assert_eq!(config.links.open, LinkOpen::CtrlClick);
+        assert!(state.adjust(1, &mut config));
+        assert_eq!(config.links.open, LinkOpen::Click);
+        assert!(state.adjust(1, &mut config));
+        assert_eq!(config.links.open, LinkOpen::Off);
+        assert!(state.adjust(1, &mut config));
+        assert_eq!(config.links.open, LinkOpen::CtrlClick);
+        assert!(state.adjust(-1, &mut config));
+        assert_eq!(config.links.open, LinkOpen::Off);
+        assert!(state.is_dirty());
+
+        // The row reads as a cycling choice, like Bidi direction.
+        let text = state.render(&config, path(), 80, 40);
+        assert!(text.contains("Link opening"));
+        assert!(text.contains("Off"));
+        assert!(text.contains("\u{25c0} Off \u{25b6}"));
     }
 
     #[test]
@@ -1381,13 +1414,13 @@ mod tests {
     fn hit_testing_maps_screen_rows_through_a_scrolled_viewport() {
         let mut state = SettingsState::new();
         state.end(10);
-        assert_eq!(state.scroll(), 29);
+        assert_eq!(state.scroll(), 30);
 
-        // The first visible body row is Scrollback, the seventh is Revert.
+        // The first visible body row is Copy on select, the seventh is Revert.
         assert_eq!(state.click(1, 2, false, 10), Some(ClickAction::Select));
-        assert_eq!(state.selected(), 26);
+        assert_eq!(state.selected(), 27);
         assert_eq!(state.click(7, 2, false, 10), Some(ClickAction::Revert));
-        assert_eq!(state.selected(), 31);
+        assert_eq!(state.selected(), 32);
     }
 
     #[test]

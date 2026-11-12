@@ -54,6 +54,7 @@ pub struct Config {
     pub window: WindowConfig,
     pub scrollback: ScrollbackConfig,
     pub selection: SelectionConfig,
+    pub links: LinksConfig,
     pub theme: ThemeConfig,
     pub spellcheck: SpellcheckConfig,
     pub shell: ShellConfig,
@@ -71,6 +72,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             scrollback: ScrollbackConfig::default(),
             selection: SelectionConfig::default(),
+            links: LinksConfig::default(),
             theme: ThemeConfig::default(),
             spellcheck: SpellcheckConfig::default(),
             shell: ShellConfig::default(),
@@ -221,6 +223,84 @@ impl Default for SpellcheckConfig {
     }
 }
 
+/// How a detected link or path is opened from the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkOpen {
+    /// Click while holding Ctrl; a plain click keeps selecting text.
+    #[default]
+    CtrlClick,
+    /// A plain click opens the destination.
+    Click,
+    /// Links stay underlined but never open.
+    Off,
+}
+
+impl LinkOpen {
+    /// The value written to the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CtrlClick => "ctrl_click",
+            Self::Click => "click",
+            Self::Off => "off",
+        }
+    }
+
+    /// The name shown on the Settings row.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CtrlClick => "Ctrl+Click",
+            Self::Click => "Click",
+            Self::Off => "Off",
+        }
+    }
+
+    /// The next mode in the settings cycle, wrapping at either end.
+    pub fn cycle(self, delta: isize) -> Self {
+        let modes = [Self::CtrlClick, Self::Click, Self::Off];
+        let index = modes.iter().position(|mode| *mode == self).unwrap_or(0) as isize;
+        modes[(index + delta).rem_euclid(modes.len() as isize) as usize]
+    }
+
+    /// Whether a press on a link opens it while `ctrl` is held.
+    pub fn matches(self, ctrl: bool) -> bool {
+        match self {
+            Self::CtrlClick => ctrl,
+            Self::Click => true,
+            Self::Off => false,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LinkOpen {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "ctrl_click" => Self::CtrlClick,
+            "click" => Self::Click,
+            "off" => Self::Off,
+            _ => {
+                tracing::warn!("unknown links.open {value:?}; using ctrl_click");
+                Self::CtrlClick
+            }
+        })
+    }
+}
+
+/// Link behaviour, editable on the Settings page.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LinksConfig {
+    pub open: LinkOpen,
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            open: LinkOpen::CtrlClick,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ThemeConfig {
@@ -288,6 +368,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("window", &["width", "height", "padding", "dynamic_title"]),
     ("scrollback", &["lines"]),
     ("selection", &["trim_trailing", "copy_on_select"]),
+    ("links", &["open"]),
     ("spellcheck", &["enabled", "autocorrect", "underline_color"]),
     (
         "theme",
@@ -526,6 +607,12 @@ impl Config {
         selection.insert(
             "copy_on_select".to_string(),
             toml::Value::Boolean(self.selection.copy_on_select),
+        );
+
+        let links = editable_section(root, "links")?;
+        links.insert(
+            "open".to_string(),
+            toml::Value::String(self.links.open.as_str().to_string()),
         );
 
         let theme = editable_section(root, "theme")?;
@@ -805,6 +892,46 @@ mod tests {
     }
 
     #[test]
+    fn links_open_parses_every_mode_and_falls_back() {
+        let config = Config::from_toml_str("[links]\nopen = \"click\"\n").expect("parse");
+        assert_eq!(config.links.open, LinkOpen::Click);
+        let config = Config::from_toml_str("[links]\nopen = \"off\"\n").expect("parse");
+        assert_eq!(config.links.open, LinkOpen::Off);
+        // An unknown value warns and keeps the default, like base_direction.
+        let config = Config::from_toml_str("[links]\nopen = \"maybe\"\n").expect("parse");
+        assert_eq!(config.links.open, LinkOpen::CtrlClick);
+        let config = Config::from_toml_str("").expect("parse");
+        assert_eq!(config.links.open, LinkOpen::CtrlClick);
+    }
+
+    #[test]
+    fn links_keys_are_known() {
+        let keys = KNOWN_KEYS
+            .iter()
+            .find(|(section, _)| *section == "links")
+            .map(|(_, keys)| *keys)
+            .expect("links must be a known section");
+        assert_eq!(keys, ["open"]);
+    }
+
+    #[test]
+    fn the_gesture_cycle_wraps_in_both_directions() {
+        assert_eq!(LinkOpen::CtrlClick.cycle(1), LinkOpen::Click);
+        assert_eq!(LinkOpen::Click.cycle(1), LinkOpen::Off);
+        assert_eq!(LinkOpen::Off.cycle(1), LinkOpen::CtrlClick);
+        assert_eq!(LinkOpen::CtrlClick.cycle(-1), LinkOpen::Off);
+        assert_eq!(LinkOpen::Off.cycle(-1), LinkOpen::Click);
+    }
+
+    #[test]
+    fn the_gesture_decides_whether_a_press_opens() {
+        assert!(LinkOpen::CtrlClick.matches(true));
+        assert!(!LinkOpen::CtrlClick.matches(false));
+        assert!(LinkOpen::Click.matches(false));
+        assert!(!LinkOpen::Off.matches(true));
+    }
+
+    #[test]
     fn unknown_keys_are_ignored() {
         let c = Config::from_toml_str("[font]\nwat = 1\n").unwrap();
         assert_eq!(c.font.size, 16.0);
@@ -944,6 +1071,7 @@ keep = true
         config.scrollback.lines = 50_000;
         config.selection.copy_on_select = false;
         config.selection.trim_trailing = false;
+        config.links.open = LinkOpen::Off;
         config.theme.background = "#112233".into();
         config.save(&path).expect("save the config");
 
@@ -966,6 +1094,7 @@ keep = true
         assert_eq!(value["scrollback"]["lines"].as_integer(), Some(50_000));
         assert_eq!(value["selection"]["copy_on_select"].as_bool(), Some(false));
         assert_eq!(value["selection"]["trim_trailing"].as_bool(), Some(false));
+        assert_eq!(value["links"]["open"].as_str(), Some("off"));
         assert_eq!(value["theme"]["background"].as_str(), Some("#112233"));
         assert_eq!(value["shell"]["program"].as_str(), Some("pwsh.exe"));
         assert_eq!(value["shell"]["args"][0].as_str(), Some("-NoLogo"));

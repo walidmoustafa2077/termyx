@@ -12,9 +12,9 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
-use crate::config::{BidiConfig, Config, FontConfig};
+use crate::config::{BidiConfig, Config, FontConfig, LinkOpen};
 use crate::event::UserEvent;
 use crate::find::FindState;
 use crate::fonts::{FontSet, UI_SIZE_PX};
@@ -167,6 +167,11 @@ pub struct App {
     cursor_pos: (f64, f64),
     /// Misspelled spans painted by the last frame.
     spellcheck_spans: Vec<Misspelling>,
+    /// Links and paths painted by the last frame.
+    link_spans: Vec<crate::links::LinkSpan>,
+    /// Whether the pointer last rested on a link, so the cursor icon is only
+    /// rewritten when it changes.
+    hovering_link: bool,
     /// Rect of the open menu's token, in physical pixels: the anchor the
     /// suggestion menu hangs from. `None` while no menu is open.
     spellcheck_anchor: Option<Rect>,
@@ -238,6 +243,8 @@ impl App {
             // be eaten as a chrome press.
             cursor_pos: (-1.0, -1.0),
             spellcheck_spans: Vec::new(),
+            link_spans: Vec::new(),
+            hovering_link: false,
             spellcheck_anchor: None,
             spellcheck_menu: None,
             hide_underlines: false,
@@ -1266,6 +1273,14 @@ impl App {
             self.config.spellcheck.enabled,
             self.hide_underlines,
         );
+        // A Settings or help page renders into the grid as a document, not a
+        // shell session: its text is not a destination, so nothing there is
+        // underlined or clickable.
+        self.link_spans = if session.page.is_none() {
+            crate::links::scan(&snapshot)
+        } else {
+            Vec::new()
+        };
         // The menu hangs from its token: the row, column and cell count were
         // recorded when it opened, so a later frame cannot slide it onto a
         // different word. The row's visual map keeps the anchor on the token
@@ -1282,6 +1297,7 @@ impl App {
             self.selection.as_ref(),
             self.find.as_ref(),
             &self.spellcheck_spans,
+            &self.link_spans,
         );
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &colors, self.strip_hover);
@@ -2334,6 +2350,28 @@ impl App {
             return;
         }
 
+        // A link under the pointer gets the hand cursor whenever opening is
+        // enabled, so the destination is discoverable before the click. The
+        // icon is rewritten only when the hover state actually flips.
+        let over_link = !self.mouse_down
+            && self.app_mouse_button.is_none()
+            && hover.is_none()
+            && self.scrollbar_hit(x, y).is_none()
+            && self.config.links.open != LinkOpen::Off
+            && self
+                .pos_at(x, y)
+                .is_some_and(|pos| crate::links::at(&self.link_spans, pos.row, pos.col).is_some());
+        if over_link != self.hovering_link {
+            self.hovering_link = over_link;
+            if let Some(window) = &self.window {
+                window.set_cursor(if over_link {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                });
+            }
+        }
+
         if let Some(button) = self.app_mouse_button {
             // A forwarded button is down: report motion regardless of Shift so
             // the gesture started by the press stays balanced.
@@ -2865,6 +2903,24 @@ impl App {
             let Some(position) = click_position else {
                 return false;
             };
+
+            // A press on a link opens its destination instead of starting a
+            // selection, when the configured gesture matches. The press is
+            // consumed; the release that follows finds no drag and does
+            // nothing.
+            if self.config.links.open.matches(self.modifiers.control_key()) {
+                if let Some(span) = crate::links::at(&self.link_spans, position.row, position.col) {
+                    let target = span.uri.clone();
+                    if let Err(err) = crate::support::open_target(&target) {
+                        tracing::warn!(%err, target = %target, "could not open link");
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return false;
+                }
+            }
+
             self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
         } else {
@@ -6234,6 +6290,7 @@ mod tests {
             lines,
             display_offset: 0,
             history: 0,
+            hyperlinks: Vec::new(),
         }
     }
 
