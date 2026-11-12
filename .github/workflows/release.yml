@@ -1,8 +1,8 @@
 name: release
 
-# Pushing a v* tag builds the Windows binary, compiles the Inno Setup
-# installer, and publishes both to a GitHub Release. Running the workflow by
-# hand only produces downloadable artifacts.
+# Pushing a v* tag builds the Windows binary, packs the terminal setup, and
+# publishes both to a GitHub Release. Running the workflow by hand only
+# produces downloadable artifacts.
 
 on:
   push:
@@ -42,16 +42,19 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-
-      - name: Build installer
+      - name: Package setup package
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "ISCC not found at $iscc" }
-          & $iscc "installer\Termyx.iss" "/DAppVersion=${{ steps.version.outputs.version }}"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $version = "${{ steps.version.outputs.version }}"
+          $stage = Join-Path $env:RUNNER_TEMP 'termyx-stage'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item 'installer\setup.ps1', 'installer\setup.cmd', 'installer\path.ps1', $stage
+          Copy-Item 'target\release\termyx.exe', 'README.md', $stage
+          $powershell = Join-Path $stage 'powershell'
+          New-Item -ItemType Directory -Path (Join-Path $powershell 'tools') -Force | Out-Null
+          Copy-Item 'shell\powershell\Termyx' (Join-Path $powershell 'Termyx') -Recurse
+          Copy-Item 'shell\powershell\tools\Install.ps1' (Join-Path $powershell 'tools')
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\Termyx-$version-setup.zip" -Force
 
       - name: Package portable build
         shell: pwsh

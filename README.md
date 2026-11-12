@@ -19,52 +19,64 @@ Windows requires the MSVC build tools. Linux requires `libxkbcommon`,
 
 ## Install (Windows)
 
-Grab `Termyx-<version>-setup.exe` from the
-[Releases page](https://github.com/walidmoustafa2077/termyx/releases) and run
-it. The wizard installs for the current user only, so it never asks for
-administrator rights, and it lets you choose what to set up:
+Grab `Termyx-<version>-setup.zip` from the
+[Releases page](https://github.com/walidmoustafa2077/termyx/releases), extract
+it anywhere, and double-click `setup.cmd`. Setup runs in the console window: it
+shows what it will install, you move with Up/Down, toggle with Space, press
+Enter to start, and every step reports its progress. It installs for the current
+user only, so it never asks for administrator rights. Press E to change the
+install folder (default `%LOCALAPPDATA%\Programs\Termyx`).
 
-- the install folder (default `%LOCALAPPDATA%\Programs\Termyx`)
+The toggles are:
+
 - Start Menu and desktop shortcuts
 - adding `termyx` to your `PATH`
 - Explorer entries **Open in Termyx** and **Open in Termyx (Administrator)** for
   folders, folder backgrounds, and drives
 - the `Termyx` PowerShell module (prompt and spellcheck)
+- launching Termyx when setup finishes
 
-Each step reports its progress, and the last page can launch Termyx. To remove
-it, use Settings → Apps (or "Add or remove programs"); your config in
-`%APPDATA%\termyx` and spellcheck words are kept.
+The same script removes it: run `setup.cmd -Uninstall`, or use Settings → Apps
+(setup registers an uninstall entry). Your config in `%APPDATA%\termyx` and
+spellcheck words are kept.
 
 Right-clicking a folder opens a shell in that folder. From a terminal,
 `termyx <folder>` and `termyx --directory <folder>` do the same. The executable
 also registers under `App Paths`, so `termyx` works from Win+R and new shells.
 
-### Build the installer yourself
+### Unattended setup
 
-With Rust and [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:
+`setup.cmd -Yes` installs with the defaults and asks nothing. `-NoPath`,
+`-NoShortcut`, `-NoContextMenu`, `-NoAdminMenu`, `-NoModule`, `-Desktop`,
+`-Launch`, `-InstallDir <path>`, and `-Uninstall` turn pieces on or off. The
+batch file passes everything through to `setup.ps1` if you prefer calling it
+directly.
+
+### Build the setup package yourself
 
 ```powershell
 cargo build --release
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\Termyx.iss
 ```
 
-The installer lands in `dist\Termyx-<version>-setup.exe`. Pushing a `v*` tag
-runs `.github/workflows/release.yml`, which checks the tree, builds the binary,
-compiles the installer, and publishes the installer, a portable zip, and
+Then copy `installer\setup.ps1`, `installer\setup.cmd`, `installer\path.ps1`,
+`target\release\termyx.exe`, `README.md`, `shell\powershell\Termyx`, and
+`shell\powershell\tools\Install.ps1` into one folder (keeping `Termyx` and
+`Install.ps1` under `powershell\`) and zip it. Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which checks the tree, builds the binary, packs
+`dist\Termyx-<version>-setup.zip`, and publishes it plus a portable zip and
 `SHA256SUMS.txt` to the Releases page.
 
 ### Scripted install (development)
 
-`install.ps1` builds straight from the working tree and registers the same
-pieces without the wizard:
+`install.ps1` builds from the working tree and runs setup without the menu:
 
 ```powershell
 .\install.ps1
 ```
 
-Options: `-NoBuild`, `-NoPath`, `-NoShortcut`, `-NoContextMenu`, `-NoModule`,
-`-InstallDir <path>`, and `-Uninstall`. Uninstall keeps `%APPDATA%\termyx`
-(the config and spellcheck words).
+Options: `-NoBuild`, `-NoPath`, `-NoShortcut`, `-Desktop`, `-NoContextMenu`,
+`-NoAdminMenu`, `-NoModule`, `-Launch`, `-InstallDir <path>`, and
+`-Uninstall`.
 
 ## Run (development)
 
