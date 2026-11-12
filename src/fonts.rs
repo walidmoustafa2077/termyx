@@ -15,6 +15,14 @@ pub enum FontError {
 /// available when explicitly requested (`arabic_family = "Kawkab Mono"`).
 pub(crate) const BUNDLED_ARABIC: &[u8] = include_bytes!("../assets/fonts/KawkabMono-Regular.ttf");
 
+/// Bundled default monospace face.
+///
+/// Windows does not ship Cascadia Mono: it arrives with Windows Terminal or
+/// Visual Studio. Without the bundle, the default config falls through to
+/// fontdb's generic `monospace`, which is Courier New on Windows, so the
+/// terminal looks different on every machine that lacks the family.
+pub(crate) const BUNDLED_MONO: &[u8] = include_bytes!("../assets/fonts/CascadiaMono-Regular.ttf");
+
 /// Families tried, in order, when the configured Arabic family is unavailable.
 ///
 /// The first face that renders connected Arabic wins. Segoe UI leads because
@@ -213,6 +221,7 @@ impl FontSet {
         line_height: f32,
     ) -> Result<Self, FontError> {
         let mut database = Database::new();
+        database.load_font_data(BUNDLED_MONO.to_vec());
         database.load_font_data(BUNDLED_ARABIC.to_vec());
         database.load_system_fonts();
         let (data, index) = load_primary(&database, family)?;
@@ -784,6 +793,16 @@ mod tests {
             .ceil() as u32;
         assert_eq!(font.cell_w, expected_w, "cell width must use the em scale");
         assert_eq!(font.cell_h, expected_h, "cell height must use the em scale");
+    }
+
+    #[test]
+    fn bundled_cascadia_mono_resolves_without_system_fonts() {
+        // Only the bundle is registered, so the exact family name must match:
+        // the generic monospace fallback would find nothing here.
+        let mut database = Database::new();
+        database.load_font_data(BUNDLED_MONO.to_vec());
+        let (data, _) = load_primary(&database, "Cascadia Mono").expect("bundled face resolves");
+        assert!(!data.is_empty());
     }
 
     #[test]

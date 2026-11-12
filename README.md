@@ -134,7 +134,11 @@ dynamic_title = false    # true lets apps set the title via OSC 0/2
   are not reordered.
 
 Segoe UI is the default Arabic face, matching the natural connected rendering
-used by PowerShell and the Windows UI. Kawkab Mono 0.501 is also bundled in
+used by PowerShell and the Windows UI. Cascadia Mono is bundled in
+`assets/fonts/` and embedded in the binary, so the default `family` resolves
+the same way on machines that never installed Windows Terminal or Visual
+Studio. A configured family that is missing still logs a warning and falls
+back to the system monospace face. Kawkab Mono 0.501 is also bundled in
 `assets/fonts/`, embedded in the binary, and available as an explicit opt-in
 via `arabic_family = "Kawkab Mono"`. Arabic runs are shaped continuously from
 the shaper's natural advances and anchored to the paragraph's start edge, so

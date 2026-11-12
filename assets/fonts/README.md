@@ -1,16 +1,24 @@
 # Bundled fonts
 
-Termyx bundles **Kawkab Mono 0.501**, licensed under the SIL Open Font
-License 1.1. The full license text is `OFL.txt` in this directory.
+Termyx bundles **Cascadia Mono** and **Kawkab Mono 0.501**, both licensed under
+the SIL Open Font License 1.1.
 
+- `CascadiaMono-Regular.ttf` — upstream `CascadiaMono.ttf` from
+  <https://github.com/microsoft/cascadia-code/releases>. It is the default
+  `font.family`, and Windows does not ship it, so the bundle is what keeps the
+  grid identical on every PC.
+- `CascadiaMono-OFL.txt` — license shipped with that release.
 - `KawkabMono-Regular.ttf` — upstream `kawkab-mono-0.501.zip` from
   <https://github.com/aiaf/kawkab-mono/releases/tag/v0.501>.
-- `OFL.txt` — license shipped with that release.
+- `OFL.txt` — Kawkab's license.
 
-`src/fonts.rs` embeds the font with `include_bytes!` and registers it with
-`fontdb` **before** loading system fonts, so it is always available. It is an
-opt-in Arabic face: the default is Arial because Kawkab's narrow metrics render
-disconnected at 16 px with the current rasterizer. Set
+`src/fonts.rs` embeds both fonts with `include_bytes!` and registers them with
+`fontdb` **before** loading system fonts, so they are always available. A
+system copy of the same family is therefore ignored: the bundled file wins, and
+the metrics stay stable across machines.
+
+Kawkab is an opt-in Arabic face: the default is Arial because Kawkab's narrow
+metrics render disconnected at 16 px with the current rasterizer. Set
 `[font] arabic_family = "Kawkab Mono"` to use it.
 
 Kawkab's advance is narrower than the primary monospace cell (about 5.7 px vs
