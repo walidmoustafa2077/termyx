@@ -1578,6 +1578,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn tab_color_switches_the_title_ink_for_contrast() {
         // A dark tab reads the grid's light foreground, the same as an active
         // tab's own title.
@@ -2004,6 +2005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn the_window_control_glyphs_resolve_to_a_face_that_maps_them() {
         // The caption controls and the strip's `+`/`⌄`/`✕` go through the same
         // per-character resolver; an unmapped glyph would paint `.notdef`.
@@ -2040,6 +2042,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn the_maximise_control_paints_a_distinct_restore_glyph() {
         // The control must not claim "expand" while the window is already
         // maximised. Compare the whole control cell rather than one pixel: the
@@ -2376,6 +2379,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn the_close_glyph_shares_the_title_ink() {
         let mut renderer = default_renderer();
         renderer.resize(400, 120);
@@ -3033,6 +3037,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn latin_cluster_is_painted_at_its_cell_slot() {
         let mut renderer = default_renderer();
         let cell_w = renderer.fonts.cell_w;
@@ -3071,6 +3076,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn lam_alef_ligature_spans_two_cells_without_shifting_following_text() {
         let Some(mut renderer) = arabic_renderer() else {
             eprintln!("skipping: no Arabic-capable system font installed");

@@ -236,6 +236,7 @@ mod tests {
     use crate::fonts::UI_SIZE_PX;
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn chrome_glyphs_resolve_to_a_face_that_maps_them() {
         let renderer = crate::render::tests::default_renderer();
         for glyph in [

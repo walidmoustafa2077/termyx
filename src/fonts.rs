@@ -827,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn configured_arabic_family_is_still_respected() {
         let font = FontSet::load("Consolas", "Arial", 16.0, 1.0)
             .or_else(|_| FontSet::load("DejaVu Sans Mono", "Arial", 16.0, 1.0))
@@ -999,6 +1000,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore = "needs Windows system fonts")]
     fn a_chrome_symbol_is_measured_on_the_face_that_paints_it() {
         let Some(fonts) = load("Consolas") else {
             return;
