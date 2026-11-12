@@ -891,6 +891,23 @@ Describe 'Install script' {
         @(Get-Content -LiteralPath $script:profilePath | Where-Object { $_ -match 'Import-Module\s+Termyx' }).Count | Should -Be 1
     }
 
+    It 'clears Mark-of-the-Web from installed module files' {
+        # Reproduce a module that came out of a downloaded archive: the zone
+        # lives in an alternate stream and survives the install copy.
+        $webSource = Join-Path $script:sandbox 'web-source'
+        Copy-Item -LiteralPath $script:moduleSource -Destination $webSource -Recurse -Force
+        $marked = Join-Path $webSource 'private\Decision.ps1'
+        Set-Content -LiteralPath $marked -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
+
+        $webRoot = Join-Path $script:sandbox 'WebModules'
+        $webProfile = Join-Path $script:sandbox 'web-profile.ps1'
+        & $script:installer -ModuleSource $webSource -ModuleRoot $webRoot -ProfilePath $webProfile
+
+        $installed = Join-Path $webRoot 'Termyx\0.1.0\private\Decision.ps1'
+        (Test-Path -LiteralPath $installed) | Should -BeTrue
+        Get-Item -LiteralPath $installed -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
     It 'uninstalls the module and only its own profile line' {
         # Prepend a cp1252 encoded line so a rewrite that re-encodes or
         # truncates the profile shows up as corruption.

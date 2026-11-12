@@ -209,6 +209,11 @@ if (-not (Test-Path -LiteralPath $target)) {
 }
 Copy-Item -Path (Join-Path $ModuleSource '*') -Destination $target -Recurse -Force
 
+# The module usually comes out of a downloaded zip, so every file carries
+# Mark-of-the-Web. Under RemoteSigned that blocks the unsigned scripts even
+# though they now live in a trusted module folder, so drop the zone explicitly.
+Get-ChildItem -LiteralPath $target -Recurse -File | Unblock-File
+
 $profileDirectory = Split-Path -Parent $ProfilePath
 if ($profileDirectory -and -not (Test-Path -LiteralPath $profileDirectory)) {
     New-Item -ItemType Directory -Force -Path $profileDirectory | Out-Null
