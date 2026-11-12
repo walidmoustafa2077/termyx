@@ -63,12 +63,14 @@ close, application mouse reporting (DEC
 modes 1000/1002/1003/1005/1006 with Shift+drag local selection), extended keys
 (Shift+Tab, F1–F12, modified navigation), cursor shape/visibility, focus
 reporting, window title (OSC 0/2, `dynamic_title` opt-in), OSC 52 copy, tabs
-from the configured profiles, a find bar, a command palette and tab context
+from the configured profiles, clickable links (OSC 8 hyperlinks, plain URLs
+and absolute paths) underlined always and opened with the configured gesture,
+a find bar, a command palette and tab context
 menus, and symbol-font fallback.
 
 Not yet: Kawkab Mono as an auto-selected face (its narrow metrics render
-disconnected at 16 px), exact cell alignment for narrow Arabic runs, OSC 8
-clickable links, full OSC 133 shell integration, IME preedit, splits, AI,
+disconnected at 16 px), exact cell alignment for narrow Arabic runs, full
+OSC 133 shell integration, IME preedit, splits, AI,
 images.
 
 ## Workflow
