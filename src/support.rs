@@ -4,18 +4,16 @@ use std::io;
 
 /// Where the `Support` menu row, palette command, and About field point.
 ///
-/// One constant, because the destination is expected to move. A payment page
-/// replaces this the day one exists, and nothing else in the app changes.
-pub(crate) const SUPPORT_URL: &str =
-    "https://github.com/walidmoustafa2077/termyx#supporting-termyx";
+/// One constant, because the destination is expected to move: this is a
+/// placeholder handle, and a claimed PayPal.me address replaces it in one edit.
+pub(crate) const SUPPORT_URL: &str = "https://paypal.me/termyx";
 
-/// The address as it reads on the About page, without the scheme or anchor.
+/// The address as it reads on the About page, without the scheme.
 ///
 /// The About grid has no hyperlinks, so the field has to read as a hint rather
 /// than as a URL bar.
 pub(crate) fn display() -> &'static str {
-    let page = SUPPORT_URL.split('#').next().unwrap_or(SUPPORT_URL);
-    page.trim_start_matches("https://")
+    SUPPORT_URL.trim_start_matches("https://")
 }
 
 #[cfg(target_os = "windows")]
@@ -88,9 +86,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_display_address_drops_the_scheme_and_anchor() {
+    fn the_display_address_drops_the_scheme() {
         // Short enough for a narrow About grid, and still the address a reader
         // would type after "https://".
-        assert_eq!(display(), "github.com/walidmoustafa2077/termyx");
+        assert_eq!(display(), "paypal.me/termyx");
     }
 }

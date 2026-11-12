@@ -323,7 +323,7 @@ mod tests {
     fn the_about_page_points_at_the_support_page() {
         let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 80, 24);
         assert!(text.contains("Support"));
-        assert!(text.contains("github.com/walidmoustafa2077/termyx"));
+        assert!(text.contains("paypal.me/termyx"));
     }
 
     #[test]
@@ -338,9 +338,18 @@ mod tests {
         assert!(text.contains("Walid Mostafa"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         assert!(
-            !text.contains("github.com"),
-            "a 40-column grid has no room for the address"
+            text.contains("paypal.me/termyx"),
+            "the address still fits forty columns"
         );
+    }
+
+    #[test]
+    fn a_narrow_about_page_drops_the_support_address() {
+        // The address is the one field wider than a narrow grid, so it is the
+        // one field that steps aside rather than running off the edge.
+        let text = Page::new(PageKind::About).text(&config(), Path::new("unused"), 24, 10);
+        assert!(text.contains("Walid Mostafa"));
+        assert!(!text.contains("paypal.me/termyx"));
     }
 
     #[test]

@@ -367,15 +367,15 @@ the same VT path but were not run on this machine.
 
 ## Supporting Termyx
 
-Termyx is a solo project. The `Support` row in the `⌄` menu, the `Support`
-command in the palette, and the `Support` field on the About page all open this
-section.
+Termyx is a solo project, and support goes through PayPal:
+<https://paypal.me/termyx>. The `Support` row in the `⌄` menu, the `Support`
+command in the palette, and the `Support` field on the About page all open that
+address.
 
-There is no payment page yet. When one exists, it is a one-line change:
-`SUPPORT_URL` in `src/support.rs` is the only place the address lives, and every
-surface follows it.
+`SUPPORT_URL` in `src/support.rs` is the only place the address lives, so a
+different PayPal.me handle is a one-line change on every surface.
 
-Until then the support that helps most costs nothing:
+Support that costs nothing helps just as much:
 
 - A bug report naming the program, the shell, and what the terminal drew wrong.
 - A note about a terminal behavior Termyx gets wrong on your font or layout.
