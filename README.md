@@ -17,7 +17,31 @@ cargo run --release
 Windows requires the MSVC build tools. Linux requires `libxkbcommon`,
 `libwayland`, and `libx11-xcb` development packages.
 
-## Run
+## Install (Windows)
+
+For a per-user installation that needs no administrator rights:
+
+```powershell
+.\install.ps1
+```
+
+The script builds the release binary, copies it to
+`%LOCALAPPDATA%\Programs\Termyx`, adds that folder to the user `PATH`, creates a
+Start Menu shortcut, installs the optional `Termyx` PowerShell module, and
+registers Explorer entries for folders, folder backgrounds, and drives:
+
+- **Open in Termyx**
+- **Open in Termyx (Administrator)**
+
+Right-clicking a folder opens a shell in that folder. From a terminal,
+`termyx <folder>` and `termyx --directory <folder>` do the same. The executable
+also registers under `App Paths`, so `termyx` works from Win+R and new shells.
+
+Options: `-NoBuild`, `-NoPath`, `-NoShortcut`, `-NoContextMenu`, `-NoModule`,
+`-InstallDir <path>`, and `-Uninstall`. Uninstall keeps `%APPDATA%\termyx`
+(the config and spellcheck words).
+
+## Run (development)
 
 Double-click `run.vbs` for a silent launch: it rebuilds the release binary
 in a hidden console and then opens the window. Use `run.cmd` from PowerShell

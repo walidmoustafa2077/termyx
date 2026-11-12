@@ -5,6 +5,7 @@
 //! be tested without spawning shells.
 
 use std::ops::{Index, IndexMut};
+use std::path::Path;
 
 use crate::config::ShellConfig;
 use crate::event::UserEvent;
@@ -389,22 +390,48 @@ impl IndexMut<usize> for TabSet {
     }
 }
 
+/// Everything one shell tab needs to start.
+///
+/// Bundled so the call site reads as named fields instead of a long positional
+/// list, and so a future field does not change the signature again.
+pub struct SpawnRequest<'a> {
+    pub id: SessionId,
+    pub shell: &'a ShellConfig,
+    /// The shell's working directory; `None` uses the PTY crate's default.
+    pub directory: Option<&'a Path>,
+    pub autocorrect: bool,
+    pub cols: usize,
+    pub rows: usize,
+    pub scrollback: usize,
+    pub proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+}
+
 /// Spawns the shell for a new session and builds its parser.
 ///
 /// The id tags both ends of the session: the parser's event proxy and the PTY
 /// reader thread. `autocorrect` is exported as `TERMYX_AUTOCORRECT` for
-/// the child.
-pub fn spawn_session(
-    id: SessionId,
-    shell: &ShellConfig,
-    autocorrect: bool,
-    cols: usize,
-    rows: usize,
-    scrollback: usize,
-    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
-) -> anyhow::Result<Session> {
+/// the child, and `directory` is where the shell starts.
+pub fn spawn_session(request: SpawnRequest<'_>) -> anyhow::Result<Session> {
+    let SpawnRequest {
+        id,
+        shell,
+        directory,
+        autocorrect,
+        cols,
+        rows,
+        scrollback,
+        proxy,
+    } = request;
     let terminal = Terminal::new_with_events(cols, rows, scrollback, Some((proxy.clone(), id)));
-    let pty = PtySession::spawn(shell, autocorrect, cols as u16, rows as u16, proxy, id)?;
+    let pty = PtySession::spawn(
+        shell,
+        directory,
+        autocorrect,
+        cols as u16,
+        rows as u16,
+        proxy,
+        id,
+    )?;
     Ok(Session::new(id, terminal, pty))
 }
 
@@ -549,7 +576,7 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty = PtySession::spawn_with(&idle_shell(), false, 80, 24, |_| {}, || {})
+        let pty = PtySession::spawn_with(&idle_shell(), None, false, 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
@@ -726,15 +753,6 @@ mod tests {
     #[test]
     fn spawn_session_has_the_signature_the_app_calls() {
         // Pins the public signature the app's call site relies on.
-        let _ = spawn_session
-            as fn(
-                SessionId,
-                &ShellConfig,
-                bool,
-                usize,
-                usize,
-                usize,
-                winit::event_loop::EventLoopProxy<UserEvent>,
-            ) -> anyhow::Result<Session>;
+        let _ = spawn_session as fn(SpawnRequest<'_>) -> anyhow::Result<Session>;
     }
 }

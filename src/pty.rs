@@ -1,6 +1,7 @@
 //! Shell session creation and byte transport.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::thread;
 
 use anyhow::Result;
@@ -29,10 +30,13 @@ impl PtySession {
     /// Spawns the configured shell and forwards its output, tagged with
     /// `session`, through `proxy`.
     ///
-    /// `autocorrect` is exported to the child as `TERMYX_AUTOCORRECT`, so
-    /// the PowerShell module agrees with the window's setting.
+    /// `directory` is the shell's working directory, or `None` for the user's
+    /// home. `autocorrect` is exported to the child as
+    /// `TERMYX_AUTOCORRECT`, so the PowerShell module agrees with the
+    /// window's setting.
     pub fn spawn(
         config: &ShellConfig,
+        directory: Option<&Path>,
         autocorrect: bool,
         cols: u16,
         rows: u16,
@@ -42,6 +46,7 @@ impl PtySession {
         let exit_proxy = proxy.clone();
         Self::spawn_with(
             config,
+            directory,
             autocorrect,
             cols,
             rows,
@@ -58,11 +63,13 @@ impl PtySession {
     /// then calls `on_exit` once the reader loop ends.
     ///
     /// `autocorrect` enables the PowerShell module's on-enter correction pass
-    /// for the child it starts.
+    /// for the child it starts. `directory` is the shell's working directory;
+    /// `None` leaves the PTY crate's default (the user's home) in place.
     ///
     /// The reader thread owns both callbacks and exits when the PTY closes.
     pub fn spawn_with<F, G>(
         config: &ShellConfig,
+        directory: Option<&Path>,
         autocorrect: bool,
         cols: u16,
         rows: u16,
@@ -84,6 +91,11 @@ impl PtySession {
         let mut command = CommandBuilder::new(program);
         for arg in args {
             command.arg(arg);
+        }
+        // The PTY crate starts the child in the user's home directory unless a
+        // directory is set explicitly, so process-wide `chdir` is not enough.
+        if let Some(directory) = directory {
+            command.cwd(directory);
         }
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
@@ -230,6 +242,61 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn the_child_starts_in_the_requested_directory() {
+        let directory = std::env::temp_dir().join(format!("termyx-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create the test directory");
+        let mut shell = ShellConfig::default();
+        #[cfg(windows)]
+        {
+            shell.program = "cmd.exe".into();
+            shell.args = vec!["/C".into(), "cd".into()];
+        }
+        #[cfg(not(windows))]
+        {
+            shell.program = "/bin/sh".into();
+            shell.args = vec!["-c".into(), "pwd".into()];
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let _session = PtySession::spawn_with(
+            &shell,
+            Some(directory.as_path()),
+            false,
+            80,
+            24,
+            move |bytes| {
+                let _ = sender.send(bytes);
+            },
+            || {},
+        )
+        .expect("spawn pty");
+
+        let expected = directory.display().to_string();
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    output.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&output).contains(&expected) {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let matched = String::from_utf8_lossy(&output).contains(&expected);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            matched,
+            "pty output was {:?}, expected the working directory {:?}",
+            String::from_utf8_lossy(&output),
+            expected
+        );
+    }
+
+    #[test]
     fn spawns_a_command_and_reads_its_output() {
         let mut shell = ShellConfig::default();
         #[cfg(windows)]
@@ -246,6 +313,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _session = PtySession::spawn_with(
             &shell,
+            None,
             false,
             80,
             24,
@@ -294,6 +362,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let _session = PtySession::spawn_with(
             &shell,
+            None,
             false,
             80,
             24,

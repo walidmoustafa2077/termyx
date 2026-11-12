@@ -26,7 +26,7 @@ use crate::platform;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
-use crate::session::{spawn_session, Session, SessionId, TabSet, FALLBACK_TITLE};
+use crate::session::{spawn_session, Session, SessionId, SpawnRequest, TabSet, FALLBACK_TITLE};
 use crate::settings::{ClickAction, CommitOutcome, EnterAction, EscapeAction, SettingsState};
 use crate::spellcheck::{self, Misspelling};
 use crate::term::{Cell, GridSnapshot, LogicalPos, RowSnapshot, Terminal};
@@ -100,6 +100,9 @@ pub struct App {
     /// The file the Settings tab shows and polls, resolved once at startup so
     /// a `--config` override and the default path behave the same.
     config_path: PathBuf,
+    /// Folder passed on the command line (Explorer's "Open in Termyx"), applied
+    /// to every shell tab in this window. `None` uses the shell's own default.
+    start_directory: Option<PathBuf>,
     /// Last write time of `config_path` seen by the Settings poll.
     settings_stamp: Option<SystemTime>,
     proxy: EventLoopProxy<UserEvent>,
@@ -179,7 +182,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, config_path: PathBuf, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: PathBuf,
+        start_directory: Option<PathBuf>,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
         let settings_stamp = page::settings_stamp(&config_path);
         let saved_config = config.clone();
         let applied_font = config.font.clone();
@@ -194,6 +202,7 @@ impl App {
             applied_font,
             config_path,
             settings_stamp,
+            start_directory,
             proxy,
             window: None,
             surface: None,
@@ -895,15 +904,16 @@ impl App {
         let profile = &profiles[profile_index];
         tracing::debug!(profile = %profile.name, "opening a tab");
         let id = self.tabs.next_id();
-        let mut session = spawn_session(
+        let mut session = spawn_session(SpawnRequest {
             id,
-            &profile.shell,
-            self.config.spellcheck.autocorrect,
-            self.cols,
-            self.rows,
-            self.config.scrollback.lines,
-            self.proxy.clone(),
-        )?;
+            shell: &profile.shell,
+            directory: self.start_directory.as_deref(),
+            autocorrect: self.config.spellcheck.autocorrect,
+            cols: self.cols,
+            rows: self.rows,
+            scrollback: self.config.scrollback.lines,
+            proxy: self.proxy.clone(),
+        })?;
         session.profile = Some(profile_index);
         // A forwarded press belongs to the tab that owns it. Balance it before
         // the new session becomes active, or the release would reach the wrong
@@ -5796,7 +5806,7 @@ mod tests {
     }
 
     fn test_session(id: SessionId) -> Session {
-        let pty = PtySession::spawn_with(&idle_shell(), false, 80, 24, |_| {}, || {})
+        let pty = PtySession::spawn_with(&idle_shell(), None, false, 80, 24, |_| {}, || {})
             .expect("spawn the test shell");
         Session::new(id, Terminal::new(80, 24, 100), pty)
     }
