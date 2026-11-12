@@ -15,7 +15,9 @@ candidate is closest. When several argument words are equally close, the most
 frequent English word wins (`teh` -> `the`, `aer` -> `are`, `recieve` ->
 `receive`), and a candidate that would delete a letter only wins if nothing else
 is close. Commands and parameters stay strict: a tie there is always left alone.
-Every fix is silent and a single `Ctrl+Z` undoes it.
+Every fix is silent. `Ctrl+Z` undoes a whole corrected word and `Ctrl+Y` replays
+it; when the edit is not word-shaped, both fall back to PSReadLine's single-step
+undo and redo.
 
 ## Requirements
 
@@ -132,7 +134,8 @@ Run this after installing, in both Windows Terminal and the legacy console host:
 1. Type `Get-ChldItem` and press Space. The line becomes `Get-ChildItem `.
 2. Confirm the corrected word is followed by exactly one space, and that no
    characters were lost or duplicated.
-3. Press `Ctrl+Z` once. The line returns to `Get-ChldItem` exactly.
+3. Press `Ctrl+Z` once. The line returns to `Get-ChldItem` exactly. Press
+   `Ctrl+Y`; `Get-ChildItem ` comes back.
 4. Type `Write-Host` and press Space. Exactly one space is inserted, so the line
    reads `Write-Host `.
 5. Type `git commit -m "helo wrld"` and press Space inside the quotes. No

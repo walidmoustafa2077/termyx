@@ -120,8 +120,10 @@ function Enable-TermyxAutocorrect {
 
     Import-Module PSReadLine -ErrorAction Stop
     Set-PSReadLineKeyHandler -Key Spacebar -ScriptBlock (Get-TermyxSpaceHandler)
-    Set-PSReadLineKeyHandler -Key Ctrl+Z -ScriptBlock (Get-TermyxUndoHandler)
-    Set-PSReadLineKeyHandler -Key Ctrl+Y -ScriptBlock (Get-TermyxRedoHandler)
+    # PSReadLine 2.0.0 reports this chord as `Ctrl+z`, so a `Ctrl+Z` binding is a
+    # second, unreachable entry and the default handler keeps running instead.
+    Set-PSReadLineKeyHandler -Key Ctrl+z -ScriptBlock (Get-TermyxUndoHandler)
+    Set-PSReadLineKeyHandler -Key Ctrl+y -ScriptBlock (Get-TermyxRedoHandler)
     $script:TermyxLastCorrection = $null
     $script:TermyxUndo = $null
     $script:TermyxEnabled = $true
@@ -143,8 +145,8 @@ function Disable-TermyxAutocorrect {
     try {
         if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
             Set-PSReadLineKeyHandler -Key Spacebar -Function SelfInsert
-            Set-PSReadLineKeyHandler -Key Ctrl+Z -Function Undo
-            Set-PSReadLineKeyHandler -Key Ctrl+Y -Function Redo
+            Set-PSReadLineKeyHandler -Key Ctrl+z -Function Undo
+            Set-PSReadLineKeyHandler -Key Ctrl+y -Function Redo
         }
     }
     catch {

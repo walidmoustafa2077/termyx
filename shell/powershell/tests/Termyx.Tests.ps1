@@ -1610,3 +1610,24 @@ Describe 'Spellcheck integration' {
         ($joined.Contains('restored=CUSTOM> ')) | Should -BeTrue
     }
 }
+
+Describe 'Undo and redo bindings' {
+    BeforeAll {
+        $script:moduleText = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'Termyx\Termyx.psm1')
+    }
+
+    It 'binds the lowercase chord names PSReadLine dispatches' {
+        # PSReadLine 2.0.0 dispatches Ctrl+Z as `Ctrl+z`, so a `Ctrl+Z` entry is
+        # never consulted and the default single-step Undo keeps running.
+        $script:moduleText | Should -Match '-Key Ctrl\+z -ScriptBlock \(Get-TermyxUndoHandler\)'
+        $script:moduleText | Should -Match '-Key Ctrl\+y -ScriptBlock \(Get-TermyxRedoHandler\)'
+        # Case-sensitive on purpose: `-match` would also accept `Ctrl+z`.
+        ($script:moduleText -cmatch '-Key Ctrl\+Z') | Should -BeFalse
+        ($script:moduleText -cmatch '-Key Ctrl\+Y') | Should -BeFalse
+    }
+
+    It 'restores the native handlers with the same chord names' {
+        $script:moduleText | Should -Match '-Key Ctrl\+z -Function Undo'
+        $script:moduleText | Should -Match '-Key Ctrl\+y -Function Redo'
+    }
+}
