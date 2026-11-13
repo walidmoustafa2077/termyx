@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "termyx"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ab_glyph",
  "alacritty_terminal",
