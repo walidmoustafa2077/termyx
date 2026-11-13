@@ -246,11 +246,11 @@ impl Renderer {
         selection: Option<&Selection>,
         find: Option<&FindState>,
     ) {
-        self.draw_with_spellcheck(snapshot, maps, selection, find, &[], &[]);
+        self.draw_with_spellcheck(snapshot, maps, selection, find, &[], None);
     }
 
     /// Draws the grid, then the spellcheck underlines for `spans` and the
-    /// link underlines for `links`.
+    /// underline of the hovered `link`, if any.
     pub fn draw_with_spellcheck(
         &mut self,
         snapshot: &GridSnapshot,
@@ -258,7 +258,7 @@ impl Renderer {
         selection: Option<&Selection>,
         find: Option<&FindState>,
         spellcheck: &[crate::spellcheck::Misspelling],
-        links: &[crate::links::LinkSpan],
+        link: Option<&crate::links::LinkSpan>,
     ) {
         self.shape_cache.clear();
         self.draw_background();
@@ -377,7 +377,7 @@ impl Renderer {
         self.draw_decorations(snapshot, maps, cell_w, cell_h);
 
         self.draw_spellcheck_underlines(snapshot, maps, spellcheck, cell_w, cell_h);
-        self.draw_links(snapshot, maps, links, cell_w, cell_h);
+        self.draw_links(snapshot, maps, link, cell_w, cell_h);
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
@@ -1003,54 +1003,53 @@ impl Renderer {
         }
     }
 
-    /// Paints a one-pixel underline under every cell a link covers, always
-    /// visible so a destination reads as clickable. Link rows are snapshot
-    /// line indices already, unlike the spellcheck spans' grid rows.
+    /// Paints a one-pixel underline under every cell the hovered link covers,
+    /// so a destination reads as clickable only when the pointer offers to
+    /// open it. Link rows are snapshot line indices already, unlike the
+    /// spellcheck spans' grid rows.
     fn draw_links(
         &mut self,
         snapshot: &GridSnapshot,
         maps: &[VisualMap],
-        spans: &[crate::links::LinkSpan],
+        hover: Option<&crate::links::LinkSpan>,
         cell_w: f32,
         cell_h: f32,
     ) {
-        if spans.is_empty() {
+        let Some(span) = hover else {
             return;
-        }
+        };
         let thickness = (self.scale_factor).round().max(1.0);
         // Bright ANSI blue: distinct from the orange spellcheck band without
         // a theme key of its own.
         let color = self.theme.bright[4];
 
-        for span in spans {
-            let row = span.row;
-            if row >= snapshot.lines.len() {
-                continue;
-            }
-            let Some(map) = maps.get(row) else {
-                continue;
-            };
-            let cols = snapshot.lines[row].cells.len();
-            if span.col >= cols {
-                continue;
-            }
-            let start = span.col;
-            let end = (span.col + span.len.max(1)).min(cols);
-            // Map every logical column so bidi reordering and wide cells
-            // land on the right visual cells, as the decorations do.
-            let mut columns: Vec<usize> = (start..end).map(|col| map.visual_of(col)).collect();
-            columns.sort_unstable();
-            columns.dedup();
-            let y = self.grid_top() + row as f32 * cell_h + (cell_h - thickness);
-            for col in columns {
-                self.fill_rect(
-                    self.padding as f32 + col as f32 * cell_w,
-                    y,
-                    cell_w,
-                    thickness,
-                    color,
-                );
-            }
+        let row = span.row;
+        if row >= snapshot.lines.len() {
+            return;
+        }
+        let Some(map) = maps.get(row) else {
+            return;
+        };
+        let cols = snapshot.lines[row].cells.len();
+        if span.col >= cols {
+            return;
+        }
+        let start = span.col;
+        let end = (span.col + span.len.max(1)).min(cols);
+        // Map every logical column so bidi reordering and wide cells land on
+        // the right visual cells, as the decorations do.
+        let mut columns: Vec<usize> = (start..end).map(|col| map.visual_of(col)).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        let y = self.grid_top() + row as f32 * cell_h + (cell_h - thickness);
+        for col in columns {
+            self.fill_rect(
+                self.padding as f32 + col as f32 * cell_w,
+                y,
+                cell_w,
+                thickness,
+                color,
+            );
         }
     }
 
@@ -2720,7 +2719,7 @@ mod tests {
         spans: &[crate::spellcheck::Misspelling],
     ) {
         resize_and_draw(renderer, snapshot, |renderer, maps| {
-            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans, &[]);
+            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans, None);
         });
     }
 
@@ -2843,7 +2842,7 @@ mod tests {
             "no span means no decoration in the band"
         );
 
-        // `draw` delegates to the span-aware pass with an empty slice, so the
+        // `draw` delegates to the span-aware pass with empty overlays, so the
         // two entry points must agree pixel for pixel.
         resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
             renderer.draw(&snapshot, maps, None, None);
@@ -2851,7 +2850,31 @@ mod tests {
         assert_eq!(
             renderer.pixmap.data(),
             without.as_slice(),
-            "draw and draw_with_spellcheck(&[]) agree"
+            "draw and draw_with_spellcheck(None) agree"
+        );
+    }
+
+    #[test]
+    fn the_link_underline_paints_only_while_the_span_is_hovered() {
+        let mut renderer = default_renderer();
+        let snapshot = text_snapshot("https://example.com");
+        resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
+            renderer.draw_with_spellcheck(&snapshot, maps, None, None, &[], None);
+        });
+        let resting = renderer.pixmap.data().to_vec();
+        let span = crate::links::LinkSpan {
+            row: 0,
+            col: 0,
+            len: 19,
+            uri: "https://example.com".to_string(),
+        };
+        resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
+            renderer.draw_with_spellcheck(&snapshot, maps, None, None, &[], Some(&span));
+        });
+        assert_ne!(
+            renderer.pixmap.data(),
+            resting.as_slice(),
+            "a hovered link must add its underline"
         );
     }
 

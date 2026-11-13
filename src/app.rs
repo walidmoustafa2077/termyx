@@ -169,11 +169,11 @@ pub struct App {
     cursor_pos: (f64, f64),
     /// Misspelled spans painted by the last frame.
     spellcheck_spans: Vec<Misspelling>,
-    /// Links and paths painted by the last frame.
+    /// Links and paths detected by the last frame; hit-tested on press.
     link_spans: Vec<crate::links::LinkSpan>,
-    /// Whether the pointer last rested on a link, so the cursor icon is only
-    /// rewritten when it changes.
-    hovering_link: bool,
+    /// Link under the pointer: the hand cursor shows while it is set and the
+    /// frame draws its underline only.
+    hovered_link: Option<crate::links::LinkSpan>,
     /// True while an update check or download is in flight, so a second
     /// invocation cannot start a parallel one.
     updating: bool,
@@ -249,7 +249,7 @@ impl App {
             cursor_pos: (-1.0, -1.0),
             spellcheck_spans: Vec::new(),
             link_spans: Vec::new(),
-            hovering_link: false,
+            hovered_link: None,
             updating: false,
             spellcheck_anchor: None,
             spellcheck_menu: None,
@@ -1303,7 +1303,7 @@ impl App {
             self.selection.as_ref(),
             self.find.as_ref(),
             &self.spellcheck_spans,
-            &self.link_spans,
+            self.hovered_link.as_ref(),
         );
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &colors, self.strip_hover);
@@ -2398,25 +2398,30 @@ impl App {
 
         // A link under the pointer gets the hand cursor whenever opening is
         // enabled, so the destination is discoverable before the click. The
+        // span itself is kept for the frame that draws the underline; the
         // icon is rewritten only when the hover state actually flips.
-        let over_link = !self.mouse_down
+        let hit = if !self.mouse_down
             && self.app_mouse_button.is_none()
             && hover.is_none()
             && self.scrollbar_hit(x, y).is_none()
             && self.config.links.open != LinkOpen::Off
-            && self
-                .pos_at(x, y)
-                .is_some_and(|pos| crate::links::at(&self.link_spans, pos.row, pos.col).is_some());
-        if over_link != self.hovering_link {
-            self.hovering_link = over_link;
+        {
+            self.pos_at(x, y)
+                .and_then(|pos| crate::links::at(&self.link_spans, pos.row, pos.col))
+                .cloned()
+        } else {
+            None
+        };
+        if hit.is_some() != self.hovered_link.is_some() {
             if let Some(window) = &self.window {
-                window.set_cursor(if over_link {
+                window.set_cursor(if hit.is_some() {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::Default
                 });
             }
         }
+        self.hovered_link = hit;
 
         if let Some(button) = self.app_mouse_button {
             // A forwarded button is down: report motion regardless of Shift so
@@ -4093,6 +4098,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_strip_hover(None);
                 self.clear_tooltip();
                 self.set_scrollbar_hover(false);
+                // The pointer is gone, so its link underline must go too.
+                if self.hovered_link.take().is_some() {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
                 if let Some(tab_menu) = self.tab_menu.as_mut() {
                     let was_shown = tab_menu
                         .menu
