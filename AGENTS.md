@@ -65,7 +65,8 @@ modes 1000/1002/1003/1005/1006 with Shift+drag local selection), extended keys
 reporting, window title (OSC 0/2, `dynamic_title` opt-in), OSC 52 copy, tabs
 from the configured profiles, clickable links (OSC 8 hyperlinks, plain URLs
 and absolute paths) underlined always and opened with the configured gesture,
-a find bar, a command palette and tab context
+a check for updates that applies the latest GitHub release and restarts, a
+find bar, a command palette and tab context
 menus, and symbol-font fallback.
 
 Not yet: Kawkab Mono as an auto-selected face (its narrow metrics render
