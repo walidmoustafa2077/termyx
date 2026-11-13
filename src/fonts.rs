@@ -137,6 +137,8 @@ pub(crate) const GLYPH_COMMAND_PALETTE: &str = "\u{E945}";
 pub(crate) const GLYPH_HELP: &str = "\u{E897}";
 /// A coffee cup, for the row that opens the support page.
 pub(crate) const GLYPH_COFFEE: &str = "\u{EC32}";
+/// A download arrow, for the row that checks GitHub for a newer release.
+pub(crate) const GLYPH_UPDATE: &str = "\u{E774}";
 
 /// Icon-face codepoints for the tab context menu's rows.
 ///

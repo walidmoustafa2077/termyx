@@ -20,4 +20,10 @@ pub enum UserEvent {
     ResetTitle { session: u64 },
     /// OSC 52 asked to put text on the system clipboard.
     ClipboardStore(String),
+    /// A background update check finished: `Ok(Some(tag))` when a newer
+    /// release exists, `Ok(None)` when the running build is current.
+    UpdateChecked(Result<Option<String>, String>),
+    /// The update package was staged and the installer is armed; `Ok` means
+    /// the app can exit and let it run.
+    UpdateStaged(Result<(), String>),
 }

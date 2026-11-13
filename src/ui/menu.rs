@@ -50,6 +50,8 @@ pub enum MenuAction {
     CommandPalette,
     /// Opens the project's support page in the browser.
     Support,
+    /// Asks GitHub for a newer release and applies it from this instance.
+    CheckForUpdates,
     About,
 }
 

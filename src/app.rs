@@ -172,6 +172,9 @@ pub struct App {
     /// Whether the pointer last rested on a link, so the cursor icon is only
     /// rewritten when it changes.
     hovering_link: bool,
+    /// True while an update check or download is in flight, so a second
+    /// invocation cannot start a parallel one.
+    updating: bool,
     /// Rect of the open menu's token, in physical pixels: the anchor the
     /// suggestion menu hangs from. `None` while no menu is open.
     spellcheck_anchor: Option<Rect>,
@@ -245,6 +248,7 @@ impl App {
             spellcheck_spans: Vec::new(),
             link_spans: Vec::new(),
             hovering_link: false,
+            updating: false,
             spellcheck_anchor: None,
             spellcheck_menu: None,
             hide_underlines: false,
@@ -1974,8 +1978,24 @@ impl App {
                     tracing::warn!(%err, "could not open the support page");
                 }
             }
+            MenuAction::CheckForUpdates => self.check_for_updates(),
             MenuAction::About => self.open_page(PageKind::About),
         }
+    }
+
+    /// Starts a background check for a newer release; the reply arrives as
+    /// [`UserEvent::UpdateChecked`] and the dialogs run there, so the window
+    /// never blocks on the network.
+    fn check_for_updates(&mut self) {
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = crate::update::check().map_err(|err| err.to_string());
+            let _ = proxy.send_event(UserEvent::UpdateChecked(result));
+        });
     }
 
     /// Opens an in-app page as a tab with its own grid and no child process.
@@ -2063,6 +2083,7 @@ impl App {
             PaletteCommand::Profile(index) => self.run_menu_action(MenuAction::Profile(index)),
             PaletteCommand::Settings => self.run_menu_action(MenuAction::Settings),
             PaletteCommand::Support => self.run_menu_action(MenuAction::Support),
+            PaletteCommand::CheckForUpdates => self.run_menu_action(MenuAction::CheckForUpdates),
             PaletteCommand::About => self.run_menu_action(MenuAction::About),
             PaletteCommand::Find => self.start_find(),
             PaletteCommand::ExportText => self.export_text(),
@@ -3342,6 +3363,12 @@ fn menu_items(config: &Config) -> Vec<MenuItem> {
         crate::fonts::GLYPH_COFFEE,
     ));
     items.push(MenuItem::fixed(
+        MenuAction::CheckForUpdates,
+        "Check for updates",
+        "",
+        crate::fonts::GLYPH_UPDATE,
+    ));
+    items.push(MenuItem::fixed(
         MenuAction::About,
         "About",
         "",
@@ -3825,6 +3852,72 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if let Err(err) = clipboard.set_text(text) {
                     tracing::warn!(%err, "OSC 52 clipboard store failed");
+                }
+            }
+            UserEvent::UpdateChecked(result) => {
+                self.updating = false;
+                match result {
+                    Ok(Some(latest)) => {
+                        let current = env!("CARGO_PKG_VERSION");
+                        let confirm = rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Info)
+                            .set_title("Termyx update")
+                            .set_description(format!(
+                                "Termyx {latest} is available; you have {current}. Termyx \
+                                 will close, install the update, and restart."
+                            ))
+                            .set_buttons(rfd::MessageButtons::YesNo)
+                            .show();
+                        if matches!(confirm, rfd::MessageDialogResult::Yes) {
+                            self.updating = true;
+                            let proxy = self.proxy.clone();
+                            std::thread::spawn(move || {
+                                let result =
+                                    crate::update::stage(&latest).map_err(|err| err.to_string());
+                                let _ = proxy.send_event(UserEvent::UpdateStaged(result));
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Info)
+                            .set_title("Termyx update")
+                            .set_description(format!(
+                                "Termyx {} is up to date.",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .show();
+                    }
+                    Err(message) => {
+                        rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Error)
+                            .set_title("Termyx update")
+                            .set_description(format!("The update check failed: {message}"))
+                            .show();
+                    }
+                }
+            }
+            UserEvent::UpdateStaged(result) => {
+                self.updating = false;
+                match result {
+                    Ok(()) => {
+                        rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Info)
+                            .set_title("Termyx update")
+                            .set_description(
+                                "The update is ready. Termyx will close, install it, and \
+                                 restart.",
+                            )
+                            .show();
+                        event_loop.exit();
+                    }
+                    Err(message) => {
+                        rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Error)
+                            .set_title("Termyx update")
+                            .set_description(format!("The update could not be prepared: {message}"))
+                            .show();
+                    }
                 }
             }
         }
@@ -5512,7 +5605,7 @@ mod tests {
     #[test]
     fn the_menu_lists_a_row_per_profile_then_the_window_commands() {
         let items = menu_items(&six_profiles());
-        assert_eq!(items.len(), 6 + 4);
+        assert_eq!(items.len(), 6 + 5);
         assert_eq!(items[0].action, MenuAction::Profile(0));
         assert_eq!(items[0].label, "Profile 1");
         assert_eq!(items[5].action, MenuAction::Profile(5));
@@ -5549,6 +5642,14 @@ mod tests {
                 items[9].action,
                 items[9].label.as_str(),
                 items[9].shortcut.as_str()
+            ),
+            (MenuAction::CheckForUpdates, "Check for updates", "")
+        );
+        assert_eq!(
+            (
+                items[10].action,
+                items[10].label.as_str(),
+                items[10].shortcut.as_str()
             ),
             (MenuAction::About, "About", "")
         );

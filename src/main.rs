@@ -25,6 +25,7 @@ mod support;
 mod term;
 mod theme;
 mod ui;
+mod update;
 mod visual;
 
 use std::path::PathBuf;

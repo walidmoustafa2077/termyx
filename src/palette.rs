@@ -36,6 +36,7 @@ pub enum PaletteCommand {
     Find,
     ExportText,
     Support,
+    CheckForUpdates,
     About,
 }
 
@@ -194,6 +195,11 @@ impl Palette {
         rows.push(row("Find", "Ctrl+F", PaletteCommand::Find));
         rows.push(row("Export text", "", PaletteCommand::ExportText));
         rows.push(row("Support", "", PaletteCommand::Support));
+        rows.push(row(
+            "Check for updates",
+            "",
+            PaletteCommand::CheckForUpdates,
+        ));
         rows.push(row("About", "", PaletteCommand::About));
         rows
     }
@@ -341,6 +347,12 @@ mod tests {
         let settings = listed.iter().position(|label| label == "Settings").unwrap();
         let find = listed.iter().position(|label| label == "Find").unwrap();
         assert_eq!(find, settings + 1, "Find follows Settings");
+        let support = listed.iter().position(|label| label == "Support").unwrap();
+        let update = listed
+            .iter()
+            .position(|label| label == "Check for updates")
+            .unwrap();
+        assert_eq!(update, support + 1, "the update check follows Support");
         assert_eq!(listed.last().map(String::as_str), Some("About"));
     }
 
@@ -491,6 +503,7 @@ mod tests {
             ("Find", "Ctrl+F"),
             ("Export text", ""),
             ("Support", ""),
+            ("Check for updates", ""),
             ("About", ""),
         ];
         let rows = palette.rows(&config);
