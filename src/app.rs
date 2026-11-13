@@ -2931,6 +2931,27 @@ impl App {
                 }
             }
 
+            // A press whose gesture matches opens a link before mouse
+            // reporting claims it, so links stay clickable inside TUIs.
+            // Every other press still reaches the application; this one is
+            // consumed, so the release that follows finds no drag.
+            if let Some(position) = click_position {
+                if self.config.links.open.matches(self.modifiers.control_key()) {
+                    if let Some(span) =
+                        crate::links::at(&self.link_spans, position.row, position.col)
+                    {
+                        let target = span.uri.clone();
+                        if let Err(err) = crate::support::open_target(&target) {
+                            tracing::warn!(%err, target = %target, "could not open link");
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return false;
+                    }
+                }
+            }
+
             if forwards {
                 self.app_mouse_button = Some(input_button);
                 self.mouse_down = false;
@@ -2954,23 +2975,6 @@ impl App {
             let Some(position) = click_position else {
                 return false;
             };
-
-            // A press on a link opens its destination instead of starting a
-            // selection, when the configured gesture matches. The press is
-            // consumed; the release that follows finds no drag and does
-            // nothing.
-            if self.config.links.open.matches(self.modifiers.control_key()) {
-                if let Some(span) = crate::links::at(&self.link_spans, position.row, position.col) {
-                    let target = span.uri.clone();
-                    if let Err(err) = crate::support::open_target(&target) {
-                        tracing::warn!(%err, target = %target, "could not open link");
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                    return false;
-                }
-            }
 
             self.selection = Some(Selection::visual(position));
             self.mouse_down = true;
