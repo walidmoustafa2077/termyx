@@ -1472,6 +1472,29 @@ impl App {
                 }
             }
         }
+        // Plain Ctrl+V pastes and plain Ctrl+C copies a real selection; a
+        // parked click leaves Ctrl+C as the shell's interrupt. The Ctrl+Shift
+        // forms above always act, so neither ever reaches the shell as a
+        // control byte.
+        match plain_edit(&event.logical_key, self.modifiers) {
+            Some(PlainEdit::Paste) => {
+                if !event.repeat {
+                    self.paste_clipboard();
+                }
+                return false;
+            }
+            Some(PlainEdit::Copy) => {
+                let selected = self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.anchor != selection.focus);
+                if selected {
+                    self.copy_selection();
+                    return false;
+                }
+            }
+            None => {}
+        }
         // Shift+PageUp/PageDown scroll the local viewport when there is
         // scrollback. Without history they fall through as modified keys so
         // full-screen applications still receive them.
@@ -3683,6 +3706,34 @@ fn shortcut_for(
     }
 }
 
+/// What a bare `Ctrl` letter asks of the clipboard.
+///
+/// Split from [`App::on_key`] because winit exposes no way to build a
+/// `KeyEvent` outside its own backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainEdit {
+    Paste,
+    Copy,
+}
+
+/// The clipboard meaning of a bare `Ctrl` letter, free of the tab shortcut
+/// table. Shift keeps the explicit `Ctrl+Shift+C`/`V` forms, Alt is AltGr on
+/// Windows and Super is the OS's, so neither may claim the key.
+fn plain_edit(logical: &Key, modifiers: ModifiersState) -> Option<PlainEdit> {
+    if !modifiers.control_key()
+        || modifiers.shift_key()
+        || modifiers.alt_key()
+        || modifiers.super_key()
+    {
+        return None;
+    }
+    match logical {
+        Key::Character(text) if text.eq_ignore_ascii_case("v") => Some(PlainEdit::Paste),
+        Key::Character(text) if text.eq_ignore_ascii_case("c") => Some(PlainEdit::Copy),
+        _ => None,
+    }
+}
+
 /// The slot `delta` places from `current`, wrapping at both ends.
 ///
 /// `None` when there is nowhere to move: no slot at all, or a lone one. The
@@ -5827,6 +5878,70 @@ mod tests {
                 ModifiersState::CONTROL | ModifiersState::SHIFT
             ),
             Some(TabAction::SelectProfile(1))
+        );
+    }
+
+    #[test]
+    fn plain_ctrl_v_pastes_and_plain_ctrl_c_copies() {
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            plain_edit(&Key::Character("v".into()), ctrl),
+            Some(PlainEdit::Paste)
+        );
+        assert_eq!(
+            plain_edit(&Key::Character("c".into()), ctrl),
+            Some(PlainEdit::Copy)
+        );
+        // The layout may report either case.
+        assert_eq!(
+            plain_edit(&Key::Character("V".into()), ctrl),
+            Some(PlainEdit::Paste)
+        );
+        assert_eq!(
+            plain_edit(&Key::Character("C".into()), ctrl),
+            Some(PlainEdit::Copy)
+        );
+    }
+
+    #[test]
+    fn only_a_bare_ctrl_letter_claims_the_clipboard() {
+        let ctrl = ModifiersState::CONTROL;
+        // The explicit Ctrl+Shift forms keep their own meaning upstream.
+        assert_eq!(
+            plain_edit(
+                &Key::Character("v".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            None
+        );
+        assert_eq!(
+            plain_edit(
+                &Key::Character("c".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            None
+        );
+        // AltGr is Ctrl+Alt on Windows, so the layout owns the key.
+        assert_eq!(
+            plain_edit(
+                &Key::Character("v".into()),
+                ModifiersState::CONTROL | ModifiersState::ALT
+            ),
+            None
+        );
+        // Win combos belong to the OS; other letters belong to the shell.
+        assert_eq!(
+            plain_edit(
+                &Key::Character("v".into()),
+                ModifiersState::CONTROL | ModifiersState::SUPER
+            ),
+            None
+        );
+        assert_eq!(plain_edit(&Key::Character("f".into()), ctrl), None);
+        assert_eq!(plain_edit(&Key::Named(NamedKey::ArrowUp), ctrl), None);
+        assert_eq!(
+            plain_edit(&Key::Character("v".into()), ModifiersState::empty()),
+            None
         );
     }
 
