@@ -66,7 +66,7 @@ modes 1000/1002/1003/1005/1006 with Shift+drag local selection), extended keys
 (Shift+Tab, F1–F12, modified navigation), cursor shape/visibility, focus
 reporting, window title (OSC 0/2, `dynamic_title` opt-in), OSC 52 copy, tabs
 from the configured profiles, clickable links (OSC 8 hyperlinks, plain URLs
-and absolute paths) underlined always and opened with the configured gesture,
+and absolute paths) underlined on hover and opened with the configured gesture,
 a check for updates that applies the latest GitHub release and restarts, a
 find bar, a command palette and tab context
 menus, and symbol-font fallback.
