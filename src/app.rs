@@ -1,9 +1,11 @@
 //! Window, surface, and event wiring.
 
+use std::fs;
+use std::io;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
@@ -3300,11 +3302,19 @@ impl App {
         };
         let text = match clipboard.get_text() {
             Ok(text) => text,
-            Err(err) => {
-                tracing::warn!(%err, "paste failed");
-                return;
-            }
+            Err(text_err) => match non_text_paste(clipboard) {
+                Some(text) => text,
+                None => {
+                    tracing::warn!(%text_err, "nothing pasteable on the clipboard");
+                    return;
+                }
+            },
         };
+        self.paste_text(text);
+    }
+
+    /// Writes pasted text to the shell, capped and bracketed like any paste.
+    fn paste_text(&mut self, text: String) {
         let text = cap_paste(text);
         let bracketed = self
             .tabs
@@ -4065,6 +4075,13 @@ impl ApplicationHandler<UserEvent> for App {
                 inner_size_writer: _,
             } => self.on_scale_factor_changed(scale_factor),
             WindowEvent::RedrawRequested => self.render(),
+            // A dropped file lands as its path, quoted when whitespace would
+            // split it. The trailing space separates it from the next file
+            // of the same drop, which arrives as its own event.
+            WindowEvent::DroppedFile(path) => {
+                let text = format!("{} ", dropped_text(&path));
+                self.paste_text(text);
+            }
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::CursorMoved { position, .. } => {
@@ -4834,6 +4851,69 @@ fn wheel_lines(delta: MouseScrollDelta, cell_h: f32, remainder: &mut f32) -> i32
     let lines = remainder.trunc();
     *remainder -= lines;
     lines as i32
+}
+
+/// A dropped or copied path as shell input: quoted only when whitespace
+/// would split it. Windows paths cannot contain `"`, so the quote is safe.
+fn dropped_text(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if text.chars().any(char::is_whitespace) {
+        format!("\"{text}\"")
+    } else {
+        text.into_owned()
+    }
+}
+
+/// Clipboard content that is not text: copied files become their quoted
+/// paths and an image becomes the path of a PNG saved for it. `None` means
+/// there is nothing to paste; the failures are logged here and by the
+/// caller.
+fn non_text_paste(clipboard: &mut arboard::Clipboard) -> Option<String> {
+    if let Ok(paths) = clipboard.get().file_list() {
+        if !paths.is_empty() {
+            let text = paths
+                .iter()
+                .map(|path| dropped_text(path))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(text);
+        }
+    }
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(err) => {
+            tracing::warn!(%err, "no image on the clipboard either");
+            return None;
+        }
+    };
+    let path = image_temp_path();
+    if let Err(err) = write_image_png(&image, &path) {
+        tracing::warn!(%err, path = %path.display(), "could not save the pasted image");
+        return None;
+    }
+    Some(dropped_text(&path))
+}
+
+/// Names a fresh temp file for a pasted image.
+fn image_temp_path() -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    std::env::temp_dir().join(format!("termyx-paste-{stamp}.png"))
+}
+
+/// Writes `image` as a PNG. Split from [`non_text_paste`] so the encode is
+/// testable without a clipboard.
+fn write_image_png(image: &arboard::ImageData<'_>, path: &Path) -> io::Result<()> {
+    let file = fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, image.width as u32, image.height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(io::Error::other)?;
+    writer
+        .write_image_data(&image.bytes)
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 /// Truncates a clipboard payload to [`MAX_PASTE_CHARS`] without splitting a
@@ -5943,6 +6023,40 @@ mod tests {
             plain_edit(&Key::Character("v".into()), ModifiersState::empty()),
             None
         );
+    }
+
+    #[test]
+    fn a_dropped_path_is_quoted_only_when_whitespace_splits_it() {
+        assert_eq!(
+            dropped_text(std::path::Path::new(r"D:\Development\termyx\src\main.rs")),
+            r"D:\Development\termyx\src\main.rs"
+        );
+        assert_eq!(
+            dropped_text(std::path::Path::new(r"C:\Program Files\app\run.exe")),
+            r#""C:\Program Files\app\run.exe""#
+        );
+        assert_eq!(
+            dropped_text(std::path::Path::new("/home/user/a b.txt")),
+            "\"/home/user/a b.txt\""
+        );
+    }
+
+    #[test]
+    fn a_pasted_image_is_written_as_a_png() {
+        let rgba = [255u8, 0, 0, 255, 0, 255, 0, 255];
+        let image = arboard::ImageData {
+            width: 2,
+            height: 1,
+            bytes: std::borrow::Cow::Borrowed(&rgba),
+        };
+        let path = std::env::temp_dir().join("termyx-paste-png-test.png");
+        write_image_png(&image, &path).expect("png written");
+        let file = std::fs::File::open(&path).expect("png readable");
+        let reader = png::Decoder::new(file).read_info().expect("png header");
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
