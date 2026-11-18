@@ -32,7 +32,9 @@ use crate::platform;
 use crate::render::Renderer;
 use crate::scrollbar::{self, ScrollbarGeometry, ScrollbarHit};
 use crate::selection::{line_bounds, word_bounds, Selection, SelectionMode};
-use crate::session::{spawn_session, Session, SessionId, SpawnRequest, TabSet, FALLBACK_TITLE};
+use crate::session::{
+    spawn_session, Session, SessionId, SessionIds, SpawnRequest, TabSet, FALLBACK_TITLE,
+};
 use crate::settings::{ClickAction, CommitOutcome, EnterAction, EscapeAction, SettingsState};
 use crate::spellcheck::{self, Misspelling};
 use crate::term::{Cell, GridSnapshot, LogicalPos, RowSnapshot, Terminal};
@@ -123,6 +125,9 @@ struct WindowState {
     /// The open shells. Each session owns its parser, its PTY child, and its
     /// reader thread; the window shows whichever session is active.
     tabs: TabSet,
+    /// The one id counter every window draws from, so a session that moves to
+    /// another window keeps an id no new tab can take.
+    ids: SessionIds,
     /// Strip geometry from the window width and every tab title. `None` until
     /// the first session exists.
     layout: Option<TabBarLayout>,
@@ -223,6 +228,8 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     /// The configuration a new window starts from.
     template: Config,
+    /// The one id counter every window draws from.
+    ids: SessionIds,
     config_path: PathBuf,
     start_directory: Option<PathBuf>,
     /// Set once `resumed` created the first window: winit may resume again on
@@ -248,6 +255,7 @@ impl App {
             active: None,
             proxy,
             template: config,
+            ids: SessionIds::new(),
             config_path,
             start_directory,
             started: false,
@@ -299,6 +307,7 @@ impl WindowState {
         config_path: PathBuf,
         start_directory: Option<PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
+        ids: SessionIds,
     ) -> Self {
         let settings_stamp = page::settings_stamp(&config_path);
         let saved_config = config.clone();
@@ -315,6 +324,7 @@ impl WindowState {
             surface: None,
             renderer: None,
             tabs: TabSet::new(),
+            ids,
             layout: None,
             menu: None,
             tab_menu: None,
@@ -1017,7 +1027,7 @@ impl WindowState {
         let profile_index = if profile < profiles.len() { profile } else { 0 };
         let profile = &profiles[profile_index];
         tracing::debug!(profile = %profile.name, "opening a tab");
-        let id = self.tabs.next_id();
+        let id = self.ids.next();
         let mut session = spawn_session(SpawnRequest {
             id,
             shell: &profile.shell,
@@ -2127,7 +2137,7 @@ impl WindowState {
 
     /// Opens an in-app page as a tab with its own grid and no child process.
     fn open_page(&mut self, kind: PageKind) {
-        let id = self.tabs.next_id();
+        let id = self.ids.next();
         // Pages have no events to route; the grid still needs a parser for its
         // scrollback and snapshots.
         let terminal =
@@ -4322,6 +4332,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.config_path.clone(),
             self.start_directory.clone(),
             self.proxy.clone(),
+            self.ids.clone(),
         );
         if let Err(err) = state.create_window(event_loop) {
             rfd::MessageDialog::new()
@@ -5144,7 +5155,7 @@ mod tests {
 
     use crate::config::{BaseDirection, ShellConfig};
     use crate::pty::PtySession;
-    use crate::session::Session;
+    use crate::session::{Session, SessionIds};
     use crate::term::{Affinity, Cell, CursorShape, CursorState, InputStart, RowSnapshot, Style};
 
     #[test]
@@ -6435,7 +6446,7 @@ mod tests {
     #[test]
     fn a_page_tab_has_no_source_to_duplicate() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(Session::page_tab(
             id,
             Terminal::new(80, 24, 100),
@@ -6451,7 +6462,7 @@ mod tests {
     #[test]
     fn a_shell_tab_carries_its_profile_and_metadata() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         assert_eq!(
             duplicate_source(&tabs, id),
@@ -6487,8 +6498,9 @@ mod tests {
     #[test]
     fn output_reaches_only_the_session_it_names() {
         let mut tabs = TabSet::new();
-        let background = tabs.next_id();
-        let shown = tabs.next_id();
+        let ids = SessionIds::new();
+        let background = ids.next();
+        let shown = ids.next();
         tabs.push(test_session(background));
         tabs.push(test_session(shown));
         assert_eq!(tabs.active().map(|session| session.id), Some(shown));
@@ -6505,7 +6517,7 @@ mod tests {
         // An id no session carries — a late read from a closed tab — must not
         // fall through to the active terminal. It changes no grid, and it is
         // not `Active`, the only outcome that requests a redraw.
-        let closed = tabs.next_id();
+        let closed = ids.next();
         assert_eq!(
             feed_session(&mut tabs, closed, b"ghost"),
             FeedOutcome::Dropped
@@ -6562,8 +6574,9 @@ mod tests {
         // `route_title`: its first flag repaints the strip and its second
         // renames the window.
         let mut tabs = TabSet::new();
-        let background = tabs.next_id();
-        let shown = tabs.next_id();
+        let ids = SessionIds::new();
+        let background = ids.next();
+        let shown = ids.next();
         tabs.push(test_session(background));
         tabs.push(test_session(shown));
 
@@ -6593,7 +6606,7 @@ mod tests {
 
         // A late title from a closed tab changes no label and never names the
         // window.
-        let closed = tabs.next_id();
+        let closed = ids.next();
         let (changed, window) = route_title(&mut tabs, closed, "ghost");
         assert!(!changed);
         assert!(!window);
@@ -6619,8 +6632,9 @@ mod tests {
     #[test]
     fn a_repeated_title_costs_nothing_but_a_new_one_repaints() {
         let mut tabs = TabSet::new();
-        let background = tabs.next_id();
-        let shown = tabs.next_id();
+        let ids = SessionIds::new();
+        let background = ids.next();
+        let shown = ids.next();
         tabs.push(test_session(background));
         tabs.push(test_session(shown));
 

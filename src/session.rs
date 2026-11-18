@@ -4,8 +4,10 @@
 //! active and which id it holds. It is split from [`TabSet`] so the rules can
 //! be tested without spawning shells.
 
+use std::cell::Cell;
 use std::ops::{Index, IndexMut};
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::config::ShellConfig;
 use crate::event::UserEvent;
@@ -14,6 +16,32 @@ use crate::term::Terminal;
 
 /// Identifies a session across the event loop; never reused within a run.
 pub type SessionId = u64;
+
+/// Hands out session ids that no window ever reuses.
+///
+/// The counter is process-wide rather than per [`TabSet`]: a session can move
+/// to another window, and a new tab there must not take an id the moved one
+/// still carries.
+#[derive(Debug, Clone)]
+pub struct SessionIds(Rc<Cell<SessionId>>);
+
+impl Default for SessionIds {
+    fn default() -> Self {
+        Self(Rc::new(Cell::new(1)))
+    }
+}
+
+impl SessionIds {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn next(&self) -> SessionId {
+        let id = self.0.get();
+        self.0.set(id + 1);
+        id
+    }
+}
 
 /// Title shown when a session has not set one, or cleared it.
 pub const FALLBACK_TITLE: &str = "Termyx";
@@ -175,7 +203,6 @@ impl Session {
 pub struct TabSet {
     slots: TabSlots,
     sessions: Vec<Session>,
-    next_id: SessionId,
 }
 
 impl Default for TabSet {
@@ -189,14 +216,7 @@ impl TabSet {
         Self {
             slots: TabSlots::new(),
             sessions: Vec::new(),
-            next_id: 1,
         }
-    }
-
-    pub fn next_id(&mut self) -> SessionId {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
     }
 
     pub fn push(&mut self, session: Session) -> usize {
@@ -516,7 +536,7 @@ mod tests {
     #[test]
     fn titles_fall_back_to_the_window_name() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         assert_eq!(tabs.titles(), vec!["Termyx"]);
         tabs.set_title(id, "build");
@@ -539,7 +559,7 @@ mod tests {
     #[test]
     fn a_shell_path_does_not_replace_the_stored_title() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         tabs.set_title(id, "Windows PowerShell");
         assert!(!tabs.set_title(id, r"C:\WINDOWS\System32\WindX"));
@@ -584,7 +604,7 @@ mod tests {
     #[test]
     fn rename_locks_the_title_against_osc_updates() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         assert!(tabs.rename(id, "Build"));
         assert_eq!(tabs.titles(), vec!["Build"]);
@@ -595,7 +615,7 @@ mod tests {
     #[test]
     fn a_blank_rename_clears_the_lock() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         assert!(tabs.rename(id, "Build"));
         assert!(tabs.rename(id, "   "));
@@ -618,14 +638,33 @@ mod tests {
         set.set_title(1, "build");
         set.select(0);
         assert!(set.remove_active().is_none());
-        assert_eq!(set.next_id(), 1);
+    }
+
+    #[test]
+    fn ids_start_at_one_and_never_repeat() {
+        let ids = SessionIds::new();
+        assert_eq!(ids.next(), 1);
+        assert_eq!(ids.next(), 2);
+    }
+
+    #[test]
+    fn clones_share_one_counter() {
+        let ids = SessionIds::new();
+        let other = ids.clone();
+        assert_eq!(ids.next(), 1);
+        assert_eq!(
+            other.next(),
+            2,
+            "a second window must not hand out an id the first one used"
+        );
     }
 
     #[test]
     fn a_pushed_session_becomes_active_and_keeps_its_id() {
         let mut set = TabSet::new();
-        let first = set.next_id();
-        let second = set.next_id();
+        let ids = SessionIds::new();
+        let first = ids.next();
+        let second = ids.next();
         assert_eq!(set.push(test_session(first)), 0);
         assert_eq!(set.push(test_session(second)), 1);
 
@@ -658,8 +697,9 @@ mod tests {
     #[test]
     fn a_session_is_found_by_id_until_it_is_removed() {
         let mut set = TabSet::new();
-        let first = set.next_id();
-        let second = set.next_id();
+        let ids = SessionIds::new();
+        let first = ids.next();
+        let second = ids.next();
         set.push(test_session(first));
         set.push(test_session(second));
 
@@ -681,9 +721,10 @@ mod tests {
     #[test]
     fn move_tab_is_a_noop_at_the_edges() {
         let mut tabs = TabSet::new();
-        let a = tabs.next_id();
+        let ids = SessionIds::new();
+        let a = ids.next();
         tabs.push(test_session(a));
-        let b = tabs.next_id();
+        let b = ids.next();
         tabs.push(test_session(b));
         assert!(!tabs.move_tab(0, 0));
         assert!(!tabs.move_tab(0, 2));
@@ -694,11 +735,12 @@ mod tests {
     #[test]
     fn move_tab_keeps_the_active_session_active() {
         let mut tabs = TabSet::new();
-        let a = tabs.next_id();
+        let ids = SessionIds::new();
+        let a = ids.next();
         tabs.push(test_session(a));
-        let b = tabs.next_id();
+        let b = ids.next();
         tabs.push(test_session(b));
-        let c = tabs.next_id();
+        let c = ids.next();
         tabs.push(test_session(c));
         tabs.select(0);
         assert!(tabs.move_tab(0, 2));
@@ -724,7 +766,7 @@ mod tests {
     #[test]
     fn color_is_stored_per_session() {
         let mut tabs = TabSet::new();
-        let id = tabs.next_id();
+        let id = SessionIds::new().next();
         tabs.push(test_session(id));
         assert_eq!(tabs.color(id), None);
         assert!(tabs.set_color(id, Some(crate::theme::Rgb::new(1, 2, 3))));
