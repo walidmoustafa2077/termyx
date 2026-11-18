@@ -84,6 +84,26 @@ where
     Ok(options)
 }
 
+/// Keeps a panic visible after the window disappears.
+///
+/// A GUI launched from Explorer has no console attached, so the default hook's
+/// message goes nowhere; the report lands in a file the user can send back.
+fn record_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        let report = format!(
+            "{info}\n\n{}\n\n",
+            std::backtrace::Backtrace::force_capture()
+        );
+        let path = std::env::temp_dir().join("termyx-panic.log");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, report.as_bytes()));
+        eprintln!("{report}");
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -94,6 +114,7 @@ fn main() -> anyhow::Result<()> {
         )
         .with_target(false)
         .init();
+    record_panics();
 
     let options = launch_options_from_args(std::env::args().skip(1))?;
     // Settings saves to this path after the working directory may have moved to
