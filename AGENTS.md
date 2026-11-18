@@ -56,7 +56,8 @@ If a request conflicts with them, ask before drifting.
 ## Current scope (Phases 0–2 + Batches 1–3)
 
 In: windows with tabs, one shell session per tab, drag-to-reorder, moving a tab
-into its own window, dropping a dragged tab into another window's strip,
+into its own window, dropping a dragged tab into another window's strip with
+the dragged tab's card following the pointer across the screen,
 bidi/RTL rendering with Arabic shaping and
 run-level continuous layout, Arial as the default Arabic face (bundled Kawkab
 Mono is opt-in), scrollback with a draggable scrollbar, resize, word/line/block
