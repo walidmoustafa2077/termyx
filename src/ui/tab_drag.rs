@@ -15,15 +15,20 @@ pub struct TabDrag {
     /// Where the press landed, in physical pixels. The threshold is measured
     /// from here, not from the last motion, so a slow start is still a click.
     pub origin: (f64, f64),
+    /// How far into the tab body the press landed, in physical pixels.
+    /// Carrying the card by this offset keeps it under the same point of the
+    /// tab the user grabbed, in both axes.
+    pub grab: (f64, f64),
     /// Set once the pointer has left `origin` by more than the threshold.
     pub active: bool,
 }
 
 impl TabDrag {
-    pub fn new(session: SessionId, origin: (f64, f64)) -> Self {
+    pub fn new(session: SessionId, origin: (f64, f64), grab: (f64, f64)) -> Self {
         Self {
             session,
             origin,
+            grab,
             active: false,
         }
     }
@@ -111,9 +116,21 @@ pub fn resolve_drop<Id: Copy + PartialEq>(
     DropTarget::Window(zone.id, zone.drop_index(pointer.0))
 }
 
+/// The slot a dragged tab takes when `raw` tab midpoints lie left of the
+/// pointer.
+///
+/// `raw` counts the dragged tab too, and that tab is about to leave the place
+/// it currently occupies, so its own slot has to come back out: with the
+/// pointer just past one neighbour `raw` is two, and the tab moves one place,
+/// not two. The result is clamped to the last slot.
+pub fn drop_slot(from: usize, raw: usize, len: usize) -> usize {
+    raw.saturating_sub(usize::from(raw > from))
+        .min(len.saturating_sub(1))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{resolve_drop, DropTarget, DropZone, TabDrag};
+    use super::{drop_slot, resolve_drop, DropTarget, DropZone, TabDrag};
 
     fn zone(id: u64, x: i32, y: i32, w: u32, h: u32) -> DropZone<u64> {
         DropZone {
@@ -123,6 +140,18 @@ mod tests {
             strip_h: 40.0,
             centers: vec![x as f32 + 50.0, x as f32 + 150.0],
         }
+    }
+
+    #[test]
+    fn a_one_slot_drag_moves_one_slot() {
+        // Dragging the first of three just past its neighbour counts two
+        // midpoints; the tab belongs in the middle slot, not at the end.
+        assert_eq!(drop_slot(0, 2, 3), 1);
+        // Past both neighbours it belongs last, and the clamp holds it there.
+        assert_eq!(drop_slot(0, 3, 3), 2);
+        assert_eq!(drop_slot(0, 9, 3), 2);
+        // Dragging left, only the tabs it passed are counted.
+        assert_eq!(drop_slot(2, 0, 3), 0);
     }
 
     #[test]
@@ -166,14 +195,14 @@ mod tests {
 
     #[test]
     fn a_press_that_stays_put_is_still_a_click() {
-        let mut drag = TabDrag::new(1, (100.0, 20.0));
+        let mut drag = TabDrag::new(1, (100.0, 20.0), (0.0, 0.0));
         assert!(!drag.step((102.0, 22.0), 4.0));
         assert!(!drag.active);
     }
 
     #[test]
     fn crossing_the_threshold_starts_a_drag_that_sticks() {
-        let mut drag = TabDrag::new(1, (100.0, 20.0));
+        let mut drag = TabDrag::new(1, (100.0, 20.0), (0.0, 0.0));
         assert!(drag.step((100.0, 30.0), 4.0));
         assert!(drag.active);
         // Wandering back over the origin does not undo the drag.

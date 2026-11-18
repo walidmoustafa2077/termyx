@@ -49,6 +49,9 @@ pub struct Renderer {
     scrollbar_hover: bool,
     /// Where a dragged tab would land, drawn as a line in the strip.
     strip_insertion: Option<usize>,
+    /// The tab a drag is carrying. Its slot is left blank in the strip: the
+    /// card that follows the pointer is a separate window.
+    dragged_tab: Option<usize>,
     /// Whether the window is maximised, which swaps the caption's maximise
     /// glyph for the restore glyph. The app reads this from the live window
     /// before each frame because the WM can maximise it without a click.
@@ -221,6 +224,7 @@ impl Renderer {
             shape_warned: false,
             scrollbar_hover: false,
             strip_insertion: None,
+            dragged_tab: None,
             maximized: false,
             app_icon: crate::icon::app_icon(),
         })
@@ -518,6 +522,10 @@ impl Renderer {
     ) {
         let radius = TAB_RADIUS * layout.strip_h / TAB_STRIP_HEIGHT;
         for tab in &layout.tabs {
+            // The dragged tab is painted as a floating card on top instead.
+            if self.dragged_tab == Some(tab.index) {
+                continue;
+            }
             let color = colors.get(tab.index).copied().flatten();
             let fill = color.or_else(|| (tab.index == active).then_some(self.theme.tab_active));
             if let Some(fill) = fill {
@@ -704,6 +712,10 @@ impl Renderer {
         let icon_size = TAB_ICON_SIZE * k;
         let title_left = (TAB_ICON_INSET + TAB_ICON_SIZE + TAB_ICON_GAP) * k;
         for tab in &layout.tabs {
+            // The dragged tab's icon and title travel with its floating card.
+            if self.dragged_tab == Some(tab.index) {
+                continue;
+            }
             // A crowded strip can shrink a tab below the icon's own slot; the
             // blit would then spill into the neighbour, so skip it exactly as
             // the layout drops a close box that will not fit.
@@ -1347,6 +1359,58 @@ impl Renderer {
         &self.pixels
     }
 
+    /// The pixels under `rect` as a premultiplied BGRA image, ready for the
+    /// drag overlay to blit.
+    ///
+    /// The card keeps the tab's own face — its fill, icon and title — so the
+    /// drag carries the tab itself rather than a newly drawn badge. Its top
+    /// corners are rounded away in the alpha channel because the strip that
+    /// normally hides the square corners is no longer behind it.
+    pub fn tab_card(&self, rect: Rect, radius: f32) -> Option<(u32, u32, Vec<u8>)> {
+        let (width, height) = (self.pixmap.width(), self.pixmap.height());
+        let left = rect.x.round().max(0.0) as u32;
+        let top = rect.y.round().max(0.0) as u32;
+        let right = (rect.x + rect.w).round().clamp(0.0, width as f32) as u32;
+        let bottom = (rect.y + rect.h).round().clamp(0.0, height as f32) as u32;
+        if right <= left || bottom <= top || width == 0 {
+            return None;
+        }
+        let (w, h) = (right - left, bottom - top);
+        let radius = radius.min(w as f32 / 2.0).max(0.0);
+        let mut card = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let mut alpha = 1.0;
+                if (y as f32) < radius {
+                    if (x as f32) < radius {
+                        alpha = corner_coverage(
+                            x as f32, y as f32, radius, radius, radius, false, false,
+                        );
+                    } else if (x as f32) >= w as f32 - radius {
+                        alpha = corner_coverage(
+                            x as f32,
+                            y as f32,
+                            w as f32 - radius,
+                            radius,
+                            radius,
+                            true,
+                            false,
+                        );
+                    }
+                }
+                let pixel = self.pixels[((top + y) * width + left + x) as usize];
+                let scale = |channel: u32| ((channel as f32) * alpha) as u8;
+                card.extend_from_slice(&[
+                    scale(pixel & 0xFF),
+                    scale((pixel >> 8) & 0xFF),
+                    scale((pixel >> 16) & 0xFF),
+                    scale(255),
+                ]);
+            }
+        }
+        Some((w, h, card))
+    }
+
     /// The window margin around the grid, in physical pixels.
     pub fn padding(&self) -> u32 {
         self.padding
@@ -1408,6 +1472,11 @@ impl Renderer {
     /// Marks where a dragged tab would land, or `None` when nothing is dragged.
     pub fn set_strip_insertion(&mut self, index: Option<usize>) {
         self.strip_insertion = index;
+    }
+
+    /// Sets the tab card a drag carries, or `None` when no drag is active.
+    pub fn set_dragged_tab(&mut self, index: Option<usize>) {
+        self.dragged_tab = index;
     }
 }
 

@@ -40,14 +40,15 @@ use crate::spellcheck::{self, Misspelling};
 use crate::term::{Cell, GridSnapshot, LogicalPos, RowSnapshot, Terminal};
 use crate::theme::{Rgb, Theme};
 use crate::ui::context_menu::{ContextHit, ContextMenu, ContextPress, TabCommand};
+use crate::ui::drag_overlay::DragOverlay;
 use crate::ui::find_bar::{FindBar, FindHit};
 use crate::ui::menu::{MenuAction, MenuIcon, MenuItem, MenuLayout};
 use crate::ui::rename::RenameState;
 use crate::ui::spellcheck_menu::{
     MenuItem as SpellcheckItem, SpellcheckMenu, SpellcheckMenuLayout,
 };
-use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
-use crate::ui::tab_drag::{resolve_drop, DropTarget, DropZone, TabDrag};
+use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_RADIUS, TAB_STRIP_HEIGHT};
+use crate::ui::tab_drag::{drop_slot, resolve_drop, DropTarget, DropZone, TabDrag};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
 
@@ -179,6 +180,9 @@ struct WindowState {
     tab_drag: Option<TabDrag>,
     /// Where a dragged tab would land, while it hovers another window.
     strip_insertion: Option<usize>,
+    /// The card that carries the dragged tab across the screen. It is its own
+    /// window so the tab stays visible past this window's frame.
+    overlay: Option<DragOverlay>,
     /// The tab the mouse released outside this window, waiting for the event
     /// loop owner to place it.
     drop: Option<SessionId>,
@@ -407,7 +411,8 @@ impl App {
         source: WindowId,
         session: SessionId,
     ) -> bool {
-        match self.drop_target(source) {
+        let landing = self.drop_target(source);
+        match landing {
             Some(DropTarget::Window(target, index)) if self.windows.contains_key(&target) => {
                 let Some(session) = self.give_up(source, session) else {
                     return false;
@@ -595,6 +600,7 @@ impl WindowState {
             last_strip_click: None,
             tab_drag: None,
             strip_insertion: None,
+            overlay: None,
             drop: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
@@ -1672,6 +1678,7 @@ impl WindowState {
             Some((index, current))
         });
         let strip_insertion = self.strip_insertion;
+        let dragged_tab = self.dragged_slot();
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
             return;
         };
@@ -1720,6 +1727,7 @@ impl WindowState {
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.set_maximized(maximized);
         renderer.set_strip_insertion(strip_insertion);
+        renderer.set_dragged_tab(dragged_tab);
         renderer.draw_with_spellcheck(
             &snapshot,
             &maps,
@@ -2772,6 +2780,60 @@ impl WindowState {
         }
     }
 
+    /// The dragged tab's slot, which the strip leaves blank while its card
+    /// travels with the pointer.
+    fn dragged_slot(&self) -> Option<usize> {
+        let drag = self.tab_drag?;
+        drag.active.then(|| self.tabs.position(drag.session))?
+    }
+
+    /// Grabs tab `index` for a drag and lifts a card of it, taken from the
+    /// pixels the last frame painted for that tab.
+    fn start_tab_drag(&mut self, session: SessionId, index: usize) {
+        let Some((body, radius)) = self.layout.as_ref().and_then(|layout| {
+            let tab = layout.tabs.get(index)?;
+            Some((tab.body, TAB_RADIUS * layout.strip_h / TAB_STRIP_HEIGHT))
+        }) else {
+            return;
+        };
+        // The card hangs from the point of the tab the press landed on, so the
+        // tab keeps its place under the finger for the whole drag.
+        let grab = (
+            self.cursor_pos.0 - f64::from(body.x),
+            self.cursor_pos.1 - f64::from(body.y),
+        );
+        self.overlay = self.renderer.as_ref().and_then(|renderer| {
+            let (width, height, pixels) = renderer.tab_card(body, radius)?;
+            let mut overlay = DragOverlay::new()?;
+            overlay.set_card(width, height, &pixels);
+            Some(overlay)
+        });
+        self.tab_drag = Some(TabDrag::new(session, self.cursor_pos, grab));
+    }
+
+    /// Puts the drag's card under the point of the tab the pointer holds.
+    fn place_overlay(&mut self) {
+        let Some(drag) = self.tab_drag else {
+            return;
+        };
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        if !drag.active {
+            return;
+        }
+        let Some(window) = &self.window else {
+            return;
+        };
+        let Ok(origin) = window.inner_position() else {
+            return;
+        };
+        overlay.place(
+            origin.x + (self.cursor_pos.0 - drag.grab.0).round() as i32,
+            origin.y + (self.cursor_pos.1 - drag.grab.1).round() as i32,
+        );
+    }
+
     /// Steps a tab drag to `x`, reordering the strip once the pointer has moved
     /// far enough to mean a drag rather than a click.
     fn drag_tab(&mut self, x: f64) {
@@ -2784,21 +2846,18 @@ impl WindowState {
         let Some(from) = self.tabs.position(drag.session) else {
             return;
         };
-        let Some(to) = self
+        let Some(raw) = self
             .layout
             .as_ref()
             .map(|layout| layout.drop_index(x as f32))
         else {
             return;
         };
-        // `drop_index` may point past the last tab, which is the same slot as
-        // the last one once the dragged tab has left its own place.
-        let to = to.min(self.tabs.len().saturating_sub(1));
+        // The pointer's slot counts the dragged tab too, which is leaving the
+        // place it counted for, so `drop_slot` takes that place back out.
+        let to = drop_slot(from, raw, self.tabs.len());
         if self.tabs.move_tab(from, to) {
             self.rebuild_layout();
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
         }
     }
 
@@ -2806,8 +2865,13 @@ impl WindowState {
         self.cursor_pos = (x, y);
         if self.tab_drag.is_some() {
             // A grabbed tab owns the pointer: motion reorders the strip and
-            // nothing beneath it reacts.
+            // nothing beneath it reacts. The card follows every step, not only
+            // the ones that change the order.
             self.drag_tab(x);
+            self.place_overlay();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
             return;
         }
         if self.spellcheck_menu.is_some() {
@@ -3214,7 +3278,7 @@ impl WindowState {
                                 // The press already selected the tab; a drag
                                 // from here reorders it without a second press.
                                 if let Some(session) = self.tabs.active() {
-                                    self.tab_drag = Some(TabDrag::new(session.id, self.cursor_pos));
+                                    self.start_tab_drag(session.id, index);
                                 }
                             }
                         }
@@ -3458,6 +3522,9 @@ impl WindowState {
                     if drag.active {
                         self.drop = Some(drag.session);
                     }
+                }
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.hide();
                 }
             }
             if self.scrollbar_drag && button == MouseButton::Left {
@@ -4646,6 +4713,9 @@ impl WindowState {
                     self.press_in_chrome = false;
                     self.scrollbar_drag = false;
                     self.tab_drag = None;
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.hide();
+                    }
                     self.close_tab_menu();
                     // The panel's hover and the cursor it targets are gone with
                     // the focus; a return click must re-derive them.
