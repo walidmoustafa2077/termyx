@@ -1,5 +1,6 @@
 //! Window, surface, and event wiring.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
@@ -88,14 +89,19 @@ struct TooltipHover {
 }
 
 /// The open tab context menu, if any: its panel chain plus the tab it acts
-/// on. While it is `Some` the menu owns the pointer, like [`App::menu`], and
-/// the two close each other so only one can be open.
+/// on. While it is `Some` the menu owns the pointer, like
+/// [`WindowState::menu`], and the two close each other so only one can be open.
 struct TabMenuState {
     menu: ContextMenu,
     target: SessionId,
 }
 
-pub struct App {
+/// One OS window: its surface, renderer, tabs, and the interaction state that
+/// only that window's events change.
+///
+/// The event-loop owner ([`App`]) keeps the process-wide state and one of
+/// these per [`WindowId`]. A session lives in exactly one of them.
+struct WindowState {
     config: Config,
     /// The last configuration written to disk. Esc and Revert restore it.
     saved_config: Config,
@@ -191,7 +197,38 @@ pub struct App {
     /// Program to icon, filled the first time a profile opens a tab. A second
     /// tab of the same program reuses the parsed icon instead of asking the
     /// shell API again.
-    icon_cache: std::collections::HashMap<String, Option<icon::TabIcon>>,
+    icon_cache: HashMap<String, Option<icon::TabIcon>>,
+}
+
+/// What the event-loop owner must do with a window after an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowOutcome {
+    /// The window still has something to show.
+    Keep,
+    /// The window has nothing left to show; the owner drops it.
+    Close,
+    /// The whole process must quit, for example because the updater is armed.
+    Exit,
+}
+
+/// Event-loop owner: every open window plus the state they share.
+///
+/// A window closes by leaving this map, so the process exits only when the
+/// last one is gone. An empty tab set therefore no longer means "quit".
+pub struct App {
+    windows: HashMap<WindowId, WindowState>,
+    /// The most recently focused window. OSC 52 clipboard stores land here,
+    /// because the sequence itself names no window.
+    active: Option<WindowId>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// The configuration a new window starts from.
+    template: Config,
+    config_path: PathBuf,
+    start_directory: Option<PathBuf>,
+    /// Set once `resumed` created the first window: winit may resume again on
+    /// platforms that suspend the loop, and a second startup must not add a
+    /// duplicate window.
+    started: bool,
 }
 
 impl App {
@@ -201,14 +238,71 @@ impl App {
         start_directory: Option<PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
-        let settings_stamp = page::settings_stamp(&config_path);
-        let saved_config = config.clone();
-        let applied_font = config.font.clone();
-        // The module and the app share one file; load it before the first frame
-        // so a word added in a previous run stays known.
+        // The module and the app share one file; load it once per process,
+        // before the first frame, so a word added in a previous run stays known.
         if let Some(path) = spellcheck::user_words_path() {
             spellcheck::load_user_words(&path);
         }
+        Self {
+            windows: HashMap::new(),
+            active: None,
+            proxy,
+            template: config,
+            config_path,
+            start_directory,
+            started: false,
+        }
+    }
+
+    /// The window that owns `session`, if one still shows it.
+    fn window_for_session(&self, session: SessionId) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|(_, state)| state.tabs.position(session).is_some())
+            .map(|(id, _)| *id)
+    }
+
+    /// The window an untargeted message lands in: the focused one, or any
+    /// window when none has been focused yet.
+    fn focus_target(&self) -> Option<WindowId> {
+        self.active
+            .filter(|id| self.windows.contains_key(id))
+            .or_else(|| self.windows.keys().next().copied())
+    }
+
+    /// Applies what a window asked for after handling an event.
+    fn settle(&mut self, event_loop: &ActiveEventLoop, id: WindowId, outcome: WindowOutcome) {
+        match outcome {
+            WindowOutcome::Keep => {}
+            WindowOutcome::Close => {
+                self.windows.remove(&id);
+                if self.active == Some(id) {
+                    self.active = self.windows.keys().next().copied();
+                }
+            }
+            // The updater runs after the process exits, so every other window
+            // goes with it.
+            WindowOutcome::Exit => {
+                event_loop.exit();
+                return;
+            }
+        }
+        if self.windows.is_empty() {
+            event_loop.exit();
+        }
+    }
+}
+
+impl WindowState {
+    fn new(
+        config: Config,
+        config_path: PathBuf,
+        start_directory: Option<PathBuf>,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
+        let settings_stamp = page::settings_stamp(&config_path);
+        let saved_config = config.clone();
+        let applied_font = config.font.clone();
         Self {
             config,
             saved_config,
@@ -812,6 +906,10 @@ impl App {
             renderer.top_inset(),
             renderer.scale_factor(),
         );
+        let (cell_w, cell_h) = (renderer.fonts().cell_w, renderer.fonts().cell_h);
+        for session in self.tabs.iter_mut() {
+            session.terminal.set_cell_size(cell_w, cell_h);
+        }
         if cols == self.cols && rows == self.rows {
             return false;
         }
@@ -1027,7 +1125,8 @@ impl App {
     /// Closes every tab but `id` and shows `id`.
     ///
     /// The target stays open, so the set is never emptied; the `false` return
-    /// means the window stays open, like [`App::close_tab`]'s non-empty case.
+    /// means the window stays open, like [`WindowState::close_tab`]'s
+    /// non-empty case.
     fn close_other_tabs(&mut self, id: SessionId) -> bool {
         while self.tabs.len() > 1 {
             let Some(current) = self.tabs.position(id) else {
@@ -1300,10 +1399,13 @@ impl App {
         renderer.draw_with_spellcheck(
             &snapshot,
             &maps,
-            self.selection.as_ref(),
-            self.find.as_ref(),
-            &self.spellcheck_spans,
-            self.hovered_link.as_ref(),
+            crate::render::Overlays {
+                selection: self.selection.as_ref(),
+                find: self.find.as_ref(),
+                spellcheck: &self.spellcheck_spans,
+                link: self.hovered_link.as_ref(),
+                images: session.terminal.images(),
+            },
         );
         if let Some(layout) = self.layout.as_ref() {
             renderer.draw_chrome(layout, ui_px, active, &colors, self.strip_hover);
@@ -2224,7 +2326,7 @@ impl App {
         let Some(pty) = session.pty.as_mut() else {
             return;
         };
-        if let Err(err) = pty.write(bytes) {
+        if let Err(err) = pty.write_key(bytes) {
             tracing::warn!(%err, "pty write failed");
         }
     }
@@ -3660,8 +3762,8 @@ enum TabAction {
     SelectProfile(usize),
 }
 
-/// Shortcuts the window chrome owns. Kept free of `App` so the table can be
-/// tested without an event loop.
+/// Shortcuts the window chrome owns. Kept free of `WindowState` so the table
+/// can be tested without an event loop.
 ///
 /// Only the keys listed here are claimed. Everything else is left to the rest
 /// of `on_key`: the copy and paste shortcuts first, then the terminal.
@@ -3727,7 +3829,7 @@ fn shortcut_for(
 
 /// What a bare `Ctrl` letter asks of the clipboard.
 ///
-/// Split from [`App::on_key`] because winit exposes no way to build a
+/// Split from [`WindowState::on_key`] because winit exposes no way to build a
 /// `KeyEvent` outside its own backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlainEdit {
@@ -3832,22 +3934,16 @@ impl CursorBlink {
     }
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        if let Err(err) = self.create_window(event_loop) {
-            rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Error)
-                .set_title("Termyx")
-                .set_description(format!("Startup failed: {err:#}"))
-                .show();
-            event_loop.exit();
-        }
+impl WindowState {
+    /// The id of the OS window this state drives, if it has been created.
+    fn window_id(&self) -> Option<WindowId> {
+        self.window.as_ref().map(|window| window.id())
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    /// Handles a session or clipboard event for this window. The owner has
+    /// already picked the window, so an unknown session id here is a late
+    /// event from a closed tab and changes nothing.
+    fn user_event(&mut self, event: UserEvent) -> WindowOutcome {
         match event {
             UserEvent::PtyOutput { session, bytes } => {
                 if let FeedOutcome::Active { reflowed } =
@@ -3873,12 +3969,12 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(index) = self.tabs.position(session) else {
                     // The tab is already gone; this is the reader of a session
                     // the user closed.
-                    return;
+                    return WindowOutcome::Keep;
                 };
                 tracing::debug!(session, index, "shell exited; closing its tab");
                 if self.close_tab(index) {
                     // A window with no tab has nothing left to show.
-                    event_loop.exit();
+                    return WindowOutcome::Close;
                 }
             }
             UserEvent::Title { session, title } => {
@@ -3915,13 +4011,30 @@ impl ApplicationHandler<UserEvent> for App {
                         len = text.len(),
                         "OSC 52 clipboard store rejected"
                     );
-                    return;
+                    return WindowOutcome::Keep;
                 }
                 let Some(clipboard) = self.clipboard() else {
-                    return;
+                    return WindowOutcome::Keep;
                 };
                 if let Err(err) = clipboard.set_text(text) {
                     tracing::warn!(%err, "OSC 52 clipboard store failed");
+                }
+            }
+            UserEvent::PtyWrite { session, bytes } => {
+                let Some(target) = self.tabs.session_mut(session) else {
+                    return WindowOutcome::Keep;
+                };
+                // The key-record encoding exists because the console host eats
+                // escape sequences on its input path. A shell in line mode would
+                // read those records as typed text and echo them, so only a
+                // full-screen application (which asked the question) gets them.
+                let reply = if target.terminal.mode().contains(TermMode::ALT_SCREEN) {
+                    target.pty.as_mut().map(|pty| pty.write_reply(&bytes))
+                } else {
+                    target.pty.as_mut().map(|pty| pty.write(&bytes))
+                };
+                if let Some(Err(err)) = reply {
+                    tracing::warn!(%err, "pty reply failed");
                 }
             }
             UserEvent::UpdateChecked(result) => {
@@ -3979,7 +4092,8 @@ impl ApplicationHandler<UserEvent> for App {
                                  restart.",
                             )
                             .show();
-                        event_loop.exit();
+                        // The installer is armed; every window must go.
+                        return WindowOutcome::Exit;
                     }
                     Err(message) => {
                         rfd::MessageDialog::new()
@@ -3991,9 +4105,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        WindowOutcome::Keep
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    /// Advances this window's timers and returns when it next needs a wake-up.
+    fn next_deadline(&mut self) -> Option<Instant> {
         let now = Instant::now();
         if self.blink.advance(now) {
             if let Some(window) = &self.window {
@@ -4048,22 +4164,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
             settings_deadline = Some(now + SETTINGS_POLL);
         }
-        let deadline = [self.blink.deadline, tooltip_deadline, settings_deadline]
+        [self.blink.deadline, tooltip_deadline, settings_deadline]
             .into_iter()
             .flatten()
-            .min();
-        match deadline {
-            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
-        }
+            .min()
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    /// Handles one event for this window. The owner routes by `WindowId` and
+    /// drops the window when the outcome says nothing is left to show.
+    fn window_event(&mut self, event: WindowEvent) -> WindowOutcome {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => return WindowOutcome::Close,
             WindowEvent::Resized(size) => {
                 if size.width == 0 || size.height == 0 {
-                    return;
+                    return WindowOutcome::Keep;
                 }
                 // The menu's anchor and window bounds both changed.
                 self.close_tab_menu();
@@ -4132,7 +4246,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.on_mouse(state, button) {
                     // Closing the last tab leaves nothing to show.
-                    event_loop.exit();
+                    return WindowOutcome::Close;
                 }
             }
             WindowEvent::Focused(focused) => {
@@ -4169,7 +4283,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.on_key(event) {
                     // Closing the last tab by keyboard leaves nothing to show.
-                    event_loop.exit();
+                    return WindowOutcome::Close;
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
@@ -4193,6 +4307,89 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(_) => {}
             _ => {}
         }
+        WindowOutcome::Keep
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let mut state = WindowState::new(
+            self.template.clone(),
+            self.config_path.clone(),
+            self.start_directory.clone(),
+            self.proxy.clone(),
+        );
+        if let Err(err) = state.create_window(event_loop) {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Termyx")
+                .set_description(format!("Startup failed: {err:#}"))
+                .show();
+            event_loop.exit();
+            return;
+        }
+        let Some(id) = state.window_id() else {
+            return;
+        };
+        self.active = Some(id);
+        self.windows.insert(id, state);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let id = match &event {
+            UserEvent::PtyOutput { session, .. }
+            | UserEvent::Exited { session }
+            | UserEvent::PtyWrite { session, .. }
+            | UserEvent::Title { session, .. }
+            | UserEvent::ResetTitle { session } => match self.window_for_session(*session) {
+                Some(id) => id,
+                // The session already left every window: its reader's late
+                // event must not reach another window's parser.
+                None => return,
+            },
+            // These name no window, so they belong to the one in focus.
+            UserEvent::ClipboardStore(_)
+            | UserEvent::UpdateChecked(_)
+            | UserEvent::UpdateStaged(_) => match self.focus_target() {
+                Some(id) => id,
+                None => return,
+            },
+        };
+        let Some(state) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let outcome = state.user_event(event);
+        self.settle(event_loop, id, outcome);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Every window keeps its own blink, tooltip, and settings timers; the
+        // loop wakes for the earliest one.
+        let deadline = self
+            .windows
+            .values_mut()
+            .filter_map(|state| state.next_deadline())
+            .min();
+        match deadline {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if matches!(event, WindowEvent::Focused(true)) {
+            self.active = Some(id);
+        }
+        let Some(state) = self.windows.get_mut(&id) else {
+            // The map already dropped this window; its queued events are stale.
+            return;
+        };
+        let outcome = state.window_event(event);
+        self.settle(event_loop, id, outcome);
     }
 }
 
@@ -4475,9 +4672,9 @@ fn logical_pos_at(row: usize, visual: usize, line: &RowSnapshot, bidi: &BidiConf
 /// origin is the window padding alone; the y origin also clears the tab strip,
 /// so the two origins stay distinct here.
 ///
-/// Derived from the renderer on every use rather than cached on `App`, so the
-/// renderer stays the single source of grid geometry and a hit test cannot
-/// disagree with the pixels last drawn.
+/// Derived from the renderer on every use rather than cached on
+/// `WindowState`, so the renderer stays the single source of grid geometry and
+/// a hit test cannot disagree with the pixels last drawn.
 #[derive(Clone, Copy)]
 struct GridGeometry {
     padding: f64,
@@ -6361,9 +6558,9 @@ mod tests {
 
     #[test]
     fn a_background_title_labels_its_tab_but_not_the_window() {
-        // `App` needs a live event loop, so the routing decision is pinned
-        // through `route_title`: its first flag repaints the strip and its
-        // second renames the window.
+        // The routing decision needs no window, so it is pinned through
+        // `route_title`: its first flag repaints the strip and its second
+        // renames the window.
         let mut tabs = TabSet::new();
         let background = tabs.next_id();
         let shown = tabs.next_id();
