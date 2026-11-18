@@ -20,6 +20,9 @@ pub enum UserEvent {
     ResetTitle { session: u64 },
     /// OSC 52 asked to put text on the system clipboard.
     ClipboardStore(String),
+    /// The parser owes the application a reply (device attributes, cursor
+    /// position, cell size) or a sixel probe answer.
+    PtyWrite { session: u64, bytes: Vec<u8> },
     /// A background update check finished: `Ok(Some(tag))` when a newer
     /// release exists, `Ok(None)` when the running build is current.
     UpdateChecked(Result<Option<String>, String>),

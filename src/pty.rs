@@ -151,6 +151,28 @@ impl PtySession {
         Ok(())
     }
 
+    /// Writes a parser reply (device attributes, cursor position, cell size)
+    /// back to the application.
+    ///
+    /// The console host parses VT input and drops sequences it has no meaning
+    /// for, so replies travel as key records instead of escape sequences.
+    pub fn write_reply(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write(&encode_reply(bytes))
+    }
+
+    /// Writes one keystroke, keeping Escape unambiguous.
+    ///
+    /// A bare `ESC` byte is the start of a sequence as far as the console host's
+    /// input parser is concerned, so it holds the byte back until the next
+    /// keystroke and Escape arrives as Alt+key. A key record carries the key on
+    /// its own, so Esc closes a full-screen application's dialog as expected.
+    pub fn write_key(&mut self, bytes: &[u8]) -> Result<()> {
+        match escape_as_key_record(bytes) {
+            Some(record) => self.write(&record),
+            None => self.write(bytes),
+        }
+    }
+
     /// Tells the shell that the visible terminal area changed size.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         self.master.resize(PtySize {
@@ -232,11 +254,66 @@ fn which(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Every reply byte as a key press and release, which is the one form the
+/// console host's input parser cannot mistake for its own state.
+#[cfg(windows)]
+fn encode_reply(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() * 32);
+    for byte in bytes {
+        for key_down in [1, 0] {
+            out.extend_from_slice(format!("\x1b[0;0;{byte};{key_down};0;1_").as_bytes());
+        }
+    }
+    out
+}
+
+/// Replies pass through untouched where the pty hands bytes to the child as-is.
+#[cfg(not(windows))]
+fn encode_reply(bytes: &[u8]) -> Vec<u8> {
+    bytes.to_vec()
+}
+
+/// The key record for a lone Escape, or `None` for any other keystroke.
+#[cfg(windows)]
+fn escape_as_key_record(bytes: &[u8]) -> Option<Vec<u8>> {
+    (bytes == [0x1b]).then(|| encode_reply(bytes))
+}
+
+/// Only the Windows console host needs the key-record detour.
+#[cfg(not(windows))]
+fn escape_as_key_record(_bytes: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reply_travels_as_win32_input_records() {
+        assert_eq!(
+            encode_reply(b"A"),
+            "\x1b[0;0;65;1;0;1_\x1b[0;0;65;0;0;1_".as_bytes()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_lone_escape_travels_as_a_key_record() {
+        assert_eq!(
+            escape_as_key_record(b"\x1b"),
+            Some(b"\x1b[0;0;27;1;0;1_\x1b[0;0;27;0;0;1_".to_vec())
+        );
+        assert_eq!(escape_as_key_record(b"a"), None);
+        assert_eq!(
+            escape_as_key_record(b"\x1b\x1b"),
+            None,
+            "Alt+Esc stays a sequence"
+        );
+    }
 
     #[test]
     fn the_child_starts_in_the_requested_directory() {
