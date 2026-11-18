@@ -3,7 +3,7 @@
 use alacritty_terminal::event::Event;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::Line;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use unicode_width::UnicodeWidthStr;
@@ -183,8 +183,49 @@ fn user_event_for(session: u64, event: Event) -> Option<crate::event::UserEvent>
         Event::Title(title) => Some(crate::event::UserEvent::Title { session, title }),
         Event::ResetTitle => Some(crate::event::UserEvent::ResetTitle { session }),
         Event::ClipboardStore(_, text) => Some(crate::event::UserEvent::ClipboardStore(text)),
+        Event::PtyWrite(text) => Some(crate::event::UserEvent::PtyWrite {
+            session,
+            bytes: identify(text),
+        }),
         _ => None,
     }
+}
+
+/// Turns the parser's own answers into ones that describe Termyx.
+///
+/// alacritty identifies as a plain VT102 (`CSI ? 6 c`), which tells image-aware
+/// applications there is no way to send a picture. Attribute 4 is sixel, 6 is
+/// selective erase, and 22 is colour text.
+fn identify(text: String) -> Vec<u8> {
+    if text == "\x1b[?6c" {
+        return b"\x1b[?62;4;6;22c".to_vec();
+    }
+    text.into_bytes()
+}
+
+/// Answers xterm's window queries, which image-aware applications ask before
+/// deciding how many pixels they can send.
+///
+/// Only the exact single-parameter forms are recognised; a split across two
+/// reads is rare enough to ignore.
+fn query_replies(bytes: &[u8], size: TermSize, cell: (u32, u32)) -> Vec<Vec<u8>> {
+    let mut replies = Vec::new();
+    if cell.0 == 0 || cell.1 == 0 {
+        return replies;
+    }
+    let width = size.cols as u32 * cell.0;
+    let height = size.rows as u32 * cell.1;
+    for window in bytes.windows(5) {
+        match window {
+            b"\x1b[14t" => replies.push(format!("\x1b[4;{height};{width}t").into_bytes()),
+            b"\x1b[16t" => replies.push(format!("\x1b[6;{};{}t", cell.1, cell.0).into_bytes()),
+            b"\x1b[18t" => {
+                replies.push(format!("\x1b[8;{};{}t", size.rows, size.cols).into_bytes())
+            }
+            _ => {}
+        }
+    }
+    replies
 }
 
 impl EventListener for EventProxy {
@@ -203,10 +244,20 @@ pub struct Terminal {
     processor: Processor,
     size: TermSize,
     scrollback: usize,
-    /// Bytes held back because they end inside an OSC sequence whose terminator
-    /// has not arrived; OSC marks are only visible once the sequence is whole.
+    /// Bytes held back because they end inside an OSC or DCS sequence whose
+    /// terminator has not arrived; their content is only usable once whole.
     pending: Vec<u8>,
     input_start: Option<InputStart>,
+    /// Images the grid shows, anchored to the lines they were drawn on.
+    graphics: crate::graphics::Graphics,
+    /// Where replies to the application go, and which session owns them.
+    events: Option<(EventLoopProxy<crate::event::UserEvent>, u64)>,
+    /// Pixel size of one cell, for the window queries image-aware applications
+    /// ask before deciding how much detail they can send.
+    cell: (u32, u32),
+    /// The last position the application asked for with a cursor move, kept
+    /// because the parser's own cursor can lag behind a large image transfer.
+    cursor_hint: Option<(i32, usize)>,
 }
 
 /// Past this many held-back bytes the buffer is handed to the parser and our
@@ -214,6 +265,10 @@ pub struct Terminal {
 /// never gets its terminator. The parser then owns those bytes, as it does for
 /// any OSC sequence.
 const MAX_PENDING: usize = 4096;
+
+/// A DCS carrying an image is far larger than an OSC, and its bytes are useless
+/// until the terminator arrives, so it gets its own, much higher ceiling.
+const MAX_DCS_PENDING: usize = 8 * 1024 * 1024;
 
 impl Terminal {
     /// Test-only constructor: no event bridge, no window to notify.
@@ -250,7 +305,13 @@ impl Terminal {
             },
             ..TermConfig::default()
         };
-        let term = Term::new(config, &size, EventProxy { events });
+        let term = Term::new(
+            config,
+            &size,
+            EventProxy {
+                events: events.clone(),
+            },
+        );
         Self {
             term,
             processor: Processor::new(),
@@ -258,7 +319,22 @@ impl Terminal {
             scrollback,
             pending: Vec::new(),
             input_start: None,
+            graphics: crate::graphics::Graphics::default(),
+            events,
+            cell: (0, 0),
+            cursor_hint: None,
         }
+    }
+
+    /// The pixel size of one cell, so the window queries we answer carry real
+    /// numbers instead of zeros.
+    pub fn set_cell_size(&mut self, width: u32, height: u32) {
+        self.cell = (width, height);
+    }
+
+    /// Images the renderer should paint under the text, newest last.
+    pub fn images(&self) -> &[crate::graphics::Placement] {
+        self.graphics.placements()
     }
 
     /// Feed raw PTY bytes to the VT parser.
@@ -274,11 +350,23 @@ impl Terminal {
     /// scroll and drops the selection.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         let before = self.term.grid().total_lines();
+        let alternate = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let replies = query_replies(bytes, self.size, self.cell);
+        if bytes
+            .windows(4)
+            .any(|window| window == b"\x1b[2J" || window == b"\x1b[3J")
+        {
+            // The screen the images were painted on is gone.
+            self.graphics.clear();
+            self.cursor_hint = None;
+        }
         self.pending.extend_from_slice(bytes);
         let mut consumed = 0usize;
+        let mut held = None;
 
         while consumed < self.pending.len() {
-            let Some(scan) = find_osc(&self.pending[consumed..]) else {
+            let Some(scan) = find_sequence(&self.pending[consumed..]) else {
+                track_cursor(&self.pending[consumed..], &mut self.cursor_hint);
                 self.processor
                     .advance(&mut self.term, &self.pending[consumed..]);
                 consumed = self.pending.len();
@@ -286,33 +374,155 @@ impl Terminal {
             };
             let start = consumed + scan.offset;
             if scan.offset > 0 {
+                track_cursor(&self.pending[consumed..start], &mut self.cursor_hint);
                 self.processor
                     .advance(&mut self.term, &self.pending[consumed..start]);
             }
             let Some(len) = scan.len else {
-                // The tail is an OSC without its terminator yet, or a lone ESC
-                // that may still open one. Keep it until the rest arrives.
+                // The tail opens a sequence without its terminator yet, or is a
+                // lone ESC that may still open one. Keep it until the rest
+                // arrives.
+                held = Some(scan.kind);
                 consumed = start;
                 break;
             };
 
-            let mark = osc_mark(&self.pending[start..start + len]);
-            // Forward the sequence unchanged; the parser ignores OSC 133.
-            self.processor
-                .advance(&mut self.term, &self.pending[start..start + len]);
-            self.apply_mark(mark);
+            match scan.kind {
+                SequenceKind::Osc => {
+                    let mark = osc_mark(&self.pending[start..start + len]);
+                    // Forward the sequence unchanged; the parser ignores OSC 133.
+                    self.processor
+                        .advance(&mut self.term, &self.pending[start..start + len]);
+                    self.apply_mark(mark);
+                }
+                SequenceKind::Dcs => {
+                    let payload = self.pending[start + 2..start + len - 2].to_vec();
+                    self.draw_sixel(&payload);
+                }
+                // Private strings carry data no application here needs, and the
+                // parser would swallow the rest of the stream waiting for their
+                // terminator.
+                SequenceKind::String => {}
+            }
             consumed = start + len;
         }
 
         self.pending.drain(..consumed);
 
-        if self.pending.len() > MAX_PENDING {
+        let cap = match held {
+            Some(SequenceKind::Dcs) => MAX_DCS_PENDING,
+            _ => MAX_PENDING,
+        };
+        if self.pending.len() > cap {
             let rest = std::mem::take(&mut self.pending);
+            track_cursor(&rest, &mut self.cursor_hint);
             self.processor.advance(&mut self.term, &rest);
         }
 
+        // Images belong to the grid that drew them: a screen swap, a resize, or
+        // a cleared screen leaves them anchored to lines that no longer mean
+        // the same thing.
+        if alternate != self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.graphics.clear();
+            self.cursor_hint = None;
+        }
+
+        for reply in replies {
+            self.reply(reply);
+        }
+
+        // An application takes a picture back by drawing text over it, and
+        // keeps one on screen by leaving its cells blank.
+        let snapshot: Vec<(i32, usize, u32, u32)> = self
+            .graphics
+            .placements()
+            .iter()
+            .map(|placement| {
+                (
+                    placement.line,
+                    placement.col,
+                    placement.image.width,
+                    placement.image.height,
+                )
+            })
+            .collect();
+        let regions: Vec<(i32, usize, bool)> = snapshot
+            .into_iter()
+            .map(|(line, col, width, height)| (line, col, self.blank(line, col, width, height)))
+            .collect();
+        self.graphics.retain_blank(&regions);
+
         let after = self.term.grid().total_lines();
         after != before || before >= self.size.total_lines
+    }
+
+    /// Whether the cells under an image at `line`/`col` hold nothing but
+    /// blanks: an application leaves them blank while the picture is on
+    /// screen, and draws text there to take it back.
+    fn blank(&self, line: i32, col: usize, width: u32, height: u32) -> bool {
+        let cell_w = self.cell.0.max(1);
+        let cell_h = self.cell.1.max(1);
+        let cols = width.div_ceil(cell_w) as usize;
+        let rows = height.div_ceil(cell_h) as i32;
+        let grid = self.term.grid();
+        for row in 0..rows {
+            let y = line + row;
+            if y < 0 || y as usize >= self.size.rows {
+                continue;
+            }
+            for column in col..(col + cols).min(self.size.cols) {
+                if grid[Line(y)][Column(column)].c != ' ' {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Draws a sixel image at the cursor and ignores other DCS strings.
+    fn draw_sixel(&mut self, payload: &[u8]) {
+        let Some(start) = payload.iter().position(|byte| *byte == b'q') else {
+            return;
+        };
+        let params = &payload[..start];
+        if !params
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b';')
+        {
+            return;
+        }
+        let Some(image) = crate::sixel::decode(&payload[start + 1..]) else {
+            return;
+        };
+        let point = self.term.grid().cursor.point;
+        // The cursor the parser reports can lag behind the stream, so the last
+        // explicit position the application wrote wins when we saw one.
+        let (line, col) = self
+            .cursor_hint
+            .take()
+            .unwrap_or((point.line.0, point.column.0));
+        tracing::debug!(
+            width = image.width,
+            height = image.height,
+            line,
+            col,
+            "sixel image drawn"
+        );
+        let blank = self.blank(line, col, image.width, image.height);
+        self.graphics
+            .place(image, crate::graphics::Origin { line, col }, blank);
+    }
+
+    /// Hands bytes back to the application that asked the question.
+    fn reply(&self, bytes: Vec<u8>) {
+        let Some((proxy, session)) = &self.events else {
+            return;
+        };
+        tracing::debug!(bytes = bytes.len(), "pty reply queued");
+        let _ = proxy.send_event(crate::event::UserEvent::PtyWrite {
+            session: *session,
+            bytes,
+        });
     }
 
     /// Records an OSC 133 mark that has just been forwarded to the parser.
@@ -369,6 +579,8 @@ impl Terminal {
             total_lines: rows + self.scrollback,
         };
         self.term.resize(self.size);
+        // Every image is anchored to a cell that just moved.
+        self.graphics.clear();
     }
 
     pub fn mode(&self) -> TermMode {
@@ -680,19 +892,76 @@ fn osc_mark(sequence: &[u8]) -> Option<PromptMark> {
     }
 }
 
-/// Where the next OSC sequence sits inside `bytes`.
-struct OscScan {
+/// Remembers the last `CSI row;colH` in `bytes`, so an image can be anchored
+/// where the application asked for it even when the parser falls behind.
+fn track_cursor(bytes: &[u8], hint: &mut Option<(i32, usize)>) {
+    let mut index = 0usize;
+    while let Some(found) = bytes[index..]
+        .windows(2)
+        .position(|window| window == b"\x1b[")
+    {
+        let start = index + found + 2;
+        let mut cursor = start;
+        let mut numbers: Vec<usize> = Vec::new();
+        let mut value = 0usize;
+        let mut digits = false;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                digit @ b'0'..=b'9' => {
+                    value = value
+                        .saturating_mul(10)
+                        .saturating_add((digit - b'0') as usize);
+                    digits = true;
+                    cursor += 1;
+                }
+                b';' => {
+                    numbers.push(value);
+                    value = 0;
+                    digits = false;
+                    cursor += 1;
+                }
+                _ => break,
+            }
+        }
+        if digits {
+            numbers.push(value);
+        }
+        if !numbers.is_empty() && matches!(bytes.get(cursor), Some(b'H' | b'f')) {
+            let row = numbers[0].max(1);
+            let col = numbers.get(1).copied().unwrap_or(1).max(1);
+            *hint = Some((row as i32 - 1, col - 1));
+        }
+        index = start;
+    }
+}
+
+/// Where the next string sequence sits inside `bytes`.
+struct SequenceScan {
     /// Bytes before the sequence.
     offset: usize,
+    /// Which string introducer opened it.
+    kind: SequenceKind,
     /// Length of the whole sequence including both delimiters, or `None` when
     /// the sequence has not been terminated yet.
     len: Option<usize>,
 }
 
-/// Finds the next OSC sequence, stopping at the first unterminated one so its
-/// bytes can be held back. A trailing lone `ESC` also reports as unterminated:
-/// the next chunk may complete it into an OSC.
-fn find_osc(bytes: &[u8]) -> Option<OscScan> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SequenceKind {
+    /// `ESC ]` … `BEL` or `ST`; OSC 133 prompt marks live here.
+    Osc,
+    /// `ESC P` … `ST`; sixel images arrive this way.
+    Dcs,
+    /// `ESC _` (APC), `ESC ^` (PM) or `ESC X` (SOS); no application here needs
+    /// their payload, and the parser would swallow the rest of the stream
+    /// waiting for a terminator that never comes.
+    String,
+}
+
+/// Finds the next OSC or DCS sequence, stopping at the first unterminated one so
+/// its bytes can be held back. A trailing lone `ESC` also reports as
+/// unterminated: the next chunk may complete it into a sequence.
+fn find_sequence(bytes: &[u8]) -> Option<SequenceScan> {
     let mut index = 0usize;
     while index < bytes.len() {
         if bytes[index] != 0x1b {
@@ -700,34 +969,43 @@ fn find_osc(bytes: &[u8]) -> Option<OscScan> {
             continue;
         }
         if index + 1 == bytes.len() {
-            return Some(OscScan {
+            return Some(SequenceScan {
                 offset: index,
+                kind: SequenceKind::Osc,
                 len: None,
             });
         }
-        if bytes[index + 1] != b']' {
-            index += 1;
-            continue;
-        }
+        let kind = match bytes[index + 1] {
+            b']' => SequenceKind::Osc,
+            b'P' => SequenceKind::Dcs,
+            b'_' | b'^' | b'X' => SequenceKind::String,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
 
         let mut cursor = index + 2;
         while cursor < bytes.len() {
-            if bytes[cursor] == 0x07 {
-                return Some(OscScan {
+            if bytes[cursor] == 0x07 && kind == SequenceKind::Osc {
+                return Some(SequenceScan {
                     offset: index,
+                    kind,
                     len: Some(cursor + 1 - index),
                 });
             }
             if bytes[cursor] == 0x1b && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'\\' {
-                return Some(OscScan {
+                return Some(SequenceScan {
                     offset: index,
+                    kind,
                     len: Some(cursor + 2 - index),
                 });
             }
             cursor += 1;
         }
-        return Some(OscScan {
+        return Some(SequenceScan {
             offset: index,
+            kind,
             len: None,
         });
     }
@@ -830,6 +1108,45 @@ mod tests {
 
     fn terminal(cols: usize, rows: usize, scrollback: usize) -> Terminal {
         Terminal::new(cols, rows, scrollback)
+    }
+
+    #[test]
+    fn the_cursor_tracker_keeps_the_last_move() {
+        let mut hint = None;
+        track_cursor(b"a\x1b[3;4Hb\x1b[12;11H", &mut hint);
+        assert_eq!(hint, Some((11, 10)));
+        track_cursor(b"plain text", &mut hint);
+        assert_eq!(hint, Some((11, 10)), "text alone leaves the hint");
+    }
+
+    #[test]
+    fn an_image_anchors_on_the_cursor_move_before_it() {
+        let mut term = terminal(20, 10, 1_000);
+        term.feed(b"\x1b[3;4H\x1bP0;1;0q\"1;1;1;1#0;2;100;0;0#0@\x1b\\");
+        let images = term.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].line, 2);
+        assert_eq!(images[0].col, 3);
+    }
+
+    #[test]
+    fn a_blank_repaint_keeps_the_image_and_text_takes_it_back() {
+        let mut term = terminal(20, 10, 1_000);
+        term.feed(b"\x1b[3;4H\x1bP0;1;0q\"1;1;1;1#0;2;100;0;0#0@\x1b\\");
+        assert_eq!(term.images().len(), 1);
+        term.feed(b"\x1b[?2026h\x1b[?2026l");
+        assert_eq!(term.images().len(), 1, "a blank frame keeps the picture");
+        term.feed(b"\x1b[3;4Htext");
+        assert!(term.images().is_empty(), "text takes it back");
+    }
+
+    #[test]
+    fn text_painted_over_an_image_removes_it() {
+        let mut term = terminal(20, 10, 1_000);
+        term.feed(b"\x1b[3;4H\x1bP0;1;0q\"1;1;1;1#0;2;100;0;0#0@\x1b\\");
+        assert_eq!(term.images().len(), 1);
+        term.feed(b"\x1b[3;4Htranscript");
+        assert!(term.images().is_empty());
     }
 
     #[test]
