@@ -269,6 +269,12 @@ function Install-Files {
     New-Item -ItemType Directory -Force -Path $script:installDir | Out-Null
     Copy-Item -LiteralPath $script:sourceExe -Destination (Get-InstalledExe) -Force
 
+    # The console host beside the app forwards graphics sequences from the
+    # child; the one in the OS drops them.
+    foreach ($name in @('conpty.dll', 'OpenConsole.exe')) {
+        Copy-SetupFile -Name $name -Destination (Join-Path $script:installDir $name)
+    }
+
     # Keep the setup script beside the app so Uninstall can run later without
     # the original download.
     $setupDir = Join-Path $script:installDir 'setup'

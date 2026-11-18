@@ -50,7 +50,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'termyx-stage'
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -Path 'installer\setup.ps1', 'installer\setup.cmd', 'installer\path.ps1' -Destination $stage
-          Copy-Item -Path 'target\release\termyx.exe', 'README.md' -Destination $stage
+          Copy-Item -Path 'target\release\termyx.exe', 'assets\conpty\x64\conpty.dll', 'assets\conpty\x64\OpenConsole.exe', 'README.md' -Destination $stage
           $powershell = Join-Path $stage 'powershell'
           New-Item -ItemType Directory -Path (Join-Path $powershell 'tools') -Force | Out-Null
           Copy-Item 'shell\powershell\Termyx' (Join-Path $powershell 'Termyx') -Recurse
@@ -60,7 +60,7 @@ jobs:
       - name: Package portable build
         shell: pwsh
         run: |
-          Compress-Archive -Path "target\release\termyx.exe", "README.md" `
+          Compress-Archive -Path "target\release\termyx.exe", "assets\conpty\x64\conpty.dll", "assets\conpty\x64\OpenConsole.exe", "README.md" `
             -DestinationPath "dist\Termyx-${{ steps.version.outputs.version }}-portable.zip" -Force
 
       - name: Write checksums
