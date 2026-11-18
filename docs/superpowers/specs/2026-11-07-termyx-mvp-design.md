@@ -14,7 +14,7 @@
 
 ## 1. Summary
 
-Termyx is a fast, lightweight, standalone terminal emulator with first-class RTL support. The MVP is a **single window with a single shell session** that renders Arabic, Persian, and Urdu correctly: joined glyphs, UAX #9 visual ordering, and a caret, selection, and clipboard that operate on logical text.
+Termyx is a fast, lightweight, standalone terminal emulator with first-class RTL support. The MVP is **one window with tabs, one shell session per tab** (a tab can move to its own window or into another window) that renders Arabic, Persian, and Urdu correctly: joined glyphs, UAX #9 visual ordering, and a caret, selection, and clipboard that operate on logical text.
 
 RTL is not a display flag. The grid stays in logical (write) order at all times; a per-row `VisualMap` converts logical cells to visual cells at render time, and every interaction path (cursor, hit-testing, selection, copy) goes through that map. Phase 1 ships the same architecture with an identity map, so Phase 2 replaces an algorithm rather than a codebase.
 

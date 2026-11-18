@@ -3,8 +3,8 @@
 ## Project
 
 Native, cross-platform terminal emulator in Rust with first-class RTL support
-(UAX#9 bidi + Arabic/Persian/Urdu shaping). The MVP is one window, one shell,
-and a correct LTR terminal first; RTL is Phase 2.
+(UAX#9 bidi + Arabic/Persian/Urdu shaping). The MVP is one window with tabs,
+one shell per tab, and a correct LTR terminal first; RTL is Phase 2.
 
 Authoritative documents — read both before changing code:
 
@@ -50,12 +50,14 @@ If a request conflicts with them, ask before drifting.
   wide-character continuation. Keep the fixed grid aligned.
 - PTY output is fed to the VT parser verbatim. The ConPTY child uses UTF-8
   (code page 65001) and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
-- The UI thread owns the window, renderer, terminal, and interaction state.
-  There is one PTY reader thread.
+- The UI thread owns every window, renderer, terminal, and interaction state.
+  Each session has one PTY reader thread.
 
 ## Current scope (Phases 0–2 + Batches 1–3)
 
-In: one window, one shell session, bidi/RTL rendering with Arabic shaping and
+In: windows with tabs, one shell session per tab, drag-to-reorder, moving a tab
+into its own window, dropping a dragged tab into another window's strip,
+bidi/RTL rendering with Arabic shaping and
 run-level continuous layout, Arial as the default Arabic face (bundled Kawkab
 Mono is opt-in), scrollback with a draggable scrollbar, resize, word/line/block
 selection, copy-on-select, right- and middle-click paste, plain Ctrl+V paste
