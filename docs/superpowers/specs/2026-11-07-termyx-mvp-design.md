@@ -35,7 +35,9 @@ Everything beyond the MVP — tabs, splits, profiles, search, command palette, a
 - Tabs, splits, panes, profiles, session restore.
 - Command palette, in-terminal search, hot config reload.
 - AI features. Only a no-op output tap point is reserved.
-- Sixel/kitty/iTerm image protocols.
+- Kitty graphics and the iTerm image protocol. Sixel landed after the MVP and
+  is the supported image protocol; the others stay out until an application
+  needs them.
 - Programming ligatures (`=>`, `!=`).
 - Full IME preedit UI. Committed IME text is supported; a preedit overlay is Phase 3+.
 - Application mouse reporting (SGR mouse). Local selection and wheel scrolling only in MVP; mouse forwarding is Phase 3.

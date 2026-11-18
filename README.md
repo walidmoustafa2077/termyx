@@ -298,6 +298,12 @@ bracketed paste, and DEC modes.
   not from OSC 104/110; an empty OSC title restores the default title.
 - **OSC 52**: copy-only clipboard storage; OSC 52 read requests are refused.
   Local `Ctrl+Shift+V` paste works.
+- **Images**: sixel (`DCS q … ST`) — colour registers, repeat counts, band
+  breaks, and raster attributes — drawn at their grid anchor, scaled one image
+  pixel per terminal pixel. Device attributes advertise sixel, and the
+  `CSI 14/16/18 t` size queries are answered so applications can pick it. The
+  console host that ships with Windows Terminal is staged next to the
+  executable, because the one built into the OS drops these sequences.
 - **IME**: committed text is sent to the shell; there is no preedit overlay.
 
 ## Experimental: scrollbar
