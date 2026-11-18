@@ -24,7 +24,7 @@ use crate::term::{Color, CursorShape, GridSnapshot, RowSnapshot, Style};
 use crate::theme::{Rgb, Theme};
 use crate::ui::tab_bar::{
     Rect, StripHover, TabBarLayout, TAB_ICON_GAP, TAB_ICON_INSET, TAB_ICON_SIZE, TAB_RADIUS,
-    TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TITLE_SIZE,
+    TAB_STRIP_HEIGHT, TAB_TITLE_SIZE, TAB_TOP_INSET, TITLE_SIZE,
 };
 use crate::visual::VisualMap;
 use atlas::Atlas;
@@ -47,6 +47,8 @@ pub struct Renderer {
     shape_warned: bool,
     /// Whether the pointer is over the scrollbar, which widens its thumb.
     scrollbar_hover: bool,
+    /// Where a dragged tab would land, drawn as a line in the strip.
+    strip_insertion: Option<usize>,
     /// Whether the window is maximised, which swaps the caption's maximise
     /// glyph for the restore glyph. The app reads this from the live window
     /// before each frame because the WM can maximise it without a click.
@@ -218,6 +220,7 @@ impl Renderer {
             shape_cache: shape::ShapeCache::new(),
             shape_warned: false,
             scrollbar_hover: false,
+            strip_insertion: None,
             maximized: false,
             app_icon: crate::icon::app_icon(),
         })
@@ -460,6 +463,30 @@ impl Renderer {
         // erase it, and the rule (already down) cannot cut through a control.
         self.draw_caption_buttons(layout, hover);
         self.draw_titles(layout, active, colors, hover);
+        self.draw_strip_insertion(layout);
+    }
+
+    /// The accent line that marks where a dragged tab would land.
+    ///
+    /// The line sits on the slot's leading edge, so it reads as the gap the tab
+    /// opens; past the last tab it sits on the trailing edge instead.
+    fn draw_strip_insertion(&mut self, layout: &TabBarLayout) {
+        let Some(index) = self.strip_insertion else {
+            return;
+        };
+        let k = layout.strip_h / TAB_STRIP_HEIGHT;
+        let x = match layout.tabs.get(index) {
+            Some(tab) => tab.body.x,
+            None => {
+                let Some(last) = layout.tabs.last() else {
+                    return;
+                };
+                last.body.x + last.body.w
+            }
+        };
+        let top = TAB_TOP_INSET * k;
+        let height = (layout.strip_h - 2.0 * top).max(1.0);
+        self.fill_rect(x - k, top, 2.0 * k, height, self.theme.cursor);
     }
 
     /// The reserved band is chrome, not grid: it gets its own colour across
@@ -1376,6 +1403,11 @@ impl Renderer {
     /// distinction is a glyph, not a colour, so only the painter needs it.
     pub fn set_maximized(&mut self, maximized: bool) {
         self.maximized = maximized;
+    }
+
+    /// Marks where a dragged tab would land, or `None` when nothing is dragged.
+    pub fn set_strip_insertion(&mut self, index: Option<usize>) {
+        self.strip_insertion = index;
     }
 }
 

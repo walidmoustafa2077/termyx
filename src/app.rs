@@ -47,7 +47,7 @@ use crate::ui::spellcheck_menu::{
     MenuItem as SpellcheckItem, SpellcheckMenu, SpellcheckMenuLayout,
 };
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
-use crate::ui::tab_drag::TabDrag;
+use crate::ui::tab_drag::{resolve_drop, DropTarget, DropZone, TabDrag};
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
 
@@ -177,6 +177,11 @@ struct WindowState {
     last_strip_click: StripClickChain,
     /// A tab the mouse is dragging across the strip.
     tab_drag: Option<TabDrag>,
+    /// Where a dragged tab would land, while it hovers another window.
+    strip_insertion: Option<usize>,
+    /// The tab the mouse released outside this window, waiting for the event
+    /// loop owner to place it.
+    drop: Option<SessionId>,
     // Button forwarded to a mouse-reporting application, if any. Local text
     // selection uses `mouse_down` instead.
     app_mouse_button: Option<input::MouseButton>,
@@ -310,8 +315,19 @@ impl App {
             .get_mut(&id)
             .and_then(|state| state.pending.take());
         if let Some(session) = moved {
-            if !self.open_moved_window(event_loop, id, session) {
+            if !self.open_moved_window(event_loop, id, session, None) {
                 // The tab is back in the source, so the source still has work.
+                outcome = WindowOutcome::Keep;
+            }
+        }
+        // A release that left the window is placed only now: the drop needs the
+        // source's place on screen, and it may take the source's last tab.
+        let dropped = self
+            .windows
+            .get_mut(&id)
+            .and_then(|state| state.drop.take());
+        if let Some(session) = dropped {
+            if !self.place_dropped(event_loop, id, session) {
                 outcome = WindowOutcome::Keep;
             }
         }
@@ -335,8 +351,156 @@ impl App {
         }
     }
 
+    /// Where the pointer is on screen, in physical pixels.
+    ///
+    /// A window's recorded cursor is client-relative, and winit keeps sending
+    /// motion to the window that captured the press, so adding that window's
+    /// place on screen turns the two into a screen point.
+    fn global_pointer(&self, source: WindowId) -> Option<(i32, i32)> {
+        let state = self.windows.get(&source)?;
+        let origin = state.window.as_ref()?.inner_position().ok()?;
+        Some((
+            origin.x + state.cursor_pos.0.round() as i32,
+            origin.y + state.cursor_pos.1.round() as i32,
+        ))
+    }
+
+    /// Every window a dragged tab could land in, in screen pixels.
+    fn drop_zones(&self) -> Vec<DropZone<WindowId>> {
+        self.windows
+            .iter()
+            .filter_map(|(id, state)| {
+                let window = state.window.as_ref()?;
+                let layout = state.layout.as_ref()?;
+                let origin = window.inner_position().ok()?;
+                let size = window.inner_size();
+                let centers = layout
+                    .tabs
+                    .iter()
+                    .map(|tab| origin.x as f32 + tab.body.x + tab.body.w * 0.5)
+                    .collect();
+                Some(DropZone {
+                    id: *id,
+                    origin: (origin.x, origin.y),
+                    size: (size.width, size.height),
+                    strip_h: layout.strip_h,
+                    centers,
+                })
+            })
+            .collect()
+    }
+
+    /// What a release would do for a tab dragged out of `source`.
+    fn drop_target(&self, source: WindowId) -> Option<DropTarget<WindowId>> {
+        let pointer = self.global_pointer(source)?;
+        Some(resolve_drop(pointer, source, &self.drop_zones()))
+    }
+
+    /// Places `session`, which `source` released at the pointer.
+    ///
+    /// Returns whether the tab found a home. A release back in the source keeps
+    /// the order the live preview already shows; a release over another
+    /// window's grid is refused; a release outside every window opens one.
+    fn place_dropped(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        source: WindowId,
+        session: SessionId,
+    ) -> bool {
+        match self.drop_target(source) {
+            Some(DropTarget::Window(target, index)) if self.windows.contains_key(&target) => {
+                let Some(session) = self.give_up(source, session) else {
+                    return false;
+                };
+                if let Some(state) = self.windows.get_mut(&target) {
+                    state.adopt_session(session, Some(index));
+                    if let Some(window) = &state.window {
+                        window.focus_window();
+                    }
+                }
+                self.active = Some(target);
+                self.close_if_empty(source);
+                true
+            }
+            Some(DropTarget::Detach) => {
+                let position = self
+                    .global_pointer(source)
+                    .map(|(x, y)| PhysicalPosition::new(x - CASCADE_OFFSET, y - CASCADE_OFFSET));
+                let Some(session) = self.give_up(source, session) else {
+                    return false;
+                };
+                if self.open_moved_window(event_loop, source, session, position) {
+                    self.close_if_empty(source);
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Takes `session` out of `source`'s strip, ready for another window.
+    fn give_up(&mut self, source: WindowId, session: SessionId) -> Option<Session> {
+        let state = self.windows.get_mut(&source)?;
+        let index = state.tabs.position(session)?;
+        let session = state.tabs.remove(index)?;
+        state.rebuild_layout();
+        if let Some(window) = &state.window {
+            window.request_redraw();
+        }
+        Some(session)
+    }
+
+    /// Drops a window that gave its last tab away.
+    fn close_if_empty(&mut self, id: WindowId) {
+        if !self
+            .windows
+            .get(&id)
+            .is_some_and(|state| state.tabs.is_empty())
+        {
+            return;
+        }
+        self.windows.remove(&id);
+        if self.active == Some(id) {
+            self.active = self.windows.keys().next().copied();
+        }
+    }
+
+    /// Marks, on the window it hovers, where a dragged tab would land.
+    ///
+    /// Runs after every event of the dragging window, which is the only window
+    /// that receives motion while the press is held.
+    fn preview_drop(&mut self, source: WindowId) {
+        let dragging = self
+            .windows
+            .get(&source)
+            .is_some_and(|state| state.tab_drag.is_some());
+        let landing = if dragging {
+            match self.drop_target(source) {
+                Some(DropTarget::Window(target, index)) => Some((target, index)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        for (id, state) in self.windows.iter_mut() {
+            let wanted = match landing {
+                Some((target, index)) if target == *id => Some(index),
+                _ => None,
+            };
+            if state.strip_insertion == wanted {
+                continue;
+            }
+            state.strip_insertion = wanted;
+            if let Some(window) = &state.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Opens a window that shows `session`, which the window `source` gave up.
     ///
+    /// `position` places the frame on screen; `None` cascades from the source.
     /// Returns whether a window was opened. A failure puts the session back in
     /// `source`, so a tab never disappears with its shell still running.
     fn open_moved_window(
@@ -344,15 +508,18 @@ impl App {
         event_loop: &ActiveEventLoop,
         source: WindowId,
         session: Session,
+        position: Option<PhysicalPosition<i32>>,
     ) -> bool {
         let (config, placement) = {
             let Some(from) = self.windows.get(&source) else {
                 return false;
             };
             let window = from.window.as_ref();
-            let position = window
-                .and_then(|window| window.inner_position().ok())
-                .map(|p| PhysicalPosition::new(p.x + CASCADE_OFFSET, p.y + CASCADE_OFFSET));
+            let position = position.or_else(|| {
+                window
+                    .and_then(|window| window.inner_position().ok())
+                    .map(|p| PhysicalPosition::new(p.x + CASCADE_OFFSET, p.y + CASCADE_OFFSET))
+            });
             let size = window
                 .map(|window| window.inner_size())
                 .filter(|size| size.width > 0 && size.height > 0);
@@ -369,7 +536,7 @@ impl App {
         if let Err(err) = state.create_window(event_loop, placement, &mut seed) {
             tracing::warn!(%err, "could not open the moved tab in a new window");
             if let (Some(session), Some(from)) = (seed, self.windows.get_mut(&source)) {
-                from.restore_session(session);
+                from.adopt_session(session, None);
             }
             return false;
         }
@@ -427,6 +594,8 @@ impl WindowState {
             last_click: None,
             last_strip_click: None,
             tab_drag: None,
+            strip_insertion: None,
+            drop: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
             scrollbar_drag: false,
@@ -990,16 +1159,8 @@ impl WindowState {
         self.cols = cols;
         self.rows = rows;
 
-        if let Some(mut moved) = session.take() {
-            // The tab keeps its parser, scrollback, and child; only its grid
-            // and cell metrics belong to the window it now lives in.
-            if let Some(renderer) = self.renderer.as_ref() {
-                let (cell_w, cell_h) = (renderer.fonts().cell_w, renderer.fonts().cell_h);
-                moved.terminal.set_cell_size(cell_w, cell_h);
-            }
-            moved.resize(cols, rows);
-            self.tabs.push(moved);
-            self.rebuild_layout();
+        if let Some(moved) = session.take() {
+            self.adopt_session(moved, None);
         } else {
             // The first tab opens the config's default profile, so a bare launch
             // and a new tab started from the `+` button agree.
@@ -1140,23 +1301,36 @@ impl WindowState {
         });
     }
 
-    /// Opens `profile` in a new tab and shows it.
+    /// Shows `session`, which arrived from another window, fitted to this grid.
     ///
-    /// A failed spawn leaves the window as it was; the caller decides whether
-    /// that is fatal (the first tab) or a warning (a later click). The returned
-    /// id names the session so a duplicate can copy its metadata.
-    /// Puts a tab back after the window opened for it could not be created.
-    ///
-    /// The source window is still open and never hid its grid, so restoring the
-    /// tab only needs a new layout; the shell kept running throughout.
-    fn restore_session(&mut self, session: Session) {
-        self.tabs.push(session);
+    /// `index` places it among this window's tabs; `None` appends it.
+    fn adopt_session(&mut self, mut session: Session, index: Option<usize>) {
+        // The tab keeps its parser, scrollback, and child; only its grid and
+        // cell metrics belong to the window it now lives in.
+        if let Some(renderer) = self.renderer.as_ref() {
+            let (cell_w, cell_h) = (renderer.fonts().cell_w, renderer.fonts().cell_h);
+            session.terminal.set_cell_size(cell_w, cell_h);
+        }
+        session.resize(self.cols, self.rows);
+        match index {
+            Some(index) => {
+                self.tabs.insert_active(index, session);
+            }
+            None => {
+                self.tabs.push(session);
+            }
+        }
         self.rebuild_layout();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 
+    /// Opens `profile` in a new tab and shows it.
+    ///
+    /// A failed spawn leaves the window as it was; the caller decides whether
+    /// that is fatal (the first tab) or a warning (a later click). The returned
+    /// id names the session so a duplicate can copy its metadata.
     fn new_tab(&mut self, profile: usize) -> anyhow::Result<SessionId> {
         let profiles = crate::profiles::profiles(&self.config);
         if profiles.is_empty() {
@@ -1497,6 +1671,7 @@ impl WindowState {
                 .to_string();
             Some((index, current))
         });
+        let strip_insertion = self.strip_insertion;
         let (Some(renderer), Some(surface)) = (&mut self.renderer, &mut self.surface) else {
             return;
         };
@@ -1544,6 +1719,7 @@ impl WindowState {
             .map(|menu| menu_anchor(renderer, menu, maps.get(menu.row)));
         renderer.set_scrollbar_hover(scrollbar_hover);
         renderer.set_maximized(maximized);
+        renderer.set_strip_insertion(strip_insertion);
         renderer.draw_with_spellcheck(
             &snapshot,
             &maps,
@@ -3275,9 +3451,14 @@ impl WindowState {
             // Any release ends the press, so the chrome's claim on it dies here
             // whichever branch handles the event.
             let from_chrome = std::mem::take(&mut self.press_in_chrome);
-            // The release that ends the press ends any drag it started.
+            // A release ends the gesture; a drag that left the click behind is
+            // the owner's to place, because only it sees every window.
             if button == MouseButton::Left {
-                self.tab_drag = None;
+                if let Some(drag) = self.tab_drag.take() {
+                    if drag.active {
+                        self.drop = Some(drag.session);
+                    }
+                }
             }
             if self.scrollbar_drag && button == MouseButton::Left {
                 self.scrollbar_drag = false;
@@ -4587,6 +4768,9 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let outcome = state.window_event(event);
         self.settle(event_loop, id, outcome);
+        // The drag preview needs every window's place on screen, so it is
+        // refreshed once the event has been fully applied.
+        self.preview_drop(id);
     }
 }
 

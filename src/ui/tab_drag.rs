@@ -41,9 +41,128 @@ impl TabDrag {
     }
 }
 
+/// One window a dragged tab could land in, in physical screen pixels.
+#[derive(Debug, Clone)]
+pub struct DropZone<Id> {
+    /// The window this zone describes.
+    pub id: Id,
+    /// The client area's top-left corner on screen.
+    pub origin: (i32, i32),
+    /// The client area's size.
+    pub size: (u32, u32),
+    /// Painted height of the tab strip at the top of the client area.
+    pub strip_h: f32,
+    /// Tab midpoints down the strip, in screen pixels.
+    pub centers: Vec<f32>,
+}
+
+impl<Id> DropZone<Id> {
+    /// Whether `pointer` is inside this window's client area.
+    pub fn holds(&self, pointer: (i32, i32)) -> bool {
+        let (x, y) = pointer;
+        let (left, top) = self.origin;
+        x >= left && y >= top && x < left + self.size.0 as i32 && y < top + self.size.1 as i32
+    }
+
+    /// The slot a tab dropped here takes: the number of tab midpoints left of
+    /// the pointer, which `TabSet` clamps like any other insertion index.
+    pub fn drop_index(&self, x: i32) -> usize {
+        self.centers
+            .iter()
+            .filter(|center| **center < x as f32)
+            .count()
+    }
+}
+
+/// What a released tab does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropTarget<Id> {
+    /// Back into the strip the drag started from; the live preview has already
+    /// put it where the pointer left it.
+    Source,
+    /// Another window's strip, at this slot.
+    Window(Id, usize),
+    /// A window where the pointer was released, because it is over no Termyx
+    /// window at all.
+    Detach,
+    /// Over another window but off its strip, where a tab cannot land.
+    Cancel,
+}
+
+/// Decides what a release at `pointer` means for a tab dragged out of `source`.
+///
+/// Only a strip accepts a tab: releasing over another window's grid must not
+/// bury that window under a new one, so that case cancels. A release over no
+/// window is a deliberate drop on the desktop and detaches.
+pub fn resolve_drop<Id: Copy + PartialEq>(
+    pointer: (i32, i32),
+    source: Id,
+    zones: &[DropZone<Id>],
+) -> DropTarget<Id> {
+    let Some(zone) = zones.iter().find(|zone| zone.holds(pointer)) else {
+        return DropTarget::Detach;
+    };
+    if zone.id == source {
+        return DropTarget::Source;
+    }
+    if (pointer.1 - zone.origin.1) as f32 >= zone.strip_h {
+        return DropTarget::Cancel;
+    }
+    DropTarget::Window(zone.id, zone.drop_index(pointer.0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TabDrag;
+    use super::{resolve_drop, DropTarget, DropZone, TabDrag};
+
+    fn zone(id: u64, x: i32, y: i32, w: u32, h: u32) -> DropZone<u64> {
+        DropZone {
+            id,
+            origin: (x, y),
+            size: (w, h),
+            strip_h: 40.0,
+            centers: vec![x as f32 + 50.0, x as f32 + 150.0],
+        }
+    }
+
+    #[test]
+    fn a_release_back_in_the_source_keeps_the_previewed_order() {
+        let zones = [zone(1, 0, 0, 800, 600)];
+        assert_eq!(
+            resolve_drop((20, 20), 1, &zones),
+            DropTarget::Source,
+            "the live reorder already moved the tab"
+        );
+    }
+
+    #[test]
+    fn a_release_over_another_strip_names_its_slot() {
+        let zones = [zone(1, 0, 0, 800, 600), zone(2, 1000, 0, 800, 600)];
+        assert_eq!(
+            resolve_drop((1000, 20), 1, &zones),
+            DropTarget::Window(2, 0)
+        );
+        assert_eq!(
+            resolve_drop((1101, 20), 1, &zones),
+            DropTarget::Window(2, 1)
+        );
+        assert_eq!(
+            resolve_drop((1200, 39), 1, &zones),
+            DropTarget::Window(2, 2)
+        );
+    }
+
+    #[test]
+    fn a_release_over_another_grid_cancels() {
+        let zones = [zone(1, 0, 0, 800, 600), zone(2, 1000, 0, 800, 600)];
+        assert_eq!(resolve_drop((1100, 200), 1, &zones), DropTarget::Cancel);
+    }
+
+    #[test]
+    fn a_release_outside_every_window_detaches() {
+        let zones = [zone(1, 0, 0, 800, 600)];
+        assert_eq!(resolve_drop((5000, 5000), 1, &zones), DropTarget::Detach);
+    }
 
     #[test]
     fn a_press_that_stays_put_is_still_a_click() {

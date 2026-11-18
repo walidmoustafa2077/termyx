@@ -87,6 +87,16 @@ impl TabSlots {
         self.active = Some(self.ids.len() - 1);
     }
 
+    /// Puts `id` in the slot at `index`, making it the active slot.
+    ///
+    /// A tab can arrive from another window, so its place is chosen by the
+    /// drop rather than appended.
+    pub fn insert(&mut self, index: usize, id: SessionId) {
+        let index = index.min(self.ids.len());
+        self.ids.insert(index, id);
+        self.active = Some(index);
+    }
+
     // Only the tests count slots; production counts through `TabSet::len`.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -237,6 +247,17 @@ impl TabSet {
         self.slots.push(session.id);
         self.sessions.push(session);
         self.sessions.len() - 1
+    }
+
+    /// Puts `session` in the slot at `index` and shows it.
+    ///
+    /// A tab that arrives from another window keeps its id; only its place
+    /// among this window's tabs is new.
+    pub fn insert_active(&mut self, index: usize, session: Session) -> usize {
+        let index = index.min(self.sessions.len());
+        self.slots.insert(index, session.id);
+        self.sessions.insert(index, session);
+        index
     }
 
     // Counting tabs is what lets the keyboard shortcuts wrap; the mouse only
@@ -730,6 +751,27 @@ mod tests {
             Some(0),
             "the index follows the removal"
         );
+    }
+
+    #[test]
+    fn an_arriving_session_takes_its_slot_and_becomes_active() {
+        let mut tabs = TabSet::new();
+        let ids = SessionIds::new();
+        let a = ids.next();
+        tabs.push(test_session(a));
+        let b = ids.next();
+        tabs.push(test_session(b));
+        let arrived = ids.next();
+        tabs.insert_active(1, test_session(arrived));
+        assert_eq!(
+            tabs.iter_mut()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec![a, arrived, b],
+            "the session lands between the tabs it was dropped between"
+        );
+        assert_eq!(tabs.active().map(|session| session.id), Some(arrived));
+        assert_eq!(tabs.position(b), Some(2));
     }
 
     #[test]
