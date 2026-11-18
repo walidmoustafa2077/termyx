@@ -197,6 +197,20 @@ impl Session {
             profile: None,
         }
     }
+
+    /// Fits the parser and, for a shell tab, its child to a new grid.
+    ///
+    /// A tab that moves to another window is the same session in a window with
+    /// its own grid, so this runs on both paths: a resize and a move.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.terminal.resize(cols, rows);
+        let Some(pty) = self.pty.as_mut() else {
+            return;
+        };
+        if let Err(err) = pty.resize(cols as u16, rows as u16) {
+            tracing::warn!(%err, "pty resize failed");
+        }
+    }
 }
 
 /// The live sessions plus the slot bookkeeping.
@@ -790,6 +804,15 @@ mod tests {
             .expect("a shell session has a child")
             .resize(80, 24)
             .expect("resize the child");
+    }
+
+    #[test]
+    fn resize_fits_the_parser_to_the_new_grid() {
+        let mut session = test_session(1);
+        session.resize(120, 30);
+        let snapshot = session.terminal.snapshot();
+        assert_eq!(snapshot.cols, 120);
+        assert_eq!(snapshot.rows, 30);
     }
 
     #[test]

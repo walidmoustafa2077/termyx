@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use alacritty_terminal::term::TermMode;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
@@ -80,6 +80,10 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 /// thread watching the filesystem.
 const SETTINGS_POLL: Duration = Duration::from_millis(500);
 
+/// How far a window opened for a moved tab sits from its source, in physical
+/// pixels, so the new window reads as a new one instead of hiding the old.
+const CASCADE_OFFSET: i32 = 32;
+
 /// A control the pointer is resting on, with the label its tooltip would show.
 struct TooltipHover {
     text: String,
@@ -128,6 +132,9 @@ struct WindowState {
     /// The one id counter every window draws from, so a session that moves to
     /// another window keeps an id no new tab can take.
     ids: SessionIds,
+    /// A tab the context menu moved out of this window, waiting for the event
+    /// loop owner to open a window for it.
+    pending: Option<Session>,
     /// Strip geometry from the window width and every tab title. `None` until
     /// the first session exists.
     layout: Option<TabBarLayout>,
@@ -216,6 +223,18 @@ enum WindowOutcome {
     Exit,
 }
 
+/// Where a new window opens and how big it is.
+///
+/// The first window is centred at the configured size; a window opened for a
+/// tab that moved out copies its source's place and size instead.
+#[derive(Debug, Clone, Copy, Default)]
+struct WindowPlacement {
+    /// Top-left corner of the frame in physical pixels.
+    position: Option<PhysicalPosition<i32>>,
+    /// Client size in physical pixels.
+    size: Option<PhysicalSize<u32>>,
+}
+
 /// Event-loop owner: every open window plus the state they share.
 ///
 /// A window closes by leaving this map, so the process exits only when the
@@ -280,6 +299,19 @@ impl App {
 
     /// Applies what a window asked for after handling an event.
     fn settle(&mut self, event_loop: &ActiveEventLoop, id: WindowId, outcome: WindowOutcome) {
+        let mut outcome = outcome;
+        // A tab moved out needs a window before the source may close: the new
+        // window copies the source's place and size, so it must still exist.
+        let moved = self
+            .windows
+            .get_mut(&id)
+            .and_then(|state| state.pending.take());
+        if let Some(session) = moved {
+            if !self.open_moved_window(event_loop, id, session) {
+                // The tab is back in the source, so the source still has work.
+                outcome = WindowOutcome::Keep;
+            }
+        }
         match outcome {
             WindowOutcome::Keep => {}
             WindowOutcome::Close => {
@@ -298,6 +330,55 @@ impl App {
         if self.windows.is_empty() {
             event_loop.exit();
         }
+    }
+
+    /// Opens a window that shows `session`, which the window `source` gave up.
+    ///
+    /// Returns whether a window was opened. A failure puts the session back in
+    /// `source`, so a tab never disappears with its shell still running.
+    fn open_moved_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        source: WindowId,
+        session: Session,
+    ) -> bool {
+        let (config, placement) = {
+            let Some(from) = self.windows.get(&source) else {
+                return false;
+            };
+            let window = from.window.as_ref();
+            let position = window
+                .and_then(|window| window.inner_position().ok())
+                .map(|p| PhysicalPosition::new(p.x + CASCADE_OFFSET, p.y + CASCADE_OFFSET));
+            let size = window
+                .map(|window| window.inner_size())
+                .filter(|size| size.width > 0 && size.height > 0);
+            (from.config.clone(), WindowPlacement { position, size })
+        };
+        let mut state = WindowState::new(
+            config,
+            self.config_path.clone(),
+            self.start_directory.clone(),
+            self.proxy.clone(),
+            self.ids.clone(),
+        );
+        let mut seed = Some(session);
+        if let Err(err) = state.create_window(event_loop, placement, &mut seed) {
+            tracing::warn!(%err, "could not open the moved tab in a new window");
+            if let (Some(session), Some(from)) = (seed, self.windows.get_mut(&source)) {
+                from.restore_session(session);
+            }
+            return false;
+        }
+        let Some(id) = state.window_id() else {
+            return false;
+        };
+        if let Some(window) = &state.window {
+            window.focus_window();
+        }
+        self.active = Some(id);
+        self.windows.insert(id, state);
+        true
     }
 }
 
@@ -325,6 +406,7 @@ impl WindowState {
             renderer: None,
             tabs: TabSet::new(),
             ids,
+            pending: None,
             layout: None,
             menu: None,
             tab_menu: None,
@@ -565,8 +647,23 @@ impl WindowState {
                 }
                 false
             }
-            // Rows are disabled until panes and multi-window sessions exist.
-            TabCommand::Split | TabCommand::MoveToNewWindow => false,
+            // Panes do not exist yet, so splitting has nothing to split into.
+            TabCommand::Split => false,
+            TabCommand::MoveToNewWindow => {
+                let Some(session) = self.tabs.remove(index) else {
+                    return false;
+                };
+                self.pending = Some(session);
+                if self.tabs.is_empty() {
+                    // The owner opens the new window first, then drops this one.
+                    return true;
+                }
+                self.rebuild_layout();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                false
+            }
             TabCommand::MoveLeft => {
                 if index > 0 {
                     self.tabs.move_tab(index, index - 1);
@@ -760,7 +857,17 @@ impl WindowState {
         window.set_maximized(!window.is_maximized());
     }
 
-    fn create_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
+    /// Opens this window's OS window, surface, renderer, and first tab.
+    ///
+    /// `session` carries a tab another window gave up; it is taken only once
+    /// the window exists, so a failure leaves it with the caller to put back.
+    /// An empty seed spawns the configured default profile instead.
+    fn create_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        placement: WindowPlacement,
+        session: &mut Option<Session>,
+    ) -> anyhow::Result<()> {
         let monitor = event_loop.primary_monitor().map(|monitor| {
             let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
             (size.width.round() as u32, size.height.round() as u32)
@@ -769,7 +876,6 @@ impl WindowState {
             initial_window_size(self.config.window.width, self.config.window.height, monitor);
         let attributes = Window::default_attributes()
             .with_title(FALLBACK_TITLE)
-            .with_inner_size(LogicalSize::new(width, height))
             // Below this width the caption controls (3 × 46) and the `+`/`⌄`
             // pair (2 × 32) cannot all fit: the caption rects would overlap the
             // painted buttons and `hit` would return a control for a click on
@@ -780,6 +886,12 @@ impl WindowState {
             // end of `create_window`: a visible-but-empty window shows the
             // desktop for one frame, which reads as a flash on launch.
             .with_visible(false);
+        // A window opened for a moved tab copies its source's client size; the
+        // first window takes the configured logical size.
+        let attributes = match placement.size {
+            Some(size) => attributes.with_inner_size(size),
+            None => attributes.with_inner_size(LogicalSize::new(width, height)),
+        };
         // On Windows the strip is the title bar, so no caption row may sit
         // above it. Only Windows restores a resize frame for an undecorated
         // window; other targets keep their native decorations, because removing
@@ -805,9 +917,13 @@ impl WindowState {
         // that every other window on this desktop has.
         #[cfg(target_os = "windows")]
         platform::apply_rounded_frame(&window);
-        // Center on the primary monitor so the OS never places the window over
-        // the taskbar or past the screen edge.
-        if let Some(monitor) = event_loop.primary_monitor() {
+        // A window opened for a moved tab lands where its source is, offset so
+        // the cascade reads as a new window rather than a jump. The first
+        // window is centred on the primary monitor so the OS never places it
+        // over the taskbar or past the screen edge.
+        if let Some(position) = placement.position {
+            window.set_outer_position(position);
+        } else if let Some(monitor) = event_loop.primary_monitor() {
             let outer = window.outer_size();
             let monitor_pos = monitor.position();
             let monitor_size = monitor.size();
@@ -870,10 +986,22 @@ impl WindowState {
         self.cols = cols;
         self.rows = rows;
 
-        // The first tab opens the config's default profile, so a bare launch
-        // and a new tab started from the `+` button agree.
-        let profile = crate::profiles::default_profile_index(&self.config);
-        self.new_tab(profile)?;
+        if let Some(mut moved) = session.take() {
+            // The tab keeps its parser, scrollback, and child; only its grid
+            // and cell metrics belong to the window it now lives in.
+            if let Some(renderer) = self.renderer.as_ref() {
+                let (cell_w, cell_h) = (renderer.fonts().cell_w, renderer.fonts().cell_h);
+                moved.terminal.set_cell_size(cell_w, cell_h);
+            }
+            moved.resize(cols, rows);
+            self.tabs.push(moved);
+            self.rebuild_layout();
+        } else {
+            // The first tab opens the config's default profile, so a bare launch
+            // and a new tab started from the `+` button agree.
+            let profile = crate::profiles::default_profile_index(&self.config);
+            self.new_tab(profile)?;
+        }
 
         // Paint the first frame before the window is shown, so the desktop is
         // never visible through it and the tab strip is already in place when it
@@ -924,13 +1052,7 @@ impl WindowState {
             return false;
         }
         for session in self.tabs.iter_mut() {
-            session.terminal.resize(cols, rows);
-            let Some(pty) = session.pty.as_mut() else {
-                continue;
-            };
-            if let Err(err) = pty.resize(cols as u16, rows as u16) {
-                tracing::warn!(%err, "pty resize failed");
-            }
+            session.resize(cols, rows);
         }
         self.cols = cols;
         self.rows = rows;
@@ -1019,6 +1141,18 @@ impl WindowState {
     /// A failed spawn leaves the window as it was; the caller decides whether
     /// that is fatal (the first tab) or a warning (a later click). The returned
     /// id names the session so a duplicate can copy its metadata.
+    /// Puts a tab back after the window opened for it could not be created.
+    ///
+    /// The source window is still open and never hid its grid, so restoring the
+    /// tab only needs a new layout; the shell kept running throughout.
+    fn restore_session(&mut self, session: Session) {
+        self.tabs.push(session);
+        self.rebuild_layout();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn new_tab(&mut self, profile: usize) -> anyhow::Result<SessionId> {
         let profiles = crate::profiles::profiles(&self.config);
         if profiles.is_empty() {
@@ -4334,7 +4468,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.proxy.clone(),
             self.ids.clone(),
         );
-        if let Err(err) = state.create_window(event_loop) {
+        if let Err(err) = state.create_window(event_loop, WindowPlacement::default(), &mut None) {
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
                 .set_title("Termyx")
@@ -6765,13 +6899,18 @@ mod tests {
         assert_eq!(command_of(&items, "Close tab"), Some(TabCommand::CloseTab));
 
         // Disabled contract for the left edge of two tabs.
-        for label in ["Split tab", "Move tab to new window", "Move left"] {
+        for label in ["Split tab", "Move left"] {
             assert!(
                 !enabled(&items, label),
                 "`{label}` must be disabled at index 0 of 2"
             );
         }
-        for label in ["Move right", "Close tabs to right", "Close other tabs"] {
+        for label in [
+            "Move right",
+            "Close tabs to right",
+            "Close other tabs",
+            "Move tab to new window",
+        ] {
             assert!(
                 enabled(&items, label),
                 "`{label}` must be enabled at index 0 of 2"

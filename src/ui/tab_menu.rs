@@ -45,10 +45,9 @@ pub fn rows(index: usize, total: usize, can_duplicate: bool, colors: &[Rgb]) -> 
             "Move tab",
             GLYPH_MOVE_TAB,
             vec![
-                // The reference keeps splitting and new-window moves visible
-                // but disabled until their own plans exist.
-                ContextItem::action("Move tab to new window", "", TabCommand::MoveToNewWindow)
-                    .disabled(),
+                // Splitting stays disabled until panes exist; moving a tab out
+                // only needs another window, which the shell can open.
+                ContextItem::action("Move tab to new window", "", TabCommand::MoveToNewWindow),
                 move_right,
                 move_left,
             ],
@@ -146,11 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_rows_ship_visible_but_disabled() {
+    fn only_the_split_row_ships_disabled() {
         let colors = [Rgb::new(1, 2, 3); 8];
         let rows = tab_menu::rows(1, 3, true, &colors);
         assert!(!find(&rows, "Split tab").enabled);
-        assert!(!find(&rows, "Move tab to new window").enabled);
+        assert!(
+            find(&rows, "Move tab to new window").enabled,
+            "moving a tab out needs no pane support"
+        );
     }
 
     #[test]
