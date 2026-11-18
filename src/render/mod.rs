@@ -180,6 +180,17 @@ fn corner_coverage(
     hits as f32 / (CORNER_SAMPLES * CORNER_SAMPLES) as f32
 }
 
+/// The optional paints layered over the grid, grouped so the draw call keeps a
+/// readable argument list.
+#[derive(Clone, Copy, Default)]
+pub struct Overlays<'a> {
+    pub selection: Option<&'a Selection>,
+    pub find: Option<&'a FindState>,
+    pub spellcheck: &'a [crate::spellcheck::Misspelling],
+    pub link: Option<&'a crate::links::LinkSpan>,
+    pub images: &'a [crate::graphics::Placement],
+}
+
 impl Renderer {
     /// Builds a renderer with a one-pixel surface.
     ///
@@ -246,20 +257,31 @@ impl Renderer {
         selection: Option<&Selection>,
         find: Option<&FindState>,
     ) {
-        self.draw_with_spellcheck(snapshot, maps, selection, find, &[], None);
+        self.draw_with_spellcheck(
+            snapshot,
+            maps,
+            Overlays {
+                selection,
+                find,
+                ..Overlays::default()
+            },
+        );
     }
 
-    /// Draws the grid, then the spellcheck underlines for `spans` and the
-    /// underline of the hovered `link`, if any.
+    /// Draws the grid, then the optional overlays on top of it.
     pub fn draw_with_spellcheck(
         &mut self,
         snapshot: &GridSnapshot,
         maps: &[VisualMap],
-        selection: Option<&Selection>,
-        find: Option<&FindState>,
-        spellcheck: &[crate::spellcheck::Misspelling],
-        link: Option<&crate::links::LinkSpan>,
+        overlays: Overlays<'_>,
     ) {
+        let Overlays {
+            selection,
+            find,
+            spellcheck,
+            link,
+            images,
+        } = overlays;
         self.shape_cache.clear();
         self.draw_background();
         let cell_w = self.fonts.cell_w as f32;
@@ -378,6 +400,9 @@ impl Renderer {
 
         self.draw_spellcheck_underlines(snapshot, maps, spellcheck, cell_w, cell_h);
         self.draw_links(snapshot, maps, link, cell_w, cell_h);
+        // A sixel image is opaque and owns the cells it covers, so it goes on
+        // top of the text the application drew there.
+        self.draw_images(snapshot, images, cell_w, cell_h);
 
         if let Some(geom) = scrollbar::geometry(
             self.pixmap.width(),
@@ -733,6 +758,34 @@ impl Renderer {
                     ink,
                 );
             }
+        }
+    }
+
+    /// Paints sixel images at the cell that owned the cursor when they arrived,
+    /// so each one scrolls with the text around it.
+    fn draw_images(
+        &mut self,
+        snapshot: &GridSnapshot,
+        images: &[crate::graphics::Placement],
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        if images.is_empty() {
+            return;
+        }
+        let width = self.pixmap.width() as usize;
+        let padding = self.padding as f32;
+        let top = self.grid_top();
+        let rows = snapshot.rows as i32;
+        let offset = snapshot.display_offset as i32;
+        for placement in images {
+            let row = placement.line + offset;
+            if row < 0 || row >= rows {
+                continue;
+            }
+            let x = (padding + placement.col as f32 * cell_w).round() as i32;
+            let y = (top + row as f32 * cell_h).round() as i32;
+            crate::graphics::blit(self.pixmap.data_mut(), width, &placement.image, x, y);
         }
     }
 
@@ -2719,7 +2772,14 @@ mod tests {
         spans: &[crate::spellcheck::Misspelling],
     ) {
         resize_and_draw(renderer, snapshot, |renderer, maps| {
-            renderer.draw_with_spellcheck(snapshot, maps, None, None, spans, None);
+            renderer.draw_with_spellcheck(
+                snapshot,
+                maps,
+                Overlays {
+                    spellcheck: spans,
+                    ..Overlays::default()
+                },
+            );
         });
     }
 
@@ -2859,7 +2919,7 @@ mod tests {
         let mut renderer = default_renderer();
         let snapshot = text_snapshot("https://example.com");
         resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
-            renderer.draw_with_spellcheck(&snapshot, maps, None, None, &[], None);
+            renderer.draw_with_spellcheck(&snapshot, maps, Overlays::default());
         });
         let resting = renderer.pixmap.data().to_vec();
         let span = crate::links::LinkSpan {
@@ -2869,7 +2929,14 @@ mod tests {
             uri: "https://example.com".to_string(),
         };
         resize_and_draw(&mut renderer, &snapshot, |renderer, maps| {
-            renderer.draw_with_spellcheck(&snapshot, maps, None, None, &[], Some(&span));
+            renderer.draw_with_spellcheck(
+                &snapshot,
+                maps,
+                Overlays {
+                    link: Some(&span),
+                    ..Overlays::default()
+                },
+            );
         });
         assert_ne!(
             renderer.pixmap.data(),
