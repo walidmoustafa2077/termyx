@@ -47,6 +47,7 @@ use crate::ui::spellcheck_menu::{
     MenuItem as SpellcheckItem, SpellcheckMenu, SpellcheckMenuLayout,
 };
 use crate::ui::tab_bar::{Rect, StripHover, TabBarLayout, TabHit, TAB_STRIP_HEIGHT};
+use crate::ui::tab_drag::TabDrag;
 use crate::ui::tooltip::{Tooltip, TOOLTIP_DELAY_MS, TOOLTIP_TEXT_PX};
 use crate::visual::VisualMap;
 
@@ -174,6 +175,8 @@ struct WindowState {
     /// belong to the grid: a window drag must never seed a word or line
     /// selection, and a grid click must never toggle maximise.
     last_strip_click: StripClickChain,
+    /// A tab the mouse is dragging across the strip.
+    tab_drag: Option<TabDrag>,
     // Button forwarded to a mouse-reporting application, if any. Local text
     // selection uses `mouse_down` instead.
     app_mouse_button: Option<input::MouseButton>,
@@ -423,6 +426,7 @@ impl WindowState {
             click_count: 0,
             last_click: None,
             last_strip_click: None,
+            tab_drag: None,
             app_mouse_button: None,
             wheel_remainder: 0.0,
             scrollbar_drag: false,
@@ -2592,8 +2596,44 @@ impl WindowState {
         }
     }
 
+    /// Steps a tab drag to `x`, reordering the strip once the pointer has moved
+    /// far enough to mean a drag rather than a click.
+    fn drag_tab(&mut self, x: f64) {
+        let Some(drag) = self.tab_drag.as_mut() else {
+            return;
+        };
+        if !drag.step(self.cursor_pos, CLICK_DISTANCE) {
+            return;
+        }
+        let Some(from) = self.tabs.position(drag.session) else {
+            return;
+        };
+        let Some(to) = self
+            .layout
+            .as_ref()
+            .map(|layout| layout.drop_index(x as f32))
+        else {
+            return;
+        };
+        // `drop_index` may point past the last tab, which is the same slot as
+        // the last one once the dragged tab has left its own place.
+        let to = to.min(self.tabs.len().saturating_sub(1));
+        if self.tabs.move_tab(from, to) {
+            self.rebuild_layout();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     fn on_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_pos = (x, y);
+        if self.tab_drag.is_some() {
+            // A grabbed tab owns the pointer: motion reorders the strip and
+            // nothing beneath it reacts.
+            self.drag_tab(x);
+            return;
+        }
         if self.spellcheck_menu.is_some() {
             // The suggestion menu is the topmost layer while it is open: motion
             // steps its hover and nothing beneath the panel reacts.
@@ -2994,6 +3034,13 @@ impl WindowState {
                             self.rename = None;
                             self.close_find();
                             self.rebuild_layout();
+                            if button == MouseButton::Left {
+                                // The press already selected the tab; a drag
+                                // from here reorders it without a second press.
+                                if let Some(session) = self.tabs.active() {
+                                    self.tab_drag = Some(TabDrag::new(session.id, self.cursor_pos));
+                                }
+                            }
                         }
                         StripAction::Close(index) => return self.close_tab(index),
                         StripAction::NewTab => {
@@ -3228,6 +3275,10 @@ impl WindowState {
             // Any release ends the press, so the chrome's claim on it dies here
             // whichever branch handles the event.
             let from_chrome = std::mem::take(&mut self.press_in_chrome);
+            // The release that ends the press ends any drag it started.
+            if button == MouseButton::Left {
+                self.tab_drag = None;
+            }
             if self.scrollbar_drag && button == MouseButton::Left {
                 self.scrollbar_drag = false;
                 let (x, y) = self.cursor_pos;
@@ -4413,6 +4464,7 @@ impl WindowState {
                     // not still suppress copy-on-select in the grid.
                     self.press_in_chrome = false;
                     self.scrollbar_drag = false;
+                    self.tab_drag = None;
                     self.close_tab_menu();
                     // The panel's hover and the cursor it targets are gone with
                     // the focus; a return click must re-derive them.

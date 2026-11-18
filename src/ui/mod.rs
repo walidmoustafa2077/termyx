@@ -9,5 +9,6 @@ pub mod menu;
 pub mod rename;
 pub mod spellcheck_menu;
 pub mod tab_bar;
+pub mod tab_drag;
 pub mod tab_menu;
 pub mod tooltip;

@@ -301,6 +301,21 @@ impl TabBarLayout {
         }
     }
 
+    /// The slot a tab dropped at `x` should take: the number of tab bodies
+    /// whose midpoint lies left of the pointer.
+    ///
+    /// Counting midpoints rather than edges is what makes the live reorder
+    /// settle: a tab only changes place once the pointer passes the middle of
+    /// its neighbour, so a pointer resting at a boundary does not flicker.
+    /// The result can be `tabs.len()`, which a caller clamps like any other
+    /// insertion index.
+    pub fn drop_index(&self, x: f32) -> usize {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.body.x + tab.body.w * 0.5 < x)
+            .count()
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
         if y < 0.0 || y >= self.strip_h {
             return None;
@@ -389,6 +404,20 @@ mod tests {
         let tab_end = layout.tabs[0].rect.x + layout.tabs[0].rect.w;
         assert!(layout.plus.x >= tab_end);
         assert!(layout.chevron.x > layout.plus.x);
+    }
+
+    #[test]
+    fn a_drop_index_counts_the_midpoints_left_of_the_pointer() {
+        let layout = TabBarLayout::new(1200.0, TAB_STRIP_HEIGHT, &["a", "b", "c"]);
+        let centres: Vec<f32> = layout
+            .tabs
+            .iter()
+            .map(|tab| tab.body.x + tab.body.w * 0.5)
+            .collect();
+        assert_eq!(layout.drop_index(0.0), 0);
+        assert_eq!(layout.drop_index(centres[0] + 1.0), 1);
+        assert_eq!(layout.drop_index(centres[1] + 1.0), 2);
+        assert_eq!(layout.drop_index(1200.0), 3);
     }
 
     #[test]
